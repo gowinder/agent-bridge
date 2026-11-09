@@ -1,0 +1,20 @@
+{
+  "name": "@agent-bridge/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/copy-wasm.mjs && vite",
+    "build": "node scripts/copy-wasm.mjs && vite build",
+    "preview": "vite preview",
+    "check": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@agent-bridge/crypto": "*",
+    "@agent-bridge/protocol": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^8.3.7"
+  }
+}

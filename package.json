@@ -1,0 +1,22 @@
+{
+  "name": "agent-bridge",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "check": "tsc -b && npm run check -w @agent-bridge/web",
+    "web": "npm run dev -w @agent-bridge/web",
+    "relay:dev": "npm --workspace @agent-bridge/relay run dev",
+    "relay:deploy": "npm --workspace @agent-bridge/relay run deploy",
+    "bridge": "node apps/bridge/dist/main.js"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250926.0",
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}

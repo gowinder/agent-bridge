@@ -1,0 +1,2266 @@
+import type {
+  AppInfo,
+  AppListResult,
+  ContextUsage,
+  DeviceSummary,
+  FileUploadBeginResult,
+  FileUploadChunkResult,
+  FileUploadFinishResult,
+  HostInfoResult,
+  MessageAttachment,
+  MessageListResult,
+  MessageRecord,
+  MessageSendResult,
+  Method,
+  ProjectInfo,
+  ProjectListResult,
+  SessionListResult,
+  SessionSummary,
+  TransferCommitResult,
+  TransferPrepareResult,
+} from "@agent-bridge/protocol";
+import { expireLabel, listDevices, removeDevice, type StoredDevice } from "./credentials.js";
+import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
+import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
+import type { PeerClient } from "./peer.js";
+import { RelayError, type RelayConnection } from "./relay.js";
+import "./style.css";
+
+const RELAY_ERRORS: Record<string, string> = {
+  invite_expired: "邀请已过期，请在 Mac 上重新生成配对链接。",
+  invite_used: "邀请已被使用，请在 Mac 上重新生成配对链接。",
+  device_expired: "设备授权已到期，请重新配对。",
+  device_revoked: "设备已被撤销，请重新配对。",
+  bridge_offline: "Mac 上的 Bridge 没有连接中继，请确认它正在运行。",
+  channel_in_use: "连接通道已被占用，请稍后重试。",
+  invalid_credential: "凭据无效，请重新配对。",
+  not_found: "找不到该房间，请重新配对。",
+};
+
+function messageOf(error: unknown): string {
+  if (error instanceof RelayError) return RELAY_ERRORS[error.code] ?? `中继拒绝：${error.message}`;
+  return error instanceof Error ? error.message : String(error);
+}
+
+function el<K extends keyof HTMLElementTagNameMap>(
+  tag: K,
+  props: { className?: string; text?: string; attrs?: Record<string, string> } = {},
+  children: Array<Node | string> = [],
+): HTMLElementTagNameMap[K] {
+  const node = document.createElement(tag);
+  if (props.className) node.className = props.className;
+  if (props.text !== undefined) node.textContent = props.text;
+  for (const [name, value] of Object.entries(props.attrs ?? {})) node.setAttribute(name, value);
+  for (const child of children) node.append(child);
+  return node;
+}
+
+function button(label: string, onClick: () => void, className = "btn"): HTMLButtonElement {
+  const node = el("button", { className, text: label, attrs: { type: "button" } });
+  node.addEventListener("click", onClick);
+  return node;
+}
+
+const ICONS = {
+  chevron:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>',
+  back:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>',
+  share:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8"/><path d="m4.8 5.2 3.2-3.2 3.2 3.2"/><path d="M3 9.5v3.1c0 .8.6 1.4 1.4 1.4h7.2c.8 0 1.4-.6 1.4-1.4V9.5"/></svg>',
+  close:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg>',
+  device:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="7.6" rx="1.4"/><path d="M5.6 13.2h4.8"/></svg>',
+  swap:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h9.5"/><path d="m10 3 2.5 2.5L10 8"/><path d="M13 10.5H3.5"/><path d="M6 8 3.5 10.5 6 13"/></svg>',
+  clip:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.9 4.6 6 9.5a2.1 2.1 0 0 0 3 3l4.9-4.9a3.5 3.5 0 0 0-5-5L4.2 7.3a4.9 4.9 0 0 0 6.9 6.9l3.1-3.1"/></svg>',
+  image:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="3.5" width="11" height="9" rx="1.6"/><circle cx="6" cy="7" r="1.1"/><path d="m3.2 11.4 3.1-3 2.2 2.1 2-1.9 2.4 2.3"/></svg>',
+  file:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg>',
+  pencil:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L6 12.8l-3.2.8.8-3.2z"/></svg>',
+  clock:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg>',
+  refresh:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7"/><path d="M13.4 2.6v2.9h-2.9"/></svg>',
+  history:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 8a5.2 5.2 0 1 0 1.6-3.7"/><path d="M2.6 2.6v2.9h2.9"/><path d="M8 5.4V8l1.9 1.1"/></svg>',
+} as const;
+
+function backButton(onClick: () => void): HTMLButtonElement {
+  const node = button("", onClick, "back-btn");
+  node.append(icon("back"), el("span", { className: "back-label", text: "返回" }));
+  node.setAttribute("aria-label", "返回");
+  return node;
+}
+
+function icon(name: keyof typeof ICONS, className = "icon"): HTMLElement {
+  const span = el("span", { className });
+  span.innerHTML = ICONS[name];
+  return span;
+}
+
+const root = document.querySelector<HTMLDivElement>("#app");
+if (!root) throw new Error("缺少 #app 容器");
+const app: HTMLDivElement = root;
+
+let active: PeerClient | null = null;
+let generation = 0;
+let retryTimer: number | null = null;
+let pollTimer: number | null = null;
+let renderToken = 0;
+/** Lets a soft reconnect refresh the open chat in place instead of re-rendering it. */
+let chatResumeKey: string | null = null;
+let chatResume: (() => void) | null = null;
+
+let progressBar: HTMLElement | null = null;
+let reconnectMessage: string | null = null;
+
+function progressStart(): void {
+  if (!progressBar) {
+    progressBar = el("div", { className: "progress-bar", attrs: { role: "progressbar", "aria-label": "正在加载" } });
+    document.body.append(progressBar);
+  }
+  progressBar.classList.add("active");
+}
+
+function progressDone(): void {
+  progressBar?.classList.remove("active");
+}
+
+function reconnectChip(): HTMLElement {
+  return el("span", { className: "reconnect-chip", attrs: { role: "status", "aria-live": "polite" } }, [
+    el("span", { className: "reconnect-dot" }),
+    el("span", { className: "reconnect-text" }),
+  ]);
+}
+
+function setReconnecting(message: string | null): void {
+  reconnectMessage = message;
+  document.documentElement.classList.toggle("offline", message !== null);
+  const actions = app.querySelector<HTMLElement>(".topbar-actions");
+  if (!actions) return;
+  const existing = actions.querySelector<HTMLElement>(".reconnect-chip");
+  if (message === null) {
+    existing?.remove();
+    return;
+  }
+  const chip = existing ?? reconnectChip();
+  if (!existing) actions.prepend(chip);
+  const text = chip.querySelector(".reconnect-text");
+  if (text) text.textContent = message;
+}
+
+interface ConnectedState {
+  device: StoredDevice;
+  info: HostInfoResult;
+  devices: DeviceSummary[];
+}
+let connected: ConnectedState | null = null;
+
+interface Snapshot {
+  apps: AppInfo[];
+  projects: ProjectInfo[];
+  sessions: SessionSummary[];
+  note?: string;
+}
+let snapshot: Snapshot | null = null;
+
+type Route =
+  | { level: "clients" }
+  | { level: "projects"; appId: string }
+  | { level: "sessions"; appId: string; projectId: string }
+  | { level: "chat"; appId: string; projectId: string; sessionId: string }
+  | { level: "devices" };
+
+function parseRoute(): Route {
+  const raw = location.hash.replace(/^#\/?/, "");
+  const parts = raw.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  if (parts[0] === "devices") return { level: "devices" };
+  if (parts[0] !== "clients") return { level: "clients" };
+  const appId = parts[1];
+  if (!appId) return { level: "clients" };
+  const projectId = parts[2] === "projects" ? parts[3] : undefined;
+  if (!projectId) return { level: "projects", appId };
+  const sessionId = parts[4] === "sessions" ? parts[5] : undefined;
+  if (!sessionId) return { level: "sessions", appId, projectId };
+  return { level: "chat", appId, projectId, sessionId };
+}
+
+function hashFor(route: Route): string {
+  switch (route.level) {
+    case "clients":
+      return "#/clients";
+    case "devices":
+      return "#/devices";
+    case "projects":
+      return `#/clients/${encodeURIComponent(route.appId)}`;
+    case "sessions":
+      return `#/clients/${encodeURIComponent(route.appId)}/projects/${encodeURIComponent(route.projectId)}`;
+    case "chat":
+      return `#/clients/${encodeURIComponent(route.appId)}/projects/${encodeURIComponent(route.projectId)}/sessions/${encodeURIComponent(route.sessionId)}`;
+  }
+}
+
+function navigate(route: Route, replace = false): void {
+  const hash = hashFor(route);
+  if (location.hash === hash) {
+    void renderRoute();
+    return;
+  }
+  if (replace) {
+    history.replaceState(null, "", `${location.pathname}${location.search}${hash}`);
+    void renderRoute();
+    return;
+  }
+  location.hash = hash;
+}
+
+function stopActive(): void {
+  generation += 1;
+  if (retryTimer !== null) {
+    clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+  stopPolling();
+  active?.stop();
+  active = null;
+  connected = null;
+  snapshot = null;
+}
+
+function stopPolling(): void {
+  if (pollTimer !== null) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function showHome(): void {
+  stopActive();
+  chatResume = null;
+  chatResumeKey = null;
+  progressDone();
+  setReconnecting(null);
+  app.replaceChildren(renderHome());
+}
+
+function showPairError(message: string): void {
+  const box = el("div", { className: "notice error", text: message });
+  const retry = button("重新粘贴配对链接", showHome, "btn secondary");
+  app.replaceChildren(
+    el("main", { className: "page narrow" }, [
+      el("p", { className: "eyebrow", text: "配对" }),
+      el("h1", { className: "display", text: "配对失败" }),
+      box,
+      el("div", { className: "actions" }, [retry]),
+    ]),
+  );
+}
+
+function renderHome(): HTMLElement {
+  const devices = listDevices();
+  const page = el("main", { className: "page narrow" }, [
+    el("header", { className: "hero" }, [
+      el("p", { className: "eyebrow", text: "Agent Bridge" }),
+      el("h1", { className: "display", text: "桌面会话，从这里接管" }),
+      el("p", {
+        className: "lede",
+        text: "在浏览器里浏览 Mac 上 Claude Code 与 ChatGPT 的工程与会话，并把任意一段消息转发到另一个客户端。",
+      }),
+    ]),
+  ]);
+
+  const section = el("section", { className: "panel" });
+  section.append(el("h2", { className: "panel-title", text: "已配对设备" }));
+  if (devices.length === 0) {
+    section.append(
+      emptyState("还没有配对设备", "在 Mac 上运行 agent-bridge invite，把生成的配对链接粘贴到下方。"),
+    );
+  } else {
+    const list = el("ul", { className: "device-list" });
+    for (const device of devices) list.append(renderDeviceRow(device));
+    section.append(list);
+  }
+  page.append(section);
+
+  const form = el("form", { className: "panel" });
+  form.append(el("h2", { className: "panel-title", text: "使用配对链接" }));
+  form.append(
+    el("p", { className: "hint", text: "配对秘密只在本机内存中使用，不会发送给中继以外的服务。" }),
+  );
+  const input = el("input", {
+    className: "input",
+    attrs: { type: "text", placeholder: "粘贴 http…/#/pair?relay=…&room=…&invite=…", autocomplete: "off", spellcheck: "false" },
+  });
+  const error = el("p", { className: "notice error hidden" });
+  form.append(
+    input,
+    error,
+    el("div", { className: "actions" }, [
+      button("开始配对", () => {
+        const link = parsePairingInput(input.value);
+        if (!link) {
+          error.textContent = "无法识别配对链接";
+          error.classList.remove("hidden");
+          return;
+        }
+        void beginPairing(link);
+      }, "btn primary"),
+    ]),
+  );
+  form.addEventListener("submit", (event) => event.preventDefault());
+  page.append(form);
+
+  const auto = devices.length === 1 ? devices[0]! : null;
+  if (auto) {
+    const status = el("p", { className: "hint", text: "正在连接已配对设备…" });
+    page.append(status);
+    void connectAndShow(auto).catch((error: unknown) => {
+      status.textContent = messageOf(error);
+    });
+  }
+  return page;
+}
+
+function renderDeviceRow(device: StoredDevice): HTMLElement {
+  const status = el("span", { className: "pill", text: expireLabel(device.expiresAt) });
+  return el("li", { className: "device-row" }, [
+    el("div", { className: "row-main" }, [
+      el("strong", { text: device.bridge?.name ? `${device.bridge.name}` : device.name }),
+      el("span", { className: "meta", text: `${device.name} · ${new URL(device.relayUrl).host}` }),
+    ]),
+    el("div", { className: "row-actions" }, [
+      status,
+      button("连接", () => {
+        void connectAndShow(device).catch((error: unknown) => {
+          status.textContent = messageOf(error);
+          status.classList.add("error");
+        });
+      }, "btn small"),
+      button("移除", () => {
+        removeDevice(device.relayUrl, device.roomId);
+        showHome();
+      }, "btn ghost small"),
+    ]),
+  ]);
+}
+
+async function beginPairing(link: PairingLink): Promise<void> {
+  app.replaceChildren(
+    el("main", { className: "page narrow" }, [
+      el("p", { className: "eyebrow", text: "配对" }),
+      el("h1", { className: "display", text: "正在建立加密通道" }),
+      el("p", { className: "lede", text: "通过中继与 Mac 上的 Bridge 握手，稍候…" }),
+    ]),
+  );
+  let challenge: PairingChallenge;
+  try {
+    challenge = await startPairing(link);
+  } catch (error) {
+    showPairError(messageOf(error));
+    return;
+  }
+  showConfirm(challenge);
+}
+
+function showConfirm(challenge: PairingChallenge): void {
+  const nameInput = el("input", {
+    className: "input",
+    attrs: { type: "text", value: defaultDeviceName(), maxlength: "64" },
+  });
+  const error = el("p", { className: "notice error hidden" });
+  const confirm = button("确认码一致，完成配对", () => {
+    const name = nameInput.value.trim();
+    if (!name) {
+      error.textContent = "请输入设备名称";
+      error.classList.remove("hidden");
+      return;
+    }
+    confirm.disabled = true;
+    void finishPairing(challenge, name)
+      .then(() => showHome())
+      .catch((failure: unknown) => {
+        confirm.disabled = false;
+        error.textContent = messageOf(failure);
+        error.classList.remove("hidden");
+      });
+  }, "btn primary");
+  const cancel = button("取消", () => {
+    challenge.connection.close();
+    showHome();
+  }, "btn secondary");
+
+  app.replaceChildren(
+    el("main", { className: "page narrow" }, [
+      el("p", { className: "eyebrow", text: "配对" }),
+      el("h1", { className: "display", text: "核对确认码" }),
+      el("p", { className: "lede", text: "Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。" }),
+      el("div", { className: "code", text: challenge.confirmCode }),
+      el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
+      error,
+      el("div", { className: "actions" }, [confirm, cancel]),
+    ]),
+  );
+}
+
+function defaultDeviceName(): string {
+  const agent = navigator.userAgent.match(/(Firefox|Edg|Chrome|Safari)\/[\d.]+/);
+  return agent ? `浏览器 · ${agent[1]}` : "浏览器";
+}
+
+async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> {
+  const gen = generation;
+  const soft = connected !== null;
+  if (soft) {
+    progressStart();
+    setReconnecting(attempt <= 1 ? "连接已断开，正在重连…" : `第 ${attempt} 次重连中…`);
+  } else {
+    app.replaceChildren(
+      el("main", { className: "page narrow" }, [
+        el("p", { className: "eyebrow", text: "连接" }),
+        el("h1", { className: "display", text: attempt === 0 ? "正在连接" : "正在重连" }),
+        el("p", { className: "lede", text: "正在与 Mac 建立加密通道…" }),
+      ]),
+    );
+  }
+  let opened: { client: PeerClient; connection: RelayConnection };
+  try {
+    opened = await connectDevice(device);
+  } catch (error) {
+    if (gen !== generation) return;
+    if (attempt >= 5) {
+      progressDone();
+      setReconnecting("重连失败，30 秒后继续重试…");
+      throw error;
+    }
+    scheduleRetry(device, attempt + 1, messageOf(error));
+    return;
+  }
+  if (gen !== generation) {
+    opened.client.stop();
+    return;
+  }
+  stopActive();
+  active = opened.client;
+  const infoResponse = await opened.client.request("host.info");
+  const devicesResponse = await opened.client.request("device.list");
+  if (!infoResponse.ok || !devicesResponse.ok) {
+    throw new Error(infoResponse.error?.message ?? devicesResponse.error?.message ?? "读取主机信息失败");
+  }
+  connected = {
+    device,
+    info: infoResponse.result as HostInfoResult,
+    devices: (devicesResponse.result as { devices: DeviceSummary[] }).devices,
+  };
+  snapshot = null;
+  if (!soft && !location.hash.startsWith("#/clients") && !location.hash.startsWith("#/devices")) {
+    history.replaceState(null, "", `${location.pathname}${location.search}#/clients`);
+  }
+  await renderRoute(soft);
+  progressDone();
+  setReconnecting(null);
+  void opened.connection.closed().then((info) => {
+    if (gen + 1 !== generation || active !== opened.client) return;
+    active = null;
+    stopPolling();
+    if (info.code === 4003) {
+      showHome();
+      return;
+    }
+    setReconnecting("连接已断开，正在重连…");
+    scheduleRetry(device, 1);
+  });
+}
+
+function scheduleRetry(device: StoredDevice, attempt: number, message?: string): void {
+  const gen = generation;
+  const delay = Math.min(1000 * 2 ** (attempt - 1), 30_000);
+  if (connected) {
+    setReconnecting(message ?? `连接已断开，${Math.round(delay / 1000)} 秒后重连…`);
+  } else {
+    progressDone();
+    app.replaceChildren(
+      el("main", { className: "page narrow" }, [
+        el("p", { className: "eyebrow", text: "连接" }),
+        el("h1", { className: "display", text: "连接已断开" }),
+        el("p", { className: "lede", text: message ?? `加密通道中断，${Math.round(delay / 1000)} 秒后重连…` }),
+      ]),
+    );
+  }
+  retryTimer = window.setTimeout(() => {
+    retryTimer = null;
+    if (gen !== generation) return;
+    void connectAndShow(device, attempt).catch((error: unknown) => {
+      if (gen !== generation) return;
+      scheduleRetry(device, Math.min(attempt + 1, 5), messageOf(error));
+    });
+  }, delay);
+}
+
+async function call<T>(method: Method, params?: unknown, timeoutMs = 20_000): Promise<T> {
+  if (!active) throw new Error("连接已断开");
+  const response = await active.request(method, params, timeoutMs);
+  if (!response.ok) throw new Error(response.error?.message ?? `${method} 失败`);
+  return response.result as T;
+}
+
+function blobBase64(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result ?? "");
+      const comma = text.indexOf(",");
+      resolve(comma >= 0 ? text.slice(comma + 1) : "");
+    };
+    reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function uploadAttachment(
+  sessionId: string,
+  file: File,
+  onProgress: (ratio: number) => void,
+): Promise<MessageAttachment> {
+  const begin = await call<FileUploadBeginResult>(
+    "file.upload.begin",
+    { sessionId, name: file.name, mime: file.type || "application/octet-stream", size: file.size },
+    30_000,
+  );
+  const chunkSize = Math.max(1, begin.chunkSize);
+  let index = 0;
+  for (let offset = 0; offset < file.size; offset += chunkSize) {
+    const slice = file.slice(offset, Math.min(offset + chunkSize, file.size));
+    const data = await blobBase64(slice);
+    await call<FileUploadChunkResult>(
+      "file.upload.chunk",
+      { uploadId: begin.uploadId, index, data },
+      60_000,
+    );
+    index += 1;
+    onProgress(Math.min(1, (offset + slice.size) / file.size));
+  }
+  const done = await call<FileUploadFinishResult>("file.upload.finish", { uploadId: begin.uploadId }, 30_000);
+  onProgress(1);
+  return { name: done.name, mime: done.mime, size: done.size, path: done.path, kind: done.kind };
+}
+
+const COMPOSER_DRAFTS_KEY = "ab.drafts";
+
+function readDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(COMPOSER_DRAFTS_KEY);
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const out: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === "string" && value !== "") out[key] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function draftFor(sessionId: string): string {
+  return readDrafts()[sessionId] ?? "";
+}
+
+function saveDraft(sessionId: string, text: string): void {
+  const drafts = readDrafts();
+  if (text) drafts[sessionId] = text;
+  else delete drafts[sessionId];
+  try {
+    localStorage.setItem(COMPOSER_DRAFTS_KEY, JSON.stringify(drafts));
+  } catch {
+    // storage unavailable; the draft still lives in the textarea
+  }
+}
+
+const COMPOSER_COLLAPSED_KEY = "ab.composerCollapsed";
+
+function readComposerCollapsed(): boolean {
+  try {
+    return localStorage.getItem(COMPOSER_COLLAPSED_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeComposerCollapsed(collapsed: boolean): void {
+  try {
+    localStorage.setItem(COMPOSER_COLLAPSED_KEY, collapsed ? "1" : "0");
+  } catch {
+    // storage unavailable; collapse state stays in memory
+  }
+}
+
+async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot && !force) return snapshot;
+  const [apps, projects, sessions] = await Promise.all([
+    call<AppListResult>("app.list"),
+    call<ProjectListResult>("project.list"),
+    call<SessionListResult>("session.list", { limit: 500 }),
+  ]);
+  snapshot = {
+    apps: apps.apps,
+    projects: projects.projects,
+    sessions: sessions.sessions,
+    ...(sessions.note ? { note: sessions.note } : {}),
+  };
+  return snapshot;
+}
+
+interface Crumb {
+  label: string;
+  href?: string;
+}
+
+function crumbsFor(route: Route): Crumb[] {
+  const data = snapshot;
+  const crumbs: Crumb[] = [{ label: "客户端", href: hashFor({ level: "clients" }) }];
+  if (route.level === "devices") return [{ label: "已授权设备" }];
+  if (route.level === "clients") return [];
+  const app = data?.apps.find((item) => item.appId === route.appId);
+  crumbs.push(
+    route.level === "projects"
+      ? { label: app?.name ?? "客户端" }
+      : { label: app?.name ?? "客户端", href: hashFor({ level: "projects", appId: route.appId }) },
+  );
+  if (route.level === "sessions" || route.level === "chat") {
+    const project = data?.projects.find((item) => item.projectId === route.projectId);
+    crumbs.push(
+      route.level === "sessions"
+        ? { label: project?.name ?? "工程" }
+        : { label: project?.name ?? "工程", href: hashFor({ level: "sessions", appId: route.appId, projectId: route.projectId }) },
+    );
+  }
+  if (route.level === "chat") {
+    const session = data?.sessions.find((item) => item.sessionId === route.sessionId);
+    crumbs.push({ label: session?.title ?? "会话" });
+  }
+  return crumbs;
+}
+
+function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
+  app.replaceChildren(renderTopbar(crumbs), content);
+}
+
+function shortAgentName(app: AppInfo): string {
+  if (app.kind === "claude-code") return "Claude";
+  if (app.kind === "codex") return "ChatGPT";
+  return app.name.split(/[·\s]/)[0] ?? app.name;
+}
+
+const RECENT_SESSIONS_KEY = "ab.recentSessions";
+const RECENT_LIMIT = 20;
+
+interface RecentSession {
+  sessionId: string;
+  title: string;
+  appId: string;
+  projectId: string;
+  at: number;
+}
+
+function readRecentSessions(): RecentSession[] {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(RECENT_SESSIONS_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((item): item is RecentSession => {
+        if (typeof item !== "object" || item === null) return false;
+        const value = item as Record<string, unknown>;
+        return (
+          typeof value["sessionId"] === "string" &&
+          typeof value["title"] === "string" &&
+          typeof value["appId"] === "string" &&
+          typeof value["projectId"] === "string" &&
+          typeof value["at"] === "number"
+        );
+      })
+      .slice(0, RECENT_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function rememberSession(summary: SessionSummary): void {
+  const entry: RecentSession = {
+    sessionId: summary.sessionId,
+    title: summary.title,
+    appId: summary.appId,
+    projectId: summary.projectId,
+    at: Date.now(),
+  };
+  const list = [
+    entry,
+    ...readRecentSessions().filter((item) => item.sessionId !== entry.sessionId),
+  ].slice(0, RECENT_LIMIT);
+  try {
+    localStorage.setItem(RECENT_SESSIONS_KEY, JSON.stringify(list));
+  } catch {
+    // storage unavailable; recents are best-effort
+  }
+}
+
+function recentTime(at: number): string {
+  const minutes = Math.floor((Date.now() - at) / 60_000);
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
+}
+
+function recentProjectName(projectId: string): string {
+  const known = snapshot?.projects.find((item) => item.projectId === projectId);
+  if (known) return known.name;
+  const parts = projectId.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] ?? projectId;
+}
+
+function recentSessionsButton(): HTMLElement | null {
+  const sessions = readRecentSessions();
+  if (sessions.length === 0) return null;
+
+  const trigger = el("button", {
+    className: "btn ghost small recents-btn",
+    attrs: {
+      type: "button",
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      "aria-label": "最近访问的会话",
+    },
+  });
+  const titles = sessions.slice(0, 6).map((item) => item.title);
+  const run = el("span", { className: "recents-run" });
+  for (const title of titles) run.append(el("span", { className: "recents-item", text: title }));
+  const track = el("span", { className: "recents-track" });
+  track.append(run);
+  if (titles.length > 1) {
+    const clone = el("span", { className: "recents-run" });
+    for (const title of titles) clone.append(el("span", { className: "recents-item", text: title }));
+    track.append(clone);
+    track.classList.add("is-scrolling");
+  }
+  trigger.append(icon("clock"), track);
+
+  const menu = el("div", { className: "recent-menu", attrs: { role: "menu" } });
+  menu.hidden = true;
+  const wrap = el("div", { className: "recent-switch" }, [trigger, menu]);
+
+  function close(): void {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onOutside);
+  }
+
+  function onOutside(event: MouseEvent): void {
+    if (!wrap.isConnected) {
+      document.removeEventListener("click", onOutside);
+      return;
+    }
+    if (event.target instanceof Node && wrap.contains(event.target)) return;
+    close();
+  }
+
+  function fillMenu(): void {
+    menu.replaceChildren();
+    const items = readRecentSessions();
+    if (items.length === 0) {
+      menu.append(el("div", { className: "recent-empty", text: "还没有访问记录" }));
+      return;
+    }
+    menu.append(el("div", { className: "recent-menu-title", text: "最近访问" }));
+    for (const item of items.slice(0, 12)) {
+      const app = snapshot?.apps.find((candidate) => candidate.appId === item.appId);
+      const meta = [app ? shortAgentName(app) : item.appId, recentProjectName(item.projectId), recentTime(item.at)];
+      const entry = button(
+        "",
+        () => {
+          close();
+          navigate({
+            level: "chat",
+            appId: item.appId,
+            projectId: item.projectId,
+            sessionId: item.sessionId,
+          });
+        },
+        "recent-menu-item",
+      );
+      entry.setAttribute("role", "menuitem");
+      entry.append(
+        el("span", { className: "recent-menu-name", text: item.title }),
+        el("span", { className: "recent-menu-meta", text: meta.join(" · ") }),
+      );
+      menu.append(entry);
+    }
+  }
+
+  trigger.addEventListener("click", () => {
+    if (!menu.hidden) {
+      close();
+      return;
+    }
+    fillMenu();
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("click", onOutside);
+  });
+
+  return wrap;
+}
+
+function agentSwitcher(route: Route): HTMLElement | null {
+  const apps = snapshot?.apps ?? [];
+  if (apps.length === 0) return null;
+  const current = "appId" in route ? apps.find((item) => item.appId === route.appId) : undefined;
+  const trigger = el("button", {
+    className: "btn ghost small agent-switch-btn",
+    attrs: {
+      type: "button",
+      "aria-haspopup": "menu",
+      "aria-expanded": "false",
+      "aria-label": "切换 Agent",
+    },
+  });
+  trigger.append(
+    icon("swap"),
+    el("span", { className: "agent-switch-label", text: current ? shortAgentName(current) : "Agent" }),
+    icon("chevron", "icon agent-switch-chev"),
+  );
+  const menu = el("div", { className: "agent-menu", attrs: { role: "menu" } });
+  menu.hidden = true;
+  const wrap = el("div", { className: "agent-switch" }, [trigger, menu]);
+
+  function close(): void {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onOutside);
+  }
+
+  function onOutside(event: MouseEvent): void {
+    if (!wrap.isConnected) {
+      document.removeEventListener("click", onOutside);
+      return;
+    }
+    if (event.target instanceof Node && wrap.contains(event.target)) return;
+    close();
+  }
+
+  trigger.addEventListener("click", () => {
+    if (!menu.hidden) {
+      close();
+      return;
+    }
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("click", onOutside);
+  });
+
+  for (const item of apps) {
+    const active = item.appId === current?.appId;
+    const entry = button(
+      "",
+      () => {
+        close();
+        navigate({ level: "projects", appId: item.appId });
+      },
+      `agent-menu-item${active ? " is-active" : ""}`,
+    );
+    entry.setAttribute("role", "menuitem");
+    entry.append(
+      el("span", { className: "agent-menu-name", text: item.name }),
+      el("span", { className: "agent-menu-state", text: active ? "当前" : statusLabel(item.status) }),
+    );
+    menu.append(entry);
+  }
+  return wrap;
+}
+
+function renderTopbar(crumbs: Crumb[]): HTMLElement {
+  const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
+  crumbs.forEach((crumb, index) => {
+    if (index > 0) nav.append(el("span", { className: "crumb-sep", text: "/" }));
+    if (crumb.href && index < crumbs.length - 1) {
+      const link = el("a", { className: "crumb", text: crumb.label, attrs: { href: crumb.href } });
+      nav.append(link);
+    } else {
+      nav.append(el("span", { className: "crumb current", text: crumb.label }));
+    }
+  });
+
+  const right = el("div", { className: "topbar-actions" });
+  if (reconnectMessage) {
+    const chip = reconnectChip();
+    const text = chip.querySelector(".reconnect-text");
+    if (text) text.textContent = reconnectMessage;
+    right.append(chip);
+  }
+  if (connected) {
+    const recents = recentSessionsButton();
+    if (recents) right.append(recents);
+    const switcher = agentSwitcher(parseRoute());
+    if (switcher) right.append(switcher);
+    right.append(
+      el("span", { className: "conn" }, [
+        el("span", { className: "dot" }),
+        el("span", { text: connected.info.name }),
+      ]),
+      button("设备", () => navigate({ level: "devices" }), "btn ghost small"),
+      button("断开", showHome, "btn ghost small"),
+    );
+  }
+  return el("header", { className: "topbar" }, [
+    el("a", { className: "brand", attrs: { href: hashFor({ level: "clients" }) } }, [
+      el("span", { className: "brand-mark", text: "AB" }),
+      el("span", { className: "brand-name", text: "Agent Bridge" }),
+    ]),
+    nav,
+    right,
+  ]);
+}
+
+async function renderRoute(soft = false): Promise<void> {
+  stopPolling();
+  if (!connected) {
+    showHome();
+    return;
+  }
+  const route = parseRoute();
+  if (soft && chatResume && chatResumeKey === hashFor(route)) {
+    chatResume();
+    return;
+  }
+  const token = ++renderToken;
+  chatResume = null;
+  chatResumeKey = null;
+  if (!snapshot) {
+    if (!soft) renderShell(skeletonView(route), crumbsFor(route));
+    try {
+      await ensureSnapshot();
+    } catch (error) {
+      progressDone();
+      if (token !== renderToken) return;
+      renderShell(errorView("读取失败", messageOf(error)), crumbsFor(route));
+      return;
+    }
+    progressDone();
+    if (token !== renderToken) return;
+  }
+  if (route.level === "clients") renderClients();
+  else if (route.level === "projects") renderProjects(route);
+  else if (route.level === "sessions") renderSessions(route);
+  else if (route.level === "devices") renderDevices();
+  else await renderChat(route, token);
+}
+
+function viewHead(eyebrow: string, title: string, meta: string, extra?: HTMLElement): HTMLElement {
+  return el("header", { className: "view-head" }, [
+    el("div", { className: "view-head-main" }, [
+      el("p", { className: "eyebrow", text: eyebrow }),
+      el("h1", { className: "display", text: title }),
+      el("p", { className: "meta", text: meta }),
+    ]),
+    ...(extra ? [extra] : []),
+  ]);
+}
+
+function renderClients(): void {
+  const data = snapshot!;
+  const route: Route = { level: "clients" };
+  const totalProjects = data.projects.length;
+  const totalSessions = data.sessions.length;
+  document.title = "客户端 · Agent Bridge";
+
+  const list = el("ul", { className: "list" });
+  if (data.apps.length === 0) {
+    list.append(el("li", {}, [emptyState("没有可用的客户端", "Bridge 没有发现任何桌面适配器。")]));
+  }
+  for (const item of data.apps) {
+    const projects = data.projects.filter((project) => project.appId === item.appId);
+    const sessions = data.sessions.filter((session) => session.appId === item.appId);
+    const row = el("button", { className: `row client-row${item.status === "ready" ? "" : " muted-row"}`, attrs: { type: "button" } }, [
+      el("span", { className: "mark", text: item.provider === "anthropic" ? "CC" : "CX" }),
+      el("span", { className: "row-main" }, [
+        el("strong", { className: "row-title", text: item.name }),
+        el("span", {
+          className: "meta",
+          text: `${projects.length} 个工程 · ${sessions.length} 个会话 · 枚举${completenessLabel(item.capabilities.enumerate)} · 读取${completenessLabel(item.capabilities.read)} · ${item.capabilities.send ? "可发送" : "不可发送"}`,
+        }),
+        ...(item.capabilities.reason || item.capabilities.sendDetail
+          ? [el("span", { className: "meta dim", text: item.capabilities.reason ?? item.capabilities.sendDetail ?? "" })]
+          : []),
+      ]),
+      el("span", { className: item.status === "ready" ? "pill ok" : "pill warn", text: statusLabel(item.status) }),
+      icon("chevron", "icon chev"),
+    ]);
+    row.addEventListener("click", () => navigate({ level: "projects", appId: item.appId }));
+    list.append(el("li", {}, [row]));
+  }
+
+  renderShell(
+    el("main", { className: "main" }, [
+      viewHead("客户端", "已连接的客户端", `${data.apps.length} 个客户端 · ${totalProjects} 个工程 · ${totalSessions} 个会话`),
+      list,
+      button("刷新列表", () => {
+        snapshot = null;
+        void renderRoute();
+      }, "btn ghost"),
+    ]),
+    crumbsFor(route),
+  );
+}
+
+function renderProjects(route: Route & { level: "projects" }): void {
+  const data = snapshot!;
+  const appInfo = data.apps.find((item) => item.appId === route.appId);
+  document.title = `${appInfo?.name ?? "客户端"} · Agent Bridge`;
+  const projects = data.projects.filter((project) => project.appId === route.appId);
+
+  const list = el("ul", { className: "list" });
+  if (projects.length === 0) {
+    list.append(el("li", {}, [emptyState("这个客户端还没有工程", "桌面应用里创建或打开一个工程后，再回来刷新。")]));
+  }
+  for (const project of projects) {
+    const sessions = data.sessions.filter((session) => session.projectId === project.projectId);
+    const row = el("button", { className: "row", attrs: { type: "button" } }, [
+      el("span", { className: "mark mono", text: initials(project.name) }),
+      el("span", { className: "row-main" }, [
+        el("strong", { className: "row-title", text: project.name }),
+        el("span", { className: "meta mono path", text: project.cwd ?? project.projectId }),
+      ]),
+      el("span", { className: "row-count", text: `${sessions.length || project.sessionCount} 个会话` }),
+      icon("chevron", "icon chev"),
+    ]);
+    row.addEventListener("click", () => navigate({ level: "sessions", appId: route.appId, projectId: project.projectId }));
+    list.append(el("li", {}, [row]));
+  }
+
+  renderShell(
+    el("main", { className: "main" }, [
+      el("section", { className: "view-head" }, [
+        backButton(() => navigate({ level: "clients" })),
+        el("div", { className: "view-head-main" }, [
+          el("p", { className: "eyebrow", text: appInfo?.name ?? "客户端" }),
+          el("h1", { className: "display", text: "工程" }),
+          el("p", { className: "meta", text: `${projects.length} 个工程，按会话数量排列` }),
+        ]),
+      ]),
+      list,
+    ]),
+    crumbsFor(route),
+  );
+}
+
+function renderSessions(route: Route & { level: "sessions" }): void {
+  const data = snapshot!;
+  const project = data.projects.find((item) => item.projectId === route.projectId);
+  const appInfo = data.apps.find((item) => item.appId === route.appId);
+  document.title = `${project?.name ?? "工程"} · Agent Bridge`;
+  const sessions = data.sessions
+    .filter((session) => session.projectId === route.projectId)
+    .sort((a, b) => b.updatedAt - a.updatedAt);
+
+  const list = el("ul", { className: "list" });
+  if (sessions.length === 0) {
+    list.append(el("li", {}, [emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。")]));
+  }
+  for (const session of sessions) {
+    const row = el("button", { className: "row", attrs: { type: "button" } }, [
+      el("span", { className: `mark ${session.live ? "live" : ""}`, text: session.kind === "codex-thread" ? "CX" : "CC" }),
+      el("span", { className: "row-main" }, [
+        el("strong", { className: "row-title", text: session.title }),
+        el("span", {
+          className: "meta",
+          text: `${timeLabel(session.updatedAt)} · ${session.canSend ? (session.live ? "桌面运行中，可发送" : sendStateLabel(session)) : (session.sendBlockedReason ?? "只读")}`,
+        }),
+      ]),
+      el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
+      icon("chevron", "icon chev"),
+    ]);
+    row.addEventListener("click", () =>
+      navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
+    );
+    list.append(el("li", {}, [row]));
+  }
+
+  renderShell(
+    el("main", { className: "main" }, [
+      el("section", { className: "view-head" }, [
+        backButton(() => navigate({ level: "projects", appId: route.appId })),
+        el("div", { className: "view-head-main" }, [
+          el("p", { className: "eyebrow", text: `${appInfo?.name ?? "客户端"}${project?.cwd ? ` · ${project.cwd}` : ""}` }),
+          el("h1", { className: "display", text: project?.name ?? "会话" }),
+          el("p", { className: "meta", text: `${sessions.length} 个会话 · 最近更新在前` }),
+        ]),
+      ]),
+      ...(data.note ? [el("p", { className: "hint", text: data.note })] : []),
+      list,
+    ]),
+    crumbsFor(route),
+  );
+}
+
+function renderDevices(): void {
+  const state = connected!;
+  document.title = "已授权设备 · Agent Bridge";
+  const list = el("ul", { className: "list" });
+  const status = el("p", { className: "hint" });
+  for (const item of state.devices) {
+    const revoked = item.revokedAt !== null;
+    const self = item.deviceId === state.device.deviceId;
+    list.append(
+      el("li", { className: "device-row" }, [
+        el("div", { className: "row-main" }, [
+          el("strong", { text: item.name }),
+          el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString()}` }),
+        ]),
+        self || revoked
+          ? el("span", { className: "pill", text: revoked ? "已撤销" : "本机" })
+          : button("撤销", () => {
+              void revokeDevice(item.deviceId, status);
+            }, "btn ghost small danger"),
+      ]),
+    );
+  }
+
+  renderShell(
+    el("main", { className: "main" }, [
+      el("section", { className: "view-head" }, [
+        backButton(() => navigate({ level: "clients" })),
+        el("div", { className: "view-head-main" }, [
+          el("p", { className: "eyebrow", text: state.info.name }),
+          el("h1", { className: "display", text: "已授权设备" }),
+          el("p", { className: "meta", text: `Bridge ${state.info.version} · ${state.info.platform} · 通道已加密（Noise IK）` }),
+        ]),
+      ]),
+      list,
+      status,
+      el("div", { className: "actions" }, [
+        button("刷新", () => {
+          const device = state.device;
+          void connectAndShow(device).catch((error: unknown) => {
+            status.textContent = messageOf(error);
+          });
+        }, "btn secondary"),
+      ]),
+    ]),
+    crumbsFor({ level: "devices" }),
+  );
+}
+
+function initials(name: string): string {
+  const parts = name.trim().split(/[\s._-]+/).filter(Boolean);
+  if (parts.length === 0) return "··";
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return `${parts[0]![0] ?? ""}${parts[1]![0] ?? ""}`.toUpperCase();
+}
+
+function completenessLabel(value: string): string {
+  return value === "complete" ? "完整" : value === "partial" ? "部分" : value === "unknown" ? "未知" : "不可用";
+}
+
+function statusLabel(status: AppInfo["status"]): string {
+  return status === "ready" ? "可用" : status === "needs_permission" ? "需要授权" : "不可用";
+}
+
+function sendStateLabel(session: SessionSummary): string {
+  if (session.live) return "桌面运行中";
+  if (!session.canSend) return "只读";
+  return session.kind === "codex-thread" ? "需桌面打开" : "可发送";
+}
+
+function timeLabel(timestamp: number): string {
+  if (!timestamp) return "时间未知";
+  const diff = Date.now() - timestamp;
+  if (diff < 60_000) return "刚刚";
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  return new Date(timestamp).toLocaleDateString();
+}
+
+interface QueuedMessage {
+  id: string;
+  /** Text typed by the user, used to match the transcript once it catches up. */
+  match: string;
+  display: string;
+  at: number;
+  /** The desktop acknowledged the message while it was still busy, so it waits there. */
+  held: boolean;
+}
+
+interface ChatState {
+  session: SessionSummary;
+  messages: MessageRecord[];
+  known: Set<string>;
+  queued: QueuedMessage[];
+  note: HTMLElement;
+  list: HTMLElement;
+  status: HTMLElement;
+  loading: boolean;
+  busy: boolean;
+  context?: ContextUsage;
+  contextButton: HTMLButtonElement;
+  contextPop: HTMLElement;
+}
+
+async function renderChat(route: Route & { level: "chat" }, token: number): Promise<void> {
+  const data = snapshot!;
+  const summary = data.sessions.find((item) => item.sessionId === route.sessionId);
+  const project = data.projects.find((item) => item.projectId === route.projectId);
+  if (!summary) {
+    renderShell(
+      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。"),
+      crumbsFor(route),
+    );
+    return;
+  }
+  document.title = `${summary.title} · Agent Bridge`;
+  rememberSession(summary);
+
+  const note = el("p", { className: "hint" });
+  const list = el("div", { className: "transcript-body" });
+  const status = el("p", { className: "hint" });
+  const loadOlder = button("", () => {
+    void loadOlderPage(state);
+  }, "icon-btn composer-tool");
+  loadOlder.append(icon("history"));
+  loadOlder.setAttribute("aria-label", "加载更早的消息");
+  loadOlder.title = "加载更早的消息";
+  loadOlder.disabled = true;
+
+  const contextButton = el("button", {
+    className: "icon-btn context-btn",
+    attrs: { type: "button", "aria-label": "上下文用量", title: "上下文用量", "aria-expanded": "false" },
+  });
+  contextButton.hidden = true;
+  const contextPop = el("div", { className: "context-pop" });
+  contextPop.hidden = true;
+
+  const state: ChatState = {
+    session: summary,
+    messages: [],
+    known: new Set(),
+    queued: [],
+    note,
+    list,
+    status,
+    loading: false,
+    busy: false,
+    contextButton,
+    contextPop,
+  };
+  const pending: PendingAttachment[] = [];
+  const canSend = summary.canSend;
+  const sendBlockedReason = summary.sendBlockedReason;
+
+  const input = el("textarea", {
+    className: "input composer-input",
+    attrs: {
+      rows: "1",
+      placeholder: canSend ? "发送到这个会话…" : (sendBlockedReason ?? "该会话当前不可发送"),
+    },
+  });
+  input.value = draftFor(summary.sessionId);
+
+  function autoGrow(): void {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight + 2, 160)}px`;
+  }
+
+  function updateSendState(): void {
+    if (!canSend) {
+      sendButton.disabled = true;
+      return;
+    }
+    const uploading = pending.some((item) => item.status === "uploading");
+    const ready = pending.filter((item) => item.status === "ready" && item.attachment).length;
+    sendButton.disabled = uploading || (input.value.trim().length === 0 && ready === 0);
+  }
+
+  const submit = (): void => {
+    if (sendButton.disabled) return;
+    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState);
+  };
+  const sendButton = button("发送", submit, "btn primary");
+  sendButton.disabled = !canSend;
+
+  const attachList = el("div", { className: "attach-list" });
+  const fileInput = el("input", { className: "file-input", attrs: { type: "file", multiple: "" } });
+  const attachButton = el("button", {
+    className: "icon-btn attach-btn",
+    attrs: { type: "button", title: "添加图片或文件", "aria-label": "添加图片或文件" },
+  }, [icon("clip")]);
+  attachButton.addEventListener("click", () => fileInput.click());
+
+  const refreshButton = button("", () => {
+    void refreshTail(state);
+  }, "icon-btn composer-tool");
+  refreshButton.append(icon("refresh"));
+  refreshButton.setAttribute("aria-label", "刷新消息");
+  refreshButton.title = "刷新消息";
+
+  const onContextKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") closeContext();
+  };
+  const onContextOutside = (event: Event): void => {
+    const target = event.target as Node | null;
+    if (!target) return;
+    if (contextPop.contains(target) || contextButton.contains(target)) return;
+    closeContext();
+  };
+  function closeContext(): void {
+    contextPop.hidden = true;
+    contextButton.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onContextOutside);
+    document.removeEventListener("keydown", onContextKey);
+  }
+  contextButton.addEventListener("click", () => {
+    const open = contextPop.hidden;
+    if (!open) {
+      closeContext();
+      return;
+    }
+    paintContext(state);
+    contextPop.hidden = false;
+    contextButton.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onContextOutside);
+    document.addEventListener("keydown", onContextKey);
+  });
+
+  const collapseButton = el("button", {
+    className: "icon-btn composer-collapse",
+    attrs: { type: "button", "aria-label": "收起输入区", title: "收起输入区" },
+  }, [icon("chevron", "icon composer-chev")]);
+  collapseButton.addEventListener("click", () => setCollapsed(true, true));
+
+  const restore = button("", () => setCollapsed(false, true), "composer-restore");
+  restore.append(icon("pencil"), el("span", { text: "写消息…" }));
+
+  const composer = el("form", { className: "composer" }, [
+    attachList,
+    fileInput,
+    el("div", { className: "composer-row" }, [
+      attachButton,
+      input,
+      loadOlder,
+      refreshButton,
+      contextButton,
+      sendButton,
+      collapseButton,
+    ]),
+    restore,
+    contextPop,
+  ]);
+
+  function setCollapsed(collapsed: boolean, focus = false): void {
+    composer.classList.toggle("is-collapsed", collapsed);
+    writeComposerCollapsed(collapsed);
+    if (!collapsed) {
+      autoGrow();
+      if (focus) input.focus();
+    }
+  }
+
+  function renderAttachments(): void {
+    attachList.hidden = pending.length === 0;
+    attachList.replaceChildren(
+      ...pending.map((item) => {
+        const chip = el("div", { className: `attach-chip is-${item.status}` });
+        chip.append(icon(item.kind === "image" ? "image" : "file", "icon attach-chip-icon"));
+        chip.append(el("span", { className: "attach-chip-name", text: item.name, attrs: { title: item.name } }));
+        const stateText =
+          item.status === "uploading"
+            ? `${Math.round(item.progress * 100)}%`
+            : item.status === "error"
+              ? (item.error ?? "上传失败")
+              : sizeLabel(item.attachment?.size ?? 0);
+        chip.append(el("span", { className: "attach-chip-state", text: stateText }));
+        const remove = el("button", {
+          className: "attach-chip-remove",
+          attrs: { type: "button", "aria-label": `移除 ${item.name}` },
+        }, [icon("close")]);
+        remove.addEventListener("click", () => {
+          const index = pending.indexOf(item);
+          if (index >= 0) pending.splice(index, 1);
+          renderAttachments();
+          updateSendState();
+          if (pending.length === 0) status.textContent = "";
+          else if (pending.every((entry) => entry.status === "ready")) {
+            status.textContent = `${pending.length} 个附件已就绪`;
+          }
+        });
+        chip.append(remove);
+        return chip;
+      }),
+    );
+  }
+
+  async function addFiles(files: File[]): Promise<void> {
+    for (const file of files) {
+      if (pending.length >= MAX_ATTACHMENTS) {
+        status.textContent = `附件最多 ${MAX_ATTACHMENTS} 个`;
+        break;
+      }
+      if (file.size === 0) {
+        status.textContent = `${file.name} 是空文件`;
+        continue;
+      }
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        status.textContent = `${file.name} 超过 25 MB`;
+        continue;
+      }
+      const item: PendingAttachment = {
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        name: file.name,
+        kind: file.type.startsWith("image/") ? "image" : "file",
+        progress: 0,
+        shown: -1,
+        status: "uploading",
+      };
+      pending.push(item);
+      renderAttachments();
+      updateSendState();
+      status.classList.remove("error");
+      status.textContent = `正在上传 ${file.name}…`;
+      try {
+        const attachment = await uploadAttachment(state.session.sessionId, file, (ratio) => {
+          item.progress = ratio;
+          if (ratio < 1 && item.shown >= 0 && ratio - item.shown < 0.05) return;
+          item.shown = ratio;
+          if (pending.includes(item)) renderAttachments();
+        });
+        item.status = "ready";
+        item.attachment = attachment;
+        item.progress = 1;
+      } catch (error) {
+        item.status = "error";
+        item.error = messageOf(error);
+        status.classList.add("error");
+        status.textContent = `${file.name}：${messageOf(error)}`;
+      }
+      if (pending.includes(item)) renderAttachments();
+      updateSendState();
+    }
+    if (!pending.some((item) => item.status !== "ready")) {
+      status.classList.remove("error");
+      status.textContent = pending.length > 0 ? `${pending.length} 个附件已就绪` : "";
+    }
+  }
+
+  input.addEventListener("input", () => {
+    saveDraft(state.session.sessionId, input.value);
+    autoGrow();
+    updateSendState();
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      submit();
+    }
+  });
+  fileInput.addEventListener("change", () => {
+    const files = [...(fileInput.files ?? [])];
+    fileInput.value = "";
+    void addFiles(files);
+  });
+
+  const back = backButton(() => navigate({ level: "sessions", appId: route.appId, projectId: route.projectId }));
+
+  const collapsed = window.matchMedia("(max-width: 720px)").matches;
+  const head = el("section", { className: `view-head chat-head${collapsed ? " is-collapsed" : ""}` });
+  const headToggle = button("", () => {
+    const isCollapsed = head.classList.toggle("is-collapsed");
+    headToggle.setAttribute("aria-expanded", String(!isCollapsed));
+    headToggle.setAttribute("aria-label", isCollapsed ? "展开会话信息" : "收起会话信息");
+    headToggle.replaceChildren(
+      icon("chevron", "icon head-chev"),
+      el("span", { text: isCollapsed ? "展开" : "收起" }),
+    );
+  }, "head-toggle");
+  headToggle.setAttribute("aria-expanded", String(!collapsed));
+  headToggle.setAttribute("aria-label", collapsed ? "展开会话信息" : "收起会话信息");
+  headToggle.append(icon("chevron", "icon head-chev"), el("span", { text: collapsed ? "展开" : "收起" }));
+  head.append(
+    back,
+    el("div", { className: "view-head-main" }, [
+      el("p", { className: "eyebrow", text: `${data.apps.find((item) => item.appId === route.appId)?.name ?? "客户端"} · ${project?.name ?? "工程"}` }),
+      el("h1", { className: "display chat-title", text: summary.title }),
+      el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
+    ]),
+    el("div", { className: "chat-head-side" }, [
+      el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
+      headToggle,
+    ]),
+  );
+
+  renderShell(
+    el("main", { className: "main chat" }, [
+      head,
+      el("section", { className: "transcript" }, [
+        note,
+        list,
+      ]),
+      composer,
+      status,
+    ]),
+    crumbsFor(route),
+  );
+  const form = app.querySelector<HTMLFormElement>(".composer");
+  form?.addEventListener("submit", (event) => event.preventDefault());
+  setCollapsed(readComposerCollapsed());
+  if (input.value) autoGrow();
+
+  const startPolling = (): void => {
+    stopPolling();
+    pollTimer = window.setInterval(() => {
+      if (token !== renderToken) return;
+      if (document.visibilityState !== "visible" || state.loading) return;
+      void refreshTail(state);
+    }, 5_000);
+  };
+
+  const page = await refreshTail(state);
+  if (token !== renderToken) return;
+  if (page?.nextBefore) loadOlder.disabled = false;
+  startPolling();
+  chatResumeKey = hashFor(route);
+  chatResume = () => {
+    void refreshTail(state);
+    startPolling();
+  };
+
+  async function loadOlderPage(current: ChatState): Promise<void> {
+    const oldest = current.messages[0]?.messageId;
+    if (!oldest || current.loading) return;
+    current.loading = true;
+    try {
+      const result = await call<MessageListResult>("message.list", {
+        sessionId: current.session.sessionId,
+        limit: 50,
+        before: oldest,
+      });
+      const fresh = result.messages.filter((message) => !current.known.has(message.messageId));
+      for (const message of fresh) current.known.add(message.messageId);
+      current.messages = [...fresh, ...current.messages];
+      renderMessages(current);
+      if (!result.nextBefore) loadOlder.disabled = true;
+    } catch (error) {
+      current.status.textContent = messageOf(error);
+    } finally {
+      current.loading = false;
+    }
+  }
+}
+
+async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
+  if (state.loading) return null;
+  state.loading = true;
+  try {
+    const result = await call<MessageListResult>("message.list", {
+      sessionId: state.session.sessionId,
+      limit: 50,
+    });
+    let added = false;
+    const fresh: MessageRecord[] = [];
+    for (const message of result.messages) {
+      if (state.known.has(message.messageId)) continue;
+      state.known.add(message.messageId);
+      state.messages.push(message);
+      fresh.push(message);
+      added = true;
+    }
+    if (state.queued.length > 0) {
+      const freshUserTexts = fresh
+        .filter((message) => message.role === "user")
+        .map((message) => message.blocks.map((block) => block.text).join("\n"));
+      const now = Date.now();
+      const before = state.queued.length;
+      state.queued = state.queued.filter(
+        (item) =>
+          now - item.at < 180_000 &&
+          !(item.match !== "" && freshUserTexts.some((text) => text.includes(item.match))),
+      );
+      if (state.queued.length !== before) added = true;
+    }
+    // The adapter's completeness note ("仅主链文本与工具调用摘要…") is noise in the
+    // chat view; only surface it when there is nothing else to show.
+    state.note.textContent = state.messages.length === 0 ? (result.note ?? "") : "";
+    if (result.context) {
+      state.context = result.context;
+      paintContext(state);
+    }
+    const busyChanged = (result.busy === true) !== state.busy;
+    state.busy = result.busy === true;
+    if (added || busyChanged || state.messages.length === 0) renderMessages(state);
+    return result;
+  } catch (error) {
+    if (active) state.status.textContent = messageOf(error);
+    return null;
+  } finally {
+    state.loading = false;
+  }
+}
+
+function stepTitle(text: string): string {
+  const line = (text.split("\n")[0] ?? "").trim();
+  return line.length > 76 ? `${line.slice(0, 76)}…` : line || "过程";
+}
+
+function processFold(steps: string[]): HTMLDetailsElement {
+  const fold = el("details", { className: "turn-steps" });
+  fold.append(
+    el("summary", { className: "turn-steps-summary" }, [
+      icon("chevron", "icon turn-chev"),
+      el("span", { text: `执行过程 · ${steps.length} 步` }),
+    ]),
+    el(
+      "div",
+      { className: "turn-steps-body" },
+      steps.map((text) => {
+        const step = el("details", { className: "turn-step" });
+        step.append(
+          el("summary", { className: "turn-step-summary" }, [
+            icon("chevron", "icon turn-step-chev"),
+            el("span", { className: "turn-step-title", text: stepTitle(text) }),
+          ]),
+          el("div", { className: "turn-step-body", text }),
+        );
+        return step;
+      }),
+    ),
+  );
+  return fold;
+}
+
+function formatTokens(value: number): string {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
+  if (value >= 10_000) return `${Math.round(value / 1000)}k`;
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`;
+  return String(Math.round(value));
+}
+
+/** Paints the context ring on the composer and the details popover it opens. */
+function paintContext(state: ChatState): void {
+  const usage = state.context;
+  const btn = state.contextButton;
+  const pop = state.contextPop;
+  if (!usage || usage.windowTokens <= 0) {
+    btn.hidden = true;
+    pop.hidden = true;
+    return;
+  }
+  btn.hidden = false;
+  const ratio = Math.max(0, Math.min(1, usage.usedTokens / usage.windowTokens));
+  const percent = Math.round(ratio * 100);
+  const level = ratio >= 0.85 ? "is-hot" : ratio >= 0.65 ? "is-warn" : "";
+  const radius = 7;
+  const circumference = 2 * Math.PI * radius;
+  btn.className = `icon-btn context-btn ${level}`.trim();
+  btn.title = `上下文已用 ${percent}%`;
+  btn.innerHTML = `<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
+    <circle class="context-track" cx="10" cy="10" r="${radius}" fill="none" stroke-width="2.6"/>
+    <circle class="context-arc" cx="10" cy="10" r="${radius}" fill="none" stroke-width="2.6" stroke-linecap="round" transform="rotate(-90 10 10)" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${(circumference * (1 - ratio)).toFixed(2)}"/>
+  </svg>`;
+
+  pop.replaceChildren(
+    el("div", { className: "context-head" }, [
+      el("span", { className: "context-percent", text: `${percent}%` }),
+      el("span", { className: "context-sub", text: `${formatTokens(usage.usedTokens)} / ${formatTokens(usage.windowTokens)} tokens` }),
+    ]),
+    el("div", { className: "context-bar" }, [
+      (() => {
+        const fill = el("span", { className: "context-bar-fill" });
+        fill.style.width = `${Math.max(2, percent)}%`;
+        return fill;
+      })(),
+    ]),
+    ...(usage.model
+      ? [el("p", { className: "context-model", text: `${usage.model}${usage.windowEstimated ? " · 窗口按 200k 估算" : ""}` })]
+      : []),
+    ...(usage.details && usage.details.length > 0
+      ? [el("dl", { className: "context-details" }, usage.details.flatMap((detail) => [
+          el("dt", { text: detail.label }),
+          el("dd", { text: detail.value }),
+        ]))]
+      : []),
+  );
+}
+
+function queuedBubble(item: QueuedMessage): HTMLElement {
+  const bubble = el("article", { className: "message user is-queued" });
+  bubble.append(
+    el("div", { className: "message-meta" }, [
+      el("span", { className: "role user", text: "用户" }),
+      el("span", { className: "pill tiny", text: item.held ? "排队中" : "已发送" }),
+      el("span", { className: "meta mono", text: new Date(item.at).toLocaleTimeString() }),
+    ]),
+    el("div", { className: "message-text", text: item.display }),
+  );
+  return bubble;
+}
+
+function messageBubble(state: ChatState, message: MessageRecord): HTMLElement {
+  const bubble = el("article", { className: `message ${message.role}` });
+  const hasText = message.blocks.some((block) => block.type === "text");
+  const meta = el("div", { className: "message-meta" }, [
+    el("span", { className: `role ${message.role}`, text: message.role === "user" ? "用户" : message.role === "assistant" ? "助手" : "系统" }),
+    ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
+    ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
+  ]);
+  if (hasText) meta.append(shareButton(state, message));
+  bubble.append(meta);
+  for (const block of message.blocks) {
+    bubble.append(
+      el("div", {
+        className: block.type === "tool" ? "message-tool" : "message-text",
+        text: block.truncated ? `${block.text}\n…（已截断）` : block.text,
+      }),
+    );
+  }
+  return bubble;
+}
+
+function shareButton(state: ChatState, message: MessageRecord): HTMLButtonElement {
+  const share = el("button", {
+    className: "share-btn",
+    attrs: { type: "button", title: "分享到其他客户端", "aria-label": "分享这条消息" },
+  }, [icon("share"), el("span", { text: "分享" })]);
+  share.addEventListener("click", () => {
+    void openShare(state.session, message);
+  });
+  return share;
+}
+
+function assistantTurn(state: ChatState, messages: MessageRecord[]): HTMLElement {
+  const bubble = el("article", { className: "message assistant" });
+  const steps: string[] = [];
+  let peer = false;
+  let lastText: MessageRecord | undefined;
+  for (const message of messages) {
+    if (message.origin === "peer") peer = true;
+    let hasText = false;
+    for (const block of message.blocks) {
+      if (block.type === "text") {
+        hasText = true;
+      } else {
+        steps.push(block.truncated ? `${block.text}\n…（已截断）` : block.text);
+      }
+    }
+    if (hasText) lastText = message;
+  }
+  const last = messages[messages.length - 1];
+  const meta = el("div", { className: "message-meta" }, [
+    el("span", { className: "role assistant", text: "助手" }),
+    ...(peer ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
+    ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
+  ]);
+  if (lastText) meta.append(shareButton(state, lastText));
+  bubble.append(meta);
+  let folded = steps.length === 0;
+  for (const message of messages) {
+    for (const block of message.blocks) {
+      if (block.type === "text") {
+        bubble.append(
+          el("div", {
+            className: "message-text",
+            text: block.truncated ? `${block.text}\n…（已截断）` : block.text,
+          }),
+        );
+      } else if (!folded) {
+        bubble.append(processFold(steps));
+        folded = true;
+      }
+    }
+  }
+  if (!folded) bubble.append(processFold(steps));
+  return bubble;
+}
+
+function spinner(): HTMLElement {
+  return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
+}
+
+/** Marks the last assistant turn as still running, so a long run is not mistaken for a stop. */
+function markBusy(list: HTMLElement): void {
+  const bubbles = list.querySelectorAll<HTMLElement>("article.message.assistant");
+  const last = bubbles[bubbles.length - 1];
+  const summary = last?.querySelector<HTMLElement>(".turn-steps-summary");
+  if (summary) {
+    summary.append(spinner(), el("span", { className: "thinking-label", text: "进行中" }));
+    last?.classList.add("is-busy");
+    return;
+  }
+  const row = el("div", { className: "thinking-row" });
+  row.append(spinner(), el("span", { className: "thinking-label", text: "思考中…" }));
+  if (last) {
+    last.append(row);
+    last.classList.add("is-busy");
+    return;
+  }
+  list.append(row);
+}
+
+function renderMessages(state: ChatState): void {
+  const list = state.list;
+  const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
+  const stick = distanceFromBottom < 80;
+  list.replaceChildren();
+  const appendQueued = (): void => {
+    for (const item of state.queued) list.append(queuedBubble(item));
+  };
+  if (state.messages.length === 0) {
+    list.append(emptyState("没有可读取的消息", "这个会话在桌面应用中可能只有工具调用，或者还没有开始。"));
+    appendQueued();
+    if (state.busy) markBusy(list);
+    return;
+  }
+  let turn: MessageRecord[] = [];
+  const flush = (): void => {
+    if (turn.length === 0) return;
+    list.append(assistantTurn(state, turn));
+    turn = [];
+  };
+  for (const message of state.messages) {
+    if (message.role === "assistant") {
+      turn.push(message);
+      continue;
+    }
+    flush();
+    list.append(messageBubble(state, message));
+  }
+  flush();
+  appendQueued();
+  if (state.busy) markBusy(list);
+  if (stick) list.scrollTop = list.scrollHeight;
+}
+
+async function sendMessage(
+  state: ChatState,
+  input: HTMLTextAreaElement,
+  status: HTMLElement,
+  sendButton: HTMLButtonElement,
+  loadOlder: HTMLButtonElement,
+  pending: PendingAttachment[],
+  renderAttachments: () => void,
+  updateSendState: () => void,
+): Promise<void> {
+  if (pending.some((item) => item.status === "uploading")) {
+    status.textContent = "附件还在上传，请稍候";
+    return;
+  }
+  const text = input.value.trim();
+  const attachments = pending
+    .map((item) => item.attachment)
+    .filter((item): item is MessageAttachment => item !== undefined);
+  if (!text && attachments.length === 0) return;
+  sendButton.disabled = true;
+  status.classList.remove("error");
+  status.textContent = "正在发送…";
+  try {
+    const result = await call<MessageSendResult>("message.send", {
+      sessionId: state.session.sessionId,
+      text,
+      ...(attachments.length > 0 ? { attachments } : {}),
+    });
+    input.value = "";
+    saveDraft(state.session.sessionId, "");
+    pending.length = 0;
+    renderAttachments();
+    if (result.accepted) {
+      const names = attachments.map((attachment) => attachment.name);
+      const attachmentLine = names.length > 0 ? `附件：${names.join("、")}` : "";
+      state.queued.push({
+        id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        match: text !== "" ? text : (names[0] ?? ""),
+        display: [text, attachmentLine].filter(Boolean).join("\n"),
+        at: Date.now(),
+        held: !result.delivered && (result.detail ?? "").includes("排队"),
+      });
+      state.busy = true;
+      renderMessages(state);
+    }
+    status.textContent = result.delivered
+      ? "已投递到桌面会话"
+      : result.accepted
+        ? (result.detail ?? "已提交，等待桌面执行")
+        : (result.detail ?? "未确认投递");
+    window.setTimeout(() => {
+      void refreshTail(state).then((page) => {
+        if (page?.nextBefore) loadOlder.disabled = false;
+      });
+    }, 800);
+  } catch (error) {
+    status.classList.add("error");
+    status.textContent = messageOf(error);
+  } finally {
+    updateSendState();
+  }
+}
+
+interface PendingAttachment {
+  id: string;
+  name: string;
+  kind: "image" | "file";
+  progress: number;
+  /** Last progress ratio painted, so chunk updates do not re-render constantly. */
+  shown: number;
+  status: "uploading" | "ready" | "error";
+  attachment?: MessageAttachment;
+  error?: string;
+}
+
+const MAX_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+function sizeLabel(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+interface SharePick {
+  appId: string | null;
+  projectId: string | null;
+  sessionId: string | null;
+}
+
+async function openShare(source: SessionSummary, message: MessageRecord): Promise<void> {
+  if (!snapshot) return;
+  const data: Snapshot = snapshot;
+  const exclude = new Set([source.sessionId]);
+  const pick: SharePick = { appId: null, projectId: null, sessionId: null };
+  let prepared: TransferPrepareResult | null = null;
+  let sending = false;
+  let done = false;
+
+  const mask = el("div", { className: "sheet-mask" });
+  const body = el("div", { className: "sheet-body" });
+  const steps = el("ol", { className: "steps", attrs: { "aria-label": "转发步骤" } });
+  const note = el("p", { className: "sheet-note" });
+  const status = el("p", { className: "sheet-note" });
+  const close = (): void => {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") close();
+  };
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask) close();
+  });
+
+  const cancel = button("取消", close, "btn secondary");
+  const send = button("发送", () => {
+    void commit();
+  }, "btn primary");
+  send.disabled = true;
+  const viewTarget = button("查看目标会话", () => {
+    close();
+    if (pick.appId && pick.projectId && pick.sessionId) {
+      navigate({ level: "chat", appId: pick.appId, projectId: pick.projectId, sessionId: pick.sessionId });
+    }
+  }, "btn");
+  viewTarget.classList.add("hidden");
+  const back = button("上一步", () => {
+    if (pick.sessionId) pick.sessionId = null;
+    else if (pick.projectId) pick.projectId = null;
+    else if (pick.appId) pick.appId = null;
+    void render();
+  }, "btn ghost");
+  back.classList.add("hidden");
+
+  const closeButton = el("button", { className: "icon-btn", attrs: { type: "button", "aria-label": "关闭" } }, [icon("close")]);
+  closeButton.addEventListener("click", close);
+
+  const sheet = el("aside", { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": "分享消息" } }, [
+    el("header", { className: "sheet-head" }, [
+      el("div", {}, [
+        el("p", { className: "eyebrow", text: "分享" }),
+        el("h2", { className: "sheet-title", text: "把这条消息发送到另一个客户端" }),
+      ]),
+      closeButton,
+    ]),
+    el("p", { className: "sheet-source", text: `来源：${source.title} · ${message.role === "user" ? "用户" : message.role === "assistant" ? "助手" : "系统"} · ${message.createdAt ? new Date(message.createdAt).toLocaleString() : ""}` }),
+    steps,
+    body,
+    el("footer", { className: "sheet-foot" }, [
+      el("div", { className: "sheet-notes" }, [note, status]),
+      el("div", { className: "actions" }, [back, cancel, send, viewTarget]),
+    ]),
+  ]);
+  mask.append(sheet);
+  document.body.append(mask);
+
+  const appName = (appId: string | null): string => data.apps.find((item) => item.appId === appId)?.name ?? "客户端";
+  const projectName = (projectId: string | null): string => data.projects.find((item) => item.projectId === projectId)?.name ?? "工程";
+  const sessionOf = (sessionId: string | null): SessionSummary | null =>
+    data.sessions.find((item) => item.sessionId === sessionId) ?? null;
+
+  function renderSteps(): void {
+    const active = pick.sessionId ? 3 : pick.projectId ? 2 : pick.appId ? 1 : 0;
+    const labels = ["客户端", "工程", "会话", "预览"];
+    steps.replaceChildren();
+    labels.forEach((label, index) => {
+      const state = index < active ? "done" : index === active ? "active" : "todo";
+      const chip = el("li", { className: `step ${state}` }, [
+        el("span", { className: "step-index", text: String(index + 1) }),
+        el("span", { text: label }),
+      ]);
+      steps.append(chip);
+    });
+  }
+
+  function rowButton(options: { title: string; meta: string; disabled?: boolean; badge?: string; onClick: () => void }): HTMLButtonElement {
+    const node = el("button", {
+      className: `row${options.disabled ? " muted-row" : ""}`,
+      attrs: { type: "button", ...(options.disabled ? { disabled: "" } : {}) },
+    }, [
+      el("span", { className: "row-main" }, [
+        el("strong", { className: "row-title", text: options.title }),
+        el("span", { className: "meta", text: options.meta }),
+      ]),
+      ...(options.badge ? [el("span", { className: "pill", text: options.badge })] : []),
+      icon("chevron", "icon chev"),
+    ]);
+    if (!options.disabled) node.addEventListener("click", options.onClick);
+    return node;
+  }
+
+  async function render(): Promise<void> {
+    renderSteps();
+    body.replaceChildren();
+    note.textContent = "";
+    status.classList.remove("error");
+    status.textContent = "";
+    back.classList.toggle("hidden", !pick.appId);
+    send.textContent = "发送";
+    send.disabled = true;
+
+    if (!pick.appId) {
+      note.textContent = pick.appId === null && pick.projectId === null ? "选择要发送到的客户端" : "";
+      const list = el("ul", { className: "list compact" });
+      for (const item of data.apps) {
+        const count = data.projects.filter((project) => project.appId === item.appId).length;
+        list.append(el("li", {}, [
+          rowButton({
+            title: item.name,
+            meta: `${count} 个工程 · ${item.capabilities.send ? "可发送" : "仅可读"}`,
+            disabled: count === 0 || !item.capabilities.send,
+            badge: statusLabel(item.status),
+            onClick: () => {
+              pick.appId = item.appId;
+              void render();
+            },
+          }),
+        ]));
+      }
+      body.append(list);
+      return;
+    }
+
+    if (!pick.projectId) {
+      note.textContent = `来自 ${appName(pick.appId)}，选择目标工程`;
+      const projects = data.projects.filter((project) => project.appId === pick.appId);
+      const list = el("ul", { className: "list compact" });
+      for (const project of projects) {
+        const sendable = data.sessions.some((session) => session.projectId === project.projectId && session.canSend && !exclude.has(session.sessionId));
+        list.append(el("li", {}, [
+          rowButton({
+            title: project.name,
+            meta: `${project.cwd ?? project.projectId}`,
+            disabled: !sendable,
+            badge: sendable ? undefined : "无可发送会话",
+            onClick: () => {
+              pick.projectId = project.projectId;
+              void render();
+            },
+          }),
+        ]));
+      }
+      if (projects.length === 0) body.append(emptyState("这个客户端没有工程", "换一个客户端试试。"));
+      else body.append(list);
+      return;
+    }
+
+    if (!pick.sessionId) {
+      const project = data.projects.find((item) => item.projectId === pick.projectId);
+      note.textContent = `${project?.name ?? "工程"} · 选择目标会话`;
+      const search = el("input", { className: "input search", attrs: { type: "text", placeholder: "筛选会话标题…", autocomplete: "off" } });
+      const list = el("ul", { className: "list compact" });
+      const sessions = data.sessions
+        .filter((session) => session.projectId === pick.projectId && !exclude.has(session.sessionId))
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+      const paint = (): void => {
+        const term = search.value.trim().toLowerCase();
+        list.replaceChildren();
+        const visible = sessions.filter((session) => !term || session.title.toLowerCase().includes(term));
+        if (visible.length === 0) {
+          list.append(el("li", {}, [emptyState("没有匹配的会话", "换个关键词，或者换一个工程。")]));
+          return;
+        }
+        for (const session of visible) {
+          list.append(el("li", {}, [
+            rowButton({
+              title: session.title,
+              meta: `${timeLabel(session.updatedAt)} · ${sendStateLabel(session)}`,
+              disabled: !session.canSend,
+              badge: session.canSend ? undefined : "不可发送",
+              onClick: () => {
+                pick.sessionId = session.sessionId;
+                void render();
+              },
+            }),
+          ]));
+        }
+      };
+      search.addEventListener("input", paint);
+      paint();
+      body.append(search, list);
+      return;
+    }
+
+    const target = sessionOf(pick.sessionId);
+    note.textContent = `目标：${appName(pick.appId)} / ${projectName(pick.projectId)} / ${target?.title ?? "会话"}`;
+    const preview = el("pre", { className: "preview", text: "正在生成预览…" });
+    body.append(preview);
+    await prepare(preview);
+  }
+
+  async function prepare(preview: HTMLElement): Promise<void> {
+    prepared = null;
+    if (!pick.sessionId) return;
+    send.disabled = true;
+    status.classList.remove("error");
+    status.textContent = "正在校验目标会话…";
+    try {
+      prepared = await call<TransferPrepareResult>(
+        "transfer.prepare",
+        {
+          sourceSessionId: source.sessionId,
+          messageId: message.messageId,
+          targetSessionId: pick.sessionId,
+        },
+        60_000,
+      );
+      preview.textContent = prepared.text;
+      status.textContent = `${prepared.textLength} 字符 · 发送内容与预览完全一致${prepared.note ? ` · ${prepared.note}` : ""}`;
+      send.disabled = !prepared.target.canSend || sending || done;
+      if (!prepared.target.canSend) status.classList.add("error");
+    } catch (error) {
+      preview.textContent = "无法生成预览";
+      status.classList.add("error");
+      status.textContent = messageOf(error);
+    }
+  }
+
+  async function commit(): Promise<void> {
+    if (!prepared || sending || done || !prepared.target.canSend) return;
+    sending = true;
+    send.disabled = true;
+    status.classList.remove("error");
+    status.textContent = "正在发送…";
+    try {
+      const result = await call<TransferCommitResult>(
+        "transfer.commit",
+        { transferId: prepared.transferId },
+        60_000,
+      );
+      done = true;
+      status.textContent = result.delivered
+        ? `已投递给「${prepared.target.title}」（${result.textLength} 字符）`
+        : (result.detail ?? "已提交，但目标会话尚未确认投递");
+      if (!result.delivered && !result.accepted) status.classList.add("error");
+      send.textContent = "已发送";
+      cancel.textContent = "关闭";
+      viewTarget.classList.remove("hidden");
+      back.classList.add("hidden");
+    } catch (error) {
+      prepared = null;
+      status.classList.add("error");
+      status.textContent = `${messageOf(error)}；重新选择会话可再试`;
+      send.disabled = true;
+    } finally {
+      sending = false;
+    }
+  }
+
+  await render();
+}
+
+async function revokeDevice(deviceId: string, status: HTMLElement): Promise<void> {
+  if (!active) return;
+  if (!confirm("撤销后该设备必须重新配对，确定继续？")) return;
+  const response = await active.request("device.revoke", { deviceId });
+  if (!response.ok) {
+    status.classList.add("error");
+    status.textContent = response.error?.message ?? "撤销失败";
+    return;
+  }
+  const device = connected?.device;
+  if (!device) return;
+  try {
+    await connectAndShow(device);
+  } catch (error) {
+    status.textContent = messageOf(error);
+  }
+}
+
+function emptyState(title: string, hint: string): HTMLElement {
+  return el("div", { className: "empty" }, [
+    el("span", { className: "empty-mark", text: "·" }),
+    el("strong", { text: title }),
+    el("span", { className: "hint", text: hint }),
+  ]);
+}
+
+function errorView(title: string, message: string): HTMLElement {
+  return el("main", { className: "main" }, [
+    el("p", { className: "eyebrow", text: "出错了" }),
+    el("h1", { className: "display", text: title }),
+    el("div", { className: "notice error", text: message }),
+    el("div", { className: "actions" }, [
+      button("返回客户端", () => navigate({ level: "clients" }), "btn secondary"),
+    ]),
+  ]);
+}
+
+function skeletonView(route: Route): HTMLElement {
+  const rows = el("div", { className: "list" });
+  for (let index = 0; index < 4; index += 1) {
+    rows.append(el("div", { className: "row skeleton" }, [
+      el("span", { className: "mark skeleton-block" }),
+      el("span", { className: "row-main" }, [
+        el("span", { className: "skeleton-line", attrs: { style: "width: 42%" } }),
+        el("span", { className: "skeleton-line thin", attrs: { style: "width: 68%" } }),
+      ]),
+    ]));
+  }
+  return el("main", { className: "main" }, [
+    el("p", { className: "eyebrow", text: route.level === "chat" ? "会话" : "客户端" }),
+    el("div", { className: "skeleton-title" }),
+    rows,
+  ]);
+}
+
+const initialLink = takeInviteLink();
+if (initialLink) {
+  void beginPairing(initialLink);
+} else {
+  showHome();
+}
+
+window.addEventListener("hashchange", () => {
+  const link = takeInviteLink();
+  if (link) void beginPairing(link);
+  else void renderRoute();
+});

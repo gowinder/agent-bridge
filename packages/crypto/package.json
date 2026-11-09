@@ -1,0 +1,25 @@
+{
+  "name": "@agent-bridge/crypto",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "default": "./dist/node.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "build:wasm": "sh scripts/build-wasm.sh"
+  },
+  "dependencies": {
+    "@agent-bridge/protocol": "*"
+  }
+}

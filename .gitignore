@@ -1,0 +1,28 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.dev.vars
+.wrangler/
+.DS_Store
+apps/bridge/config/
+packages/crypto/wasm/*.wasm
+packages/crypto/native/target/
+packages/crypto/native/.cargo-home/
+.cargo-home/
+.npm-cache/
+
+apps/web/public/noise.wasm
+.home/
+.playwright-mcp/
+.claude/.cc-writes/
+
+# P0 探针产物
+p0/**/target/
+p0/**/.cargo-home/
+p0/**/*.wasm
+
+# 误生成的临时目录
+$TMPDIR/
+
+__pycache__/
+*.pyc

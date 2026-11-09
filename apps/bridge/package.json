@@ -1,0 +1,17 @@
+{
+  "name": "@agent-bridge/bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-bridge": "./dist/main.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/main.js serve"
+  },
+  "dependencies": {
+    "@agent-bridge/crypto": "*",
+    "@agent-bridge/protocol": "*"
+  }
+}

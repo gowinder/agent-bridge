@@ -1,0 +1,35 @@
+name = "agent-bridge-relay"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+
+[dev]
+port = 8787
+
+[durable_objects]
+bindings = [{ name = "ROOMS", class_name = "Room" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*"]
+
+[env.preview]
+name = "agent-bridge-preview"
+
+[env.preview.durable_objects]
+bindings = [{ name = "ROOMS", class_name = "Room" }]
+
+[[env.preview.migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[env.preview.assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*"]

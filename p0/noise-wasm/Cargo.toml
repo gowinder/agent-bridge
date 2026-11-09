@@ -1,0 +1,16 @@
+[package]
+name = "noise-wasm"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+snow = { version = "=0.9.6", default-features = false, features = ["default-resolver"] }
+getrandom = { version = "0.2", features = ["custom"] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
