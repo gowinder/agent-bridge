@@ -721,9 +721,18 @@ async function ensureVault(): Promise<void> {
       title: "设置凭据密码",
       hint: "设备私钥会用这个密码加密后保存在本机，密码不会离开浏览器。忘记密码只能重新配对。",
       confirm: true,
-      submit: setupPassword,
+      submit: async (password) => {
+        try {
+          await setupPassword(password);
+        } catch (error) {
+          // 另一个标签页刚好先设好了口令：不覆盖它，回到解锁流程。
+          if (!(error instanceof LockedError && hasVault())) throw error;
+        }
+      },
     });
     if (created === null) throw new LockedError("未设置密码，操作已取消");
+    // 另一个标签页抢先设好了口令：接着走解锁流程，而不是覆盖那份存储。
+    if (needsUnlock()) return ensureVault();
     return;
   }
   if (!needsUnlock()) return;

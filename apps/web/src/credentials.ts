@@ -52,6 +52,8 @@ let secrets: Map<string, DeviceSecrets> | null = null;
 let unlockTimer: ReturnType<typeof setTimeout> | null = null;
 /** 后台标签页的定时器会被节流，所以除了定时器还要按时间戳兜底判断。 */
 let lastUsed = 0;
+/** 内存里的 secrets 对应的密文；不一致说明别的标签页改过存储。 */
+let vaultData: string | null = null;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -195,36 +197,78 @@ async function seal(key: CryptoKey, salt: Uint8Array<ArrayBuffer>, map: Map<stri
   return { salt: toBase64(salt), iv: toBase64(iv), data: toBase64(new Uint8Array(sealed)) };
 }
 
+function decryptVault(key: CryptoKey, vault: Vault): Promise<ArrayBuffer> {
+  return crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64(vault.iv) },
+    key,
+    fromBase64(vault.data),
+  );
+}
+
+function parseSecrets(plain: ArrayBuffer): Map<string, DeviceSecrets> {
+  const parsed: unknown = JSON.parse(decoder.decode(plain));
+  const map = new Map<string, DeviceSecrets>();
+  if (typeof parsed === "object" && parsed !== null) {
+    for (const [name, value] of Object.entries(parsed)) if (isSecrets(value)) map.set(name, value);
+  }
+  return map;
+}
+
+/**
+ * Writes must not clobber another tab's work: decrypt the vault on disk whenever it is
+ * not the one this session already holds, so a stale tab merges instead of overwriting.
+ */
+async function latestSecrets(store: Store): Promise<Map<string, DeviceSecrets>> {
+  const vault = store.vault;
+  if (!vault) throw new LockedError();
+  if (secrets !== null && vault.data === vaultData) return secrets;
+  if (sessionKey === null) throw new LockedError();
+  let plain: ArrayBuffer;
+  try {
+    plain = await decryptVault(sessionKey, vault);
+  } catch {
+    // 另一个标签页重置了口令，旧密钥解不开新密文；清掉内存状态让调用方重新解锁。
+    lock();
+    throw new LockedError("凭据已在其它标签页重新设置，请重新输入密码");
+  }
+  secrets = parseSecrets(plain);
+  vaultData = vault.data;
+  return secrets;
+}
+
 export async function unlock(password: string): Promise<void> {
   const vault = readStore()?.vault;
   if (!vault) throw new Error("还没有设置密码");
   const key = await deriveKey(password, fromBase64(vault.salt));
   let plain: ArrayBuffer;
   try {
-    plain = await crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: fromBase64(vault.iv) },
-      key,
-      fromBase64(vault.data),
-    );
+    plain = await decryptVault(key, vault);
   } catch {
     // AES-GCM 的认证标签校验失败就是密码不对，没有别的解释。
     throw new Error("密码不正确");
   }
-  const parsed: unknown = JSON.parse(decoder.decode(plain));
-  const map = new Map<string, DeviceSecrets>();
-  if (typeof parsed === "object" && parsed !== null) {
-    for (const [name, value] of Object.entries(parsed)) if (isSecrets(value)) map.set(name, value);
-  }
   sessionKey = key;
-  secrets = map;
+  secrets = parseSecrets(plain);
+  vaultData = vault.data;
   armUnlockTimer();
 }
 
 export function lock(): void {
   sessionKey = null;
   secrets = null;
+  vaultData = null;
   if (unlockTimer !== null) clearTimeout(unlockTimer);
   unlockTimer = null;
+}
+
+/**
+ * Another tab wrote the vault (storage events only fire in the tabs that did not write):
+ * our in-memory map is stale, so drop it and let the next use ask for the password.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY || event.key === LEGACY_KEY) lock();
+  });
 }
 
 /**
@@ -238,9 +282,22 @@ export function resetCredentials(): void {
   lock();
 }
 
+/** Web Locks 让同源的多个标签页排队写存储，避免读-改-写互相覆盖。 */
+async function withVaultLock<T>(run: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  if (!locks) return run();
+  return locks.request("agent-bridge:credentials", run);
+}
+
 /** Encrypts what is on disk now, including anything left in the old plaintext layout. */
-export async function setupPassword(password: string): Promise<void> {
+export function setupPassword(password: string): Promise<void> {
+  return withVaultLock(() => writePassword(password));
+}
+
+async function writePassword(password: string): Promise<void> {
   const store = readStore();
+  // 另一个标签页可能刚设好口令：不能再覆盖，改成让用户解锁同一份存储。
+  if (store?.vault) throw new LockedError("本机凭据已由其它标签页设置，请重新输入密码");
   const legacy = readLegacy();
   const devices: DeviceMeta[] = store
     ? store.devices
@@ -252,10 +309,12 @@ export async function setupPassword(password: string): Promise<void> {
   for (const [name, value] of secrets ?? []) map.set(name, value);
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const key = await deriveKey(password, salt);
-  writeStore({ devices, vault: await seal(key, salt, map) });
+  const vault = await seal(key, salt, map);
+  writeStore({ devices, vault });
   localStorage.removeItem(LEGACY_KEY);
   sessionKey = key;
   secrets = map;
+  vaultData = vault.data;
   armUnlockTimer();
 }
 
@@ -280,7 +339,11 @@ export function getDeviceSecrets(device: { relayUrl: string; roomId: string }): 
   return null;
 }
 
-export async function saveDevice(device: StoredDevice): Promise<void> {
+export function saveDevice(device: StoredDevice): Promise<void> {
+  return withVaultLock(() => writeDevice(device));
+}
+
+async function writeDevice(device: StoredDevice): Promise<void> {
   const { privateKey, reconnectToken, ...meta } = device;
   const store = readStore();
   if (!store || store.vault === null) {
@@ -293,16 +356,24 @@ export async function saveDevice(device: StoredDevice): Promise<void> {
     return;
   }
   if (sessionKey === null || secrets === null) throw new LockedError();
+  // 先按磁盘上的最新密文合并，再写回，避免覆盖别的标签页刚配对的设备。
+  const map = await latestSecrets(store);
   const devices = store.devices.filter(
     (item) => !(item.relayUrl === device.relayUrl && item.roomId === device.roomId),
   );
   devices.push(meta);
-  secrets.set(keyOf(device), { privateKey, reconnectToken });
-  writeStore({ devices, vault: await seal(sessionKey, fromBase64(store.vault.salt), secrets) });
+  map.set(keyOf(device), { privateKey, reconnectToken });
+  const vault = await seal(sessionKey, fromBase64(store.vault.salt), map);
+  writeStore({ devices, vault });
+  vaultData = vault.data;
   armUnlockTimer();
 }
 
-export async function removeDevice(relayUrl: string, roomId: string): Promise<void> {
+export function removeDevice(relayUrl: string, roomId: string): Promise<void> {
+  return withVaultLock(() => deleteDevice(relayUrl, roomId));
+}
+
+async function deleteDevice(relayUrl: string, roomId: string): Promise<void> {
   const store = readStore();
   if (!store || store.vault === null) {
     const legacy = readLegacy().filter(
@@ -319,8 +390,11 @@ export async function removeDevice(relayUrl: string, roomId: string): Promise<vo
     writeStore({ devices, vault: store.vault });
     return;
   }
-  secrets.delete(keyOf({ relayUrl, roomId }));
-  writeStore({ devices, vault: await seal(sessionKey, fromBase64(store.vault.salt), secrets) });
+  const map = await latestSecrets(store);
+  map.delete(keyOf({ relayUrl, roomId }));
+  const vault = await seal(sessionKey, fromBase64(store.vault.salt), map);
+  writeStore({ devices, vault });
+  vaultData = vault.data;
 }
 
 const EXPIRY_WARNING_MS = 3 * 24 * 60 * 60 * 1000;
