@@ -66,6 +66,8 @@ interface ParsedLog {
   lastTime: number;
   lastTurnReason: string;
   busy: boolean;
+  /** Untruncated text per message, kept for transfers. */
+  texts: Map<string, string[]>;
 }
 
 interface JsonEvent {
@@ -104,6 +106,7 @@ function sessionFileOf(dir: string): string | null {
 /** Streams only the head of a session log, long enough for its identity and title. */
 function readHead(path: string): Promise<HeadInfo | null> {
   return new Promise<HeadInfo | null>((resolve) => {
+    const input = createReadStream(path);
     const stream = createZstdDecompress();
     let buffer = "";
     let seen = 0;
@@ -115,6 +118,8 @@ function readHead(path: string): Promise<HeadInfo | null> {
     const finish = (): void => {
       if (done) return;
       done = true;
+      // Reaching the wanted line ends the read early; close the file descriptor too.
+      input.destroy();
       stream.destroy();
       resolve(header ? { header, title, firstUser, label } : null);
     };
@@ -169,9 +174,8 @@ function readHead(path: string): Promise<HeadInfo | null> {
     });
     stream.on("error", finish);
     stream.on("end", finish);
-    createReadStream(path)
-      .on("error", finish)
-      .pipe(stream);
+    input.on("error", finish);
+    input.pipe(stream);
   });
 }
 
@@ -183,20 +187,32 @@ function parseLog(path: string, sessionId: string): ParsedLog {
     throw new RpcError("adapter_unavailable", "无法解压 dsh 会话记录");
   }
   const messages: MessageRecord[] = [];
+  const texts = new Map<string, string[]>();
   const seenTools = new Set<string>();
   let firstTime = 0;
   let lastTime = 0;
   let lastTurnReason = "";
   let openTurn = false;
 
-  const appendAssistant = (messageId: string, createdAt: number, blocks: MessageBlock[]): void => {
+  const appendAssistant = (
+    messageId: string,
+    createdAt: number,
+    blocks: MessageBlock[],
+    fullText?: string,
+  ): void => {
     const last = messages.at(-1);
     if (last && last.role === "assistant") {
       last.blocks.push(...blocks);
       if (!last.createdAt) last.createdAt = createdAt;
+      if (fullText) {
+        const list = texts.get(last.messageId);
+        if (list) list.push(fullText);
+        else texts.set(last.messageId, [fullText]);
+      }
       return;
     }
     messages.push({ messageId, sessionId, role: "assistant", createdAt, blocks });
+    texts.set(messageId, fullText ? [fullText] : []);
   };
 
   for (const line of raw.toString("utf8").split("\n")) {
@@ -237,6 +253,7 @@ function parseLog(path: string, sessionId: string): ParsedLog {
         createdAt: time,
         blocks: [{ type: "text", ...truncate(text, MAX_BLOCK_CHARS) }],
       });
+      texts.set(messageId, [text]);
       continue;
     }
     if (event.type === "assistant/message") {
@@ -244,11 +261,14 @@ function parseLog(path: string, sessionId: string): ParsedLog {
       const content = message?.content;
       if (!Array.isArray(content)) continue;
       const blocks: MessageBlock[] = [];
+      const parts: string[] = [];
       for (const part of content) {
         if (!part || typeof part !== "object") continue;
         const item = part as { type?: string; text?: unknown; id?: unknown; name?: unknown; arguments?: unknown };
         if (item.type === "text" && typeof item.text === "string" && item.text.trim()) {
-          blocks.push({ type: "text", ...truncate(item.text.trim(), MAX_BLOCK_CHARS) });
+          const text = item.text.trim();
+          parts.push(text);
+          blocks.push({ type: "text", ...truncate(text, MAX_BLOCK_CHARS) });
           continue;
         }
         if (item.type === "tool-call" && typeof item.name === "string") {
@@ -260,11 +280,11 @@ function parseLog(path: string, sessionId: string): ParsedLog {
         }
       }
       if (blocks.length === 0) continue;
-      appendAssistant(messageId, time, blocks);
+      appendAssistant(messageId, time, blocks, parts.join("\n\n"));
     }
   }
 
-  return { messages, firstTime, lastTime, lastTurnReason, busy: openTurn };
+  return { messages, firstTime, lastTime, lastTurnReason, busy: openTurn, texts };
 }
 
 function findBinary(): string | null {
@@ -360,16 +380,14 @@ export class DshAdapter implements SessionAdapter {
 
   async messageText(sessionId: string, messageId: string): Promise<MessageText | null> {
     const entry = await this.entry(sessionId);
-    const message = this.log(entry, sessionId).messages.find((item) => item.messageId === messageId);
+    const parsed = this.log(entry, sessionId);
+    const message = parsed.messages.find((item) => item.messageId === messageId);
     if (!message) return null;
     return {
       messageId: message.messageId,
       role: message.role,
       createdAt: message.createdAt,
-      text: message.blocks
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("\n\n"),
+      text: (parsed.texts.get(message.messageId) ?? []).join("\n\n"),
     };
   }
 

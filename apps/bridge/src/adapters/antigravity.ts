@@ -73,6 +73,8 @@ interface StepRow {
 interface ParsedConversation {
   messages: MessageRecord[];
   interrupted: boolean;
+  /** Untruncated text per message, kept for transfers. */
+  texts: Map<string, string[]>;
 }
 
 /** A tiny protobuf reader good enough for the step payload shape Antigravity writes. */
@@ -164,6 +166,7 @@ function parseTime(value: string | null): number {
 
 function parseMessages(sessionId: string, conversationId: string): ParsedConversation {
   const messages: MessageRecord[] = [];
+  const texts = new Map<string, string[]>();
   const seenTools = new Set<string>();
   let interrupted = false;
 
@@ -175,14 +178,25 @@ function parseMessages(sessionId: string, conversationId: string): ParsedConvers
   }
   try {
     /** Antigravity writes one row per assistant step; keep one message per turn. */
-    const appendAssistant = (messageId: string, createdAt: number, blocks: MessageBlock[]): void => {
+    const appendAssistant = (
+      messageId: string,
+      createdAt: number,
+      blocks: MessageBlock[],
+      fullText?: string,
+    ): void => {
       const last = messages.at(-1);
       if (last && last.role === "assistant") {
         last.blocks.push(...blocks);
         if (!last.createdAt) last.createdAt = createdAt;
+        if (fullText) {
+          const list = texts.get(last.messageId);
+          if (list) list.push(fullText);
+          else texts.set(last.messageId, [fullText]);
+        }
         return;
       }
       messages.push({ messageId, sessionId, role: "assistant", createdAt, blocks });
+      texts.set(messageId, fullText ? [fullText] : []);
     };
     const rows = db
       .prepare("SELECT idx, step_type, step_payload FROM steps ORDER BY idx")
@@ -202,14 +216,15 @@ function parseMessages(sessionId: string, conversationId: string): ParsedConvers
           createdAt,
           blocks: [{ type: "text", ...truncate(value, MAX_BLOCK_CHARS) }],
         });
+        texts.set(messageId, [value]);
         continue;
       }
 
       if (row.step_type === STEP_MODEL) {
         const blocks: MessageBlock[] = [];
-        const visible = fields.text.get(".20.1") ?? fields.text.get(".20.8");
-        if (visible?.trim()) {
-          blocks.push({ type: "text", ...truncate(visible.trim(), MAX_BLOCK_CHARS) });
+        const visible = (fields.text.get(".20.1") ?? fields.text.get(".20.8"))?.trim();
+        if (visible) {
+          blocks.push({ type: "text", ...truncate(visible, MAX_BLOCK_CHARS) });
         }
         const toolId = fields.text.get(".20.7.1");
         const toolName = fields.text.get(".20.7.2");
@@ -218,7 +233,7 @@ function parseMessages(sessionId: string, conversationId: string): ParsedConvers
           blocks.push(toolBlock(toolName, fields.text.get(".20.7.3") ?? ""));
         }
         if (blocks.length === 0) continue;
-        appendAssistant(messageId, createdAt, blocks);
+        appendAssistant(messageId, createdAt, blocks, visible);
         continue;
       }
 
@@ -242,7 +257,7 @@ function parseMessages(sessionId: string, conversationId: string): ParsedConvers
     db.close();
   }
 
-  return { messages, interrupted };
+  return { messages, interrupted, texts };
 }
 
 function workspacePath(uris: string | null): string {
@@ -373,18 +388,14 @@ export class AntigravityAdapter implements SessionAdapter {
   messageText(sessionId: string, messageId: string): MessageText | null {
     const row = this.row(sessionId);
     if (!row) return null;
-    const message = this.parsed(sessionId, row.conversation_id).messages.find(
-      (item) => item.messageId === messageId,
-    );
+    const parsed = this.parsed(sessionId, row.conversation_id);
+    const message = parsed.messages.find((item) => item.messageId === messageId);
     if (!message) return null;
     return {
       messageId: message.messageId,
       role: message.role,
       createdAt: message.createdAt,
-      text: message.blocks
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("\n\n"),
+      text: (parsed.texts.get(message.messageId) ?? []).join("\n\n"),
     };
   }
 

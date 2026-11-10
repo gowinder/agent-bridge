@@ -218,6 +218,8 @@ interface ParsedConversation {
   messages: MessageRecord[];
   busy: boolean;
   interrupted: boolean;
+  /** Untruncated text per message, kept for transfers. */
+  texts: Map<string, string[]>;
 }
 
 export class AntigravityDesktopAdapter implements SessionAdapter {
@@ -317,10 +319,7 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
       messageId: message.messageId,
       role: message.role,
       createdAt: message.createdAt,
-      text: message.blocks
-        .filter((block) => block.type === "text")
-        .map((block) => block.text)
-        .join("\n\n"),
+      text: (parsed.texts.get(message.messageId) ?? []).join("\n\n"),
     };
   }
 
@@ -350,19 +349,31 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
   private parsed(cascadeId: string, steps: Step[]): ParsedConversation {
     const sessionId = `${this.key}:${cascadeId}`;
     const messages: MessageRecord[] = [];
+    const texts = new Map<string, string[]>();
     const seenTools = new Set<string>();
     let busy = false;
     let interrupted = false;
 
     /** Steps arrive one per assistant action; keep one message per turn. */
-    const appendAssistant = (messageId: string, createdAt: number, blocks: MessageBlock[]): void => {
+    const appendAssistant = (
+      messageId: string,
+      createdAt: number,
+      blocks: MessageBlock[],
+      fullText?: string,
+    ): void => {
       const last = messages.at(-1);
       if (last && last.role === "assistant") {
         last.blocks.push(...blocks);
         if (!last.createdAt) last.createdAt = createdAt;
+        if (fullText) {
+          const list = texts.get(last.messageId);
+          if (list) list.push(fullText);
+          else texts.set(last.messageId, [fullText]);
+        }
         return;
       }
       messages.push({ messageId, sessionId, role: "assistant", createdAt, blocks });
+      texts.set(messageId, fullText ? [fullText] : []);
     };
 
     steps.forEach((step, index) => {
@@ -381,19 +392,24 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
           createdAt,
           blocks: [{ type: "text", ...truncate(text, MAX_BLOCK_CHARS) }],
         });
+        texts.set(messageId, [text]);
         return;
       }
 
       if (step.type === "CORTEX_STEP_TYPE_PLANNER_RESPONSE") {
         const response = step.plannerResponse;
         const text = (response?.modifiedResponse ?? "").trim() || (response?.response ?? "").trim();
-        if (text) appendAssistant(messageId, createdAt, [{ type: "text", ...truncate(text, MAX_BLOCK_CHARS) }]);
+        if (text) {
+          appendAssistant(messageId, createdAt, [{ type: "text", ...truncate(text, MAX_BLOCK_CHARS) }], text);
+        }
         return;
       }
 
       if (step.type === "CORTEX_STEP_TYPE_NOTIFY_USER") {
         const text = step.notifyUser?.notificationContent?.trim();
-        if (text) appendAssistant(messageId, createdAt, [{ type: "text", ...truncate(text, MAX_BLOCK_CHARS) }]);
+        if (text) {
+          appendAssistant(messageId, createdAt, [{ type: "text", ...truncate(text, MAX_BLOCK_CHARS) }], text);
+        }
         return;
       }
 
@@ -416,12 +432,13 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
       appendAssistant(messageId, createdAt, [{ type: "tool", ...truncate(label, 400) }]);
     });
 
-    return { messages, busy, interrupted };
+    return { messages, busy, interrupted, texts };
   }
 
   private summaryOf(entry: CatalogEntry): SessionSummary {
     const summary = entry.summary;
-    const createdAt = summary?.createdAt || Math.round(entry.birthtimeMs) || entry.mtimeMs;
+    const createdAt =
+      summary?.createdAt || Math.round(entry.birthtimeMs) || entry.mtimeMs || summary?.updatedAt || Date.now();
     return {
       sessionId: `${this.key}:${entry.cascadeId}`,
       appId: this.key,
@@ -478,6 +495,15 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
         birthtimeMs: stat.birthtimeMs,
         mtimeMs: stat.mtimeMs,
       });
+    }
+    // The conversation in use may not be persisted as a .pb yet; the running
+    // language server still reports it and can serve its steps. State-store-only
+    // summaries are left out: for those ids the language server answers
+    // "trajectory not found", so listing them would only produce dead rows.
+    const persisted = new Set(entries.map((entry) => entry.cascadeId));
+    for (const [cascadeId, summary] of this.scan().live) {
+      if (persisted.has(cascadeId)) continue;
+      entries.push({ cascadeId, summary, birthtimeMs: 0, mtimeMs: 0 });
     }
     entries.sort((a, b) => this.updatedAt(b) - this.updatedAt(a));
     const limited = entries.slice(0, MAX_SESSIONS);
