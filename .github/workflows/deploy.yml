@@ -3,7 +3,13 @@ name: Deploy
 on:
   push:
     branches: [develop, main]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      force:
+        description: 忽略版本号检查，强制部署
+        type: boolean
+        default: false
 
 concurrency:
   group: deploy-${{ github.ref_name }}
@@ -13,8 +19,42 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # One extra commit, so the previous package.json can be compared.
+          fetch-depth: 2
+
+      - id: detect
+        name: 检查版本号是否变化
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').version ?? ''")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          changed=false
+          if [ "${{ inputs.force }}" = "true" ]; then
+            changed=true
+          elif [ -z "$version" ]; then
+            changed=false
+          elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
+            git show HEAD^:package.json > "$RUNNER_TEMP/previous-package.json" 2>/dev/null || echo '{}' > "$RUNNER_TEMP/previous-package.json"
+            previous=$(node -p "require('$RUNNER_TEMP/previous-package.json').version ?? ''")
+            if [ "$previous" != "$version" ]; then changed=true; fi
+          else
+            # Shallow history gives no previous commit; a missing version counts as a change.
+            changed=true
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "版本号：$version，变化：$changed"
+
   preview:
-    if: github.ref_name == 'develop'
+    needs: version
+    if: github.ref == 'refs/heads/develop' && needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     environment: preview
     steps:
@@ -44,7 +84,9 @@ jobs:
           command: deploy --env preview
 
   production:
-    if: github.ref_name == 'main'
+    needs: version
+    # Tags deploy unconditionally; main only deploys when the version moves.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && needs.version.outputs.changed == 'true')
     runs-on: ubuntu-latest
     environment: production
     steps:
