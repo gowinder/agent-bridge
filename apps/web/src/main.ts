@@ -857,6 +857,10 @@ function recentSessionsButton(): HTMLElement | null {
     for (const item of items.slice(0, 12)) {
       const app = snapshot?.apps.find((candidate) => candidate.appId === item.appId);
       const meta = [app ? shortAgentName(app) : item.appId, recentProjectName(item.projectId), recentTime(item.at)];
+      // 最近访问只存了标题等静态信息，执行状态要回到当前快照里查。
+      const running = snapshot?.sessions.some(
+        (session) => session.sessionId === item.sessionId && session.busy === true,
+      ) === true;
       const entry = button(
         "",
         () => {
@@ -872,7 +876,10 @@ function recentSessionsButton(): HTMLElement | null {
       );
       entry.setAttribute("role", "menuitem");
       entry.append(
-        el("span", { className: "recent-menu-name", text: item.title }),
+        el("span", { className: "recent-menu-name" }, [
+          ...(running ? [el("span", { className: "spinner recent-spinner" })] : []),
+          el("span", { className: "recent-menu-text", text: item.title }),
+        ]),
         el("span", { className: "recent-menu-meta", text: meta.join(" · ") }),
       );
       menu.append(entry);
@@ -1442,7 +1449,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const submit = (): void => {
     if (sendButton.disabled) return;
-    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState);
+    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
   };
   const sendButton = button("发送", submit, "btn primary");
   sendButton.disabled = !canSend;
@@ -2389,6 +2396,7 @@ async function sendMessage(
   pending: PendingAttachment[],
   renderAttachments: () => void,
   updateSendState: () => void,
+  onSent: () => void,
 ): Promise<void> {
   if (pending.some((item) => item.status === "uploading")) {
     status.textContent = "附件还在上传，请稍候";
@@ -2431,6 +2439,8 @@ async function sendMessage(
       : result.accepted
         ? (result.detail ?? "已提交，等待桌面执行")
         : (result.detail ?? "未确认投递");
+    // 发送落地后收起输入区，把空间让给对话；需要时点「写消息…」再展开。
+    if (result.accepted) onSent();
     window.setTimeout(() => {
       void refreshTail(state).then((page) => {
         if (page?.nextBefore) loadOlder.disabled = false;

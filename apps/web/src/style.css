@@ -386,11 +386,23 @@ a.crumb:hover {
 }
 
 .recent-menu-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   max-width: 100%;
+  font-size: 13.5px;
+}
+
+.recent-menu-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+}
+
+.recent-spinner {
+  width: 10px;
+  height: 10px;
 }
 
 .recent-menu-meta {
