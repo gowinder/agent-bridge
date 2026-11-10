@@ -418,6 +418,10 @@ export class Room {
       } else if (!constantTimeEqual(presented, stored)) {
         this.fail(ws, "invalid_credential", "bad bridge token");
         return;
+      } else {
+        // 已认领房间的桥重连同样算活跃：否则 29 天重连一次、又在下个 30 天前断开，
+        // 房间会因为从未刷新 last_seen 被空闲回收连凭据一起清掉。
+        await this.touch();
       }
       for (const other of this.ctx.getWebSockets()) {
         const attachment = other.deserializeAttachment() as Attachment | null;

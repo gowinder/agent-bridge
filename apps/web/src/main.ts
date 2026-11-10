@@ -1045,7 +1045,7 @@ async function renderRoute(soft = false): Promise<void> {
   else if (route.taskId) await renderTask({ ...route, taskId: route.taskId }, token);
   else await renderChat(route, token);
   if (route.level === "clients" || route.level === "projects" || route.level === "sessions") {
-    startSnapshotPolling();
+    startSnapshotPolling(token);
   }
 }
 
@@ -1053,11 +1053,11 @@ async function renderRoute(soft = false): Promise<void> {
  * 列表页只加载一次快照的话，桌面上新建的会话要整页重载才看得到；这里按固定间隔重新拉取，
  * 内容有变化才重绘，避免打断正在看列表的人。
  */
-function startSnapshotPolling(): void {
+function startSnapshotPolling(token: number): void {
   stopPolling();
   pollTimer = window.setInterval(() => {
     if (document.visibilityState !== "visible") return;
-    void refreshSnapshot();
+    void refreshSnapshot(token);
   }, 5_000);
 }
 
@@ -1073,13 +1073,16 @@ function snapshotSignature(): string {
   ].join("|");
 }
 
-async function refreshSnapshot(): Promise<void> {
+async function refreshSnapshot(token: number): Promise<void> {
   const before = snapshotSignature();
   try {
     await ensureSnapshot(true);
   } catch {
     return;
   }
+  // 拉取期间可能已经打开会话或切到别的页：那次渲染有自己的 renderToken，
+  // 这里再 renderRoute() 会把正在编辑的输入区整个重建掉。
+  if (token !== renderToken) return;
   if (snapshotSignature() === before) return;
   void renderRoute();
 }
