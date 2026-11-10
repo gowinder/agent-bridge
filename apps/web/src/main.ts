@@ -112,6 +112,10 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 7.6 0c0 3 1 4.2 1.6 4.7H2.6c.6-.5 1.6-1.7 1.6-4.7Z"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/></svg>',
   bellOff:
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 5.6-3.3M11.8 7.4c.1 2 1 3.1 1.5 3.6H5.2"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+  expand:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
+  collapse:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -2271,6 +2275,7 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     state,
     setOpen(open: boolean) {
       root.classList.toggle("is-open", open);
+      if (!open) root.classList.remove("is-expanded");
       backdrop.classList.toggle("is-open", open);
       if (open) void refreshRail(state);
       handle.onChange?.(open);
@@ -2334,6 +2339,12 @@ let currentRail: RailHandle | null = null;
 function dismissRail(): void {
   const rail = currentRail;
   if (!rail || !rail.root.classList.contains("is-open")) return;
+  // Escape leaves fullscreen first; only the next press closes the rail.
+  if (rail.root.classList.contains("is-expanded")) {
+    rail.root.classList.remove("is-expanded");
+    if (rail.state.tab === "files") paintFiles(rail.state);
+    return;
+  }
   rail.setOpen(false);
   writeRailOpen(false);
 }
@@ -2468,6 +2479,23 @@ async function openFile(state: RailState, path: string): Promise<void> {
   paintFiles(state);
 }
 
+/** The file pane shares the 300px rail; this button gives it the whole viewport and back. */
+function railExpandButton(state: RailState): HTMLButtonElement {
+  const node = button("", () => {
+    state.root.classList.toggle("is-expanded");
+    paint();
+  }, "icon-btn rail-icon-btn");
+  const paint = (): void => {
+    const expanded = state.root.classList.contains("is-expanded");
+    node.replaceChildren(icon(expanded ? "collapse" : "expand", "icon"));
+    node.title = expanded ? "退出全屏" : "全屏查看";
+    node.setAttribute("aria-label", node.title);
+    node.setAttribute("aria-pressed", String(expanded));
+  };
+  paint();
+  return node;
+}
+
 function paintFiles(state: RailState, placeholder?: string): void {
   const files = state.files;
   const pane = state.panes.files;
@@ -2501,6 +2529,7 @@ function paintFiles(state: RailState, placeholder?: string): void {
   refresh.append(icon("refresh", "icon"));
   refresh.title = "刷新目录";
   bar.append(refresh);
+  bar.append(railExpandButton(state));
   pane.append(bar);
 
   if (files.root) pane.append(fileCrumbs(state));
@@ -2569,6 +2598,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     el("div", { className: "rail-filebar" }, [
       back,
       el("span", { className: "rail-filebar-name", text: file.name, attrs: { title: file.path } }),
+      railExpandButton(state),
     ]),
   );
   if (file.dataBase64) {
