@@ -2021,6 +2021,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   }
   document.title = `后台任务 · ${summary.title} · Agent Bridge`;
   markRead(summary.sessionId);
+  previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
 
   const note = el("p", { className: "hint", text: "正在读取子任务记录…" });
   const list = el("div", { className: "transcript-body" });
@@ -3197,6 +3198,18 @@ async function readLocalFile(path: string): Promise<FsReadResult> {
   return call<FsReadResult>("fs.read", { root, path: full });
 }
 
+/**
+ * A `src` for an image response, or null when the file has to be shown as text.
+ * The bridge returns raster images as base64, but reads SVG as text.
+ */
+function imageSource(file: FsReadResult, path: string): string | null {
+  if (file.dataBase64) return `data:${file.mime};base64,${file.dataBase64}`;
+  if (!file.truncated && /\.svg$/i.test(path) && typeof file.text === "string") {
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(file.text)}`;
+  }
+  return null;
+}
+
 function fileRefChip(label: string, path: string): HTMLElement {
   const chip = el("button", { className: "file-ref", attrs: { type: "button", title: path } }, [
     icon("file", "file-ref-icon"),
@@ -3225,7 +3238,12 @@ function localFileImage(alt: string, href: string): HTMLElement | null {
   const load = (): void => {
     void readLocalFile(path).then(
       (file) => {
-        img.src = `data:${file.mime};base64,${file.dataBase64 ?? ""}`;
+        const src = imageSource(file, path);
+        if (!src) {
+          figure.replaceWith(fileRefChip(label, path));
+          return;
+        }
+        img.src = src;
         img.classList.remove("is-loading");
       },
       // Outside the project directory, or file browsing switched off.
@@ -3252,6 +3270,8 @@ let filePreviewOverlay: HTMLElement | null = null;
 let filePreviewBody: HTMLElement | null = null;
 let filePreviewTitle: HTMLElement | null = null;
 let filePreviewNote: HTMLElement | null = null;
+/** Increments per open/close so a late response cannot overwrite a newer preview. */
+let previewRequest = 0;
 
 function ensureFilePreview(): HTMLElement {
   if (filePreviewOverlay) return filePreviewOverlay;
@@ -3283,6 +3303,7 @@ function ensureFilePreview(): HTMLElement {
 }
 
 function closeFilePreview(): void {
+  previewRequest += 1;
   if (!filePreviewOverlay) return;
   filePreviewOverlay.hidden = true;
   document.body.classList.remove("has-file-preview");
@@ -3291,6 +3312,7 @@ function closeFilePreview(): void {
 
 async function openFilePreview(path: string): Promise<void> {
   const overlay = ensureFilePreview();
+  const request = (previewRequest += 1);
   overlay.hidden = false;
   document.body.classList.add("has-file-preview");
   if (filePreviewTitle) {
@@ -3301,13 +3323,11 @@ async function openFilePreview(path: string): Promise<void> {
   filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: "正在读取…" }));
   try {
     const file = await readLocalFile(path);
-    if (file.dataBase64) {
-      filePreviewBody?.replaceChildren(
-        el("img", {
-          className: "file-preview-img",
-          attrs: { src: `data:${file.mime};base64,${file.dataBase64}`, alt: file.name },
-        }),
-      );
+    // A newer preview (or a close) superseded this one while it was loading.
+    if (request !== previewRequest) return;
+    const src = imageSource(file, path);
+    if (src) {
+      filePreviewBody?.replaceChildren(el("img", { className: "file-preview-img", attrs: { src, alt: file.name } }));
     } else if (file.mime === "text/markdown") {
       const body = el("div", { className: "markdown file-preview-md" });
       body.append(renderMarkdown(file.text ?? ""));
@@ -3319,6 +3339,7 @@ async function openFilePreview(path: string): Promise<void> {
       filePreviewNote.textContent = `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`;
     }
   } catch (error) {
+    if (request !== previewRequest) return;
     filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
   }
 }
