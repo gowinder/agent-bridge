@@ -355,6 +355,9 @@ export class Devtools {
     });
     proc.on("close", (code, signal) => {
       clearTimeout(record.timer);
+      // A background job (`cmd &` with redirected output) lets the shell exit while the
+      // group lives on; sweep it before the record is dropped, or nothing can stop it later.
+      this.sweepGroup(record.proc.pid);
       if (!this.execs.delete(execId)) return;
       emit({
         execId,
@@ -392,17 +395,31 @@ export class Devtools {
     if (!record) return;
     record.killed = true;
     if (byUser) this.log(`已终止命令 ${execId.slice(0, 8)}`);
-    // Signal the whole group: the shell's children outlive a signal sent to the shell alone.
-    const signal = (name: NodeJS.Signals): void => {
-      const pid = record.proc.pid;
-      try {
-        if (pid !== undefined && process.platform !== "win32") process.kill(-pid, name);
-        else record.proc.kill(name);
-      } catch {
-        // already gone
-      }
-    };
-    signal("SIGTERM");
-    setTimeout(() => signal("SIGKILL"), 2_000).unref();
+    const pid = record.proc.pid;
+    this.signalGroup(pid, "SIGTERM");
+    setTimeout(() => this.signalGroup(pid, "SIGKILL"), 2_000).unref();
+  }
+
+  /** Signals the whole group: the shell's children outlive a signal sent to the shell alone. */
+  private signalGroup(pid: number | undefined, name: NodeJS.Signals): void {
+    if (pid === undefined) return;
+    try {
+      if (process.platform !== "win32") process.kill(-pid, name);
+      else process.kill(pid, name);
+    } catch {
+      // already gone
+    }
+  }
+
+  /** Terminates whatever the group still holds after its shell exited. */
+  private sweepGroup(pid: number | undefined): void {
+    if (pid === undefined || process.platform === "win32") return;
+    try {
+      process.kill(-pid, 0);
+    } catch {
+      return;
+    }
+    this.signalGroup(pid, "SIGTERM");
+    setTimeout(() => this.signalGroup(pid, "SIGKILL"), 2_000).unref();
   }
 }

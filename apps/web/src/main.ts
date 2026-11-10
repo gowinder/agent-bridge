@@ -25,6 +25,7 @@ import type {
   SessionListResult,
   SessionRailResult,
   SessionSummary,
+  ShellCancelResult,
   ShellEventData,
   ShellExecResult,
   TransferCommitResult,
@@ -521,7 +522,7 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
   stopActive();
   active = opened.client;
   opened.client.onEvent((message) => {
-    if (message.event === "shell.output") shellSink?.(message.data as ShellEventData);
+    if (message.event === "shell.output") handleShellEvent(message.data as ShellEventData);
   });
   const infoResponse = await opened.client.request("host.info");
   const devicesResponse = await opened.client.request("device.list");
@@ -1927,13 +1928,28 @@ interface ShellPaneState {
   run: HTMLButtonElement;
   stop: HTMLButtonElement;
   cwdLine: HTMLElement;
-  running: string | null;
-  /** Executions whose exit event arrived before the exec response did. */
-  finished: Set<string>;
   history: string[];
   historyIndex: number;
   cwd?: string;
 }
+
+/**
+ * A command started from a chat's command tab. Kept outside the rail so switching
+ * chats does not lose the running execution or its stop control.
+ */
+interface ShellRun {
+  sessionId: string;
+  command: string;
+  cwd: string;
+  text: string;
+  done: boolean;
+}
+
+/** execId -> run, plus the run each chat last started, and events that beat the response. */
+const shellRuns = new Map<string, ShellRun>();
+const sessionRuns = new Map<string, string>();
+const shellEarly = new Map<string, ShellEventData[]>();
+const SHELL_MAX_CHARS = 400_000;
 
 interface RailState {
   sessionId: string;
@@ -1957,9 +1973,6 @@ interface RailHandle {
   setOpen(open: boolean): void;
   onChange?: (open: boolean) => void;
 }
-
-/** Output of the running `shell.exec`, routed here by the peer event listener. */
-let shellSink: ((data: ShellEventData) => void) | null = null;
 
 function createRail(sessionId: string, appId: string, projectCwd: string | undefined): RailHandle {
   const overview = el("div", { className: "rail-body" });
@@ -2349,82 +2362,123 @@ function openShellPane(state: RailState): void {
     run,
     stop,
     cwdLine,
-    running: null,
-    finished: new Set<string>(),
     history: [],
     historyIndex: 0,
     cwd,
   };
-  shellSink = (data) => handleShellEvent(state, data);
+  syncShellPane(state);
   input.focus();
+}
+
+/** The run a chat last started, if any; survives the rail being rebuilt. */
+function shellRunOf(state: RailState): ShellRun | null {
+  const execId = sessionRuns.get(state.sessionId);
+  return execId ? shellRuns.get(execId) ?? null : null;
+}
+
+/** Repaints the pane from the run's buffer, so a rebuilt rail shows what happened meanwhile. */
+function syncShellPane(state: RailState): void {
+  const shell = state.shell;
+  if (!shell) return;
+  const run = shellRunOf(state);
+  shell.output.textContent = run?.text ?? "";
+  shell.output.scrollTop = shell.output.scrollHeight;
+  const running = run !== null && !run.done;
+  shell.run.disabled = running;
+  shell.stop.hidden = !running;
+  if (run) {
+    shell.cwd = run.cwd;
+    shell.cwdLine.textContent = run.cwd;
+  }
+}
+
+function capShellText(text: string): string {
+  return text.length > SHELL_MAX_CHARS ? text.slice(-SHELL_MAX_CHARS + 100_000) : text;
+}
+
+/** Events can arrive before the exec response names the id; hold them until it does. */
+function queueShellEvent(data: ShellEventData): void {
+  const list = shellEarly.get(data.execId) ?? [];
+  if (list.length > 64) return;
+  list.push(data);
+  shellEarly.set(data.execId, list);
+}
+
+function applyShellEvent(run: ShellRun, data: ShellEventData): void {
+  if (data.type === "exit") {
+    run.done = true;
+    const tail = data.killed ? "已终止" : `退出码 ${data.code ?? data.signal ?? "?"}`;
+    run.text = capShellText(
+      `${run.text}\n[${tail}${data.truncated ? "，输出已截断" : ""} · ${(data.durationMs / 1000).toFixed(1)}s]\n`,
+    );
+  } else {
+    run.text = capShellText(run.text + data.data);
+  }
+}
+
+function handleShellEvent(data: ShellEventData): void {
+  const run = shellRuns.get(data.execId);
+  if (!run) {
+    queueShellEvent(data);
+    return;
+  }
+  applyShellEvent(run, data);
+  // Only the chat that owns the run repaints; other chats keep the buffer for later.
+  const rail = currentRail;
+  if (rail && rail.state.sessionId === run.sessionId) syncShellPane(rail.state);
 }
 
 async function runShell(state: RailState): Promise<void> {
   const shell = state.shell;
-  if (!shell || shell.running) return;
+  if (!shell) return;
+  const previous = shellRunOf(state);
+  if (previous && !previous.done) return;
   const command = shell.input.value.trim();
   if (!command) return;
   shell.input.value = "";
   shell.history.push(command);
   shell.historyIndex = shell.history.length;
-  appendShell(state, `$ ${command}\n`);
+  shell.output.textContent = capShellText(`${shell.output.textContent ?? ""}$ ${command}\n`);
+  shell.output.scrollTop = shell.output.scrollHeight;
   shell.run.disabled = true;
   shell.stop.hidden = false;
   try {
     const result = await call<ShellExecResult>("shell.exec", { command, cwd: shell.cwd }, 20_000);
-    shell.cwdLine.textContent = result.cwd;
-    shell.cwd = result.cwd;
-    if (shell.finished.has(result.execId)) {
-      shell.run.disabled = false;
-      shell.stop.hidden = true;
-    } else {
-      shell.running = result.execId;
-    }
+    const run: ShellRun = {
+      sessionId: state.sessionId,
+      command,
+      cwd: result.cwd,
+      text: `$ ${command}\n`,
+      done: false,
+    };
+    shellRuns.set(result.execId, run);
+    const stale = sessionRuns.get(state.sessionId);
+    if (stale) shellRuns.delete(stale);
+    sessionRuns.set(state.sessionId, result.execId);
+    const early = shellEarly.get(result.execId) ?? [];
+    shellEarly.delete(result.execId);
+    for (const event of early) applyShellEvent(run, event);
+    syncShellPane(state);
   } catch (error) {
-    appendShell(state, `${messageOf(error)}\n`);
-    shell.run.disabled = false;
-    shell.stop.hidden = true;
+    shell.output.textContent = `${shell.output.textContent ?? ""}${messageOf(error)}\n`;
+    shell.output.scrollTop = shell.output.scrollHeight;
+    syncShellPane(state);
   }
 }
 
 async function stopShell(state: RailState): Promise<void> {
   const shell = state.shell;
-  if (!shell?.running) return;
+  const execId = sessionRuns.get(state.sessionId);
+  if (!shell || !execId) return;
   try {
-    await call<{ ok: boolean; killed: boolean }>("shell.cancel", { execId: shell.running });
-    appendShell(state, "\n^C 已请求停止\n");
+    await call<ShellCancelResult>("shell.cancel", { execId });
+    const run = shellRuns.get(execId);
+    if (run) run.text = capShellText(`${run.text}\n^C 已请求停止\n`);
+    syncShellPane(state);
   } catch (error) {
-    appendShell(state, `${messageOf(error)}\n`);
+    shell.output.textContent = `${shell.output.textContent ?? ""}${messageOf(error)}\n`;
+    syncShellPane(state);
   }
-}
-
-function handleShellEvent(state: RailState, data: ShellEventData): void {
-  const shell = state.shell;
-  if (!shell) return;
-  if (data.type !== "exit") {
-    appendShell(state, data.data);
-    return;
-  }
-  shell.finished.add(data.execId);
-  const tail = data.killed ? "已终止" : `退出码 ${data.code ?? data.signal ?? "?"}`;
-  appendShell(
-    state,
-    `\n[${tail}${data.truncated ? "，输出已截断" : ""} · ${(data.durationMs / 1000).toFixed(1)}s]\n`,
-  );
-  if (shell.running === data.execId || shell.running === null) {
-    shell.running = null;
-    shell.run.disabled = false;
-    shell.stop.hidden = true;
-  }
-}
-
-function appendShell(state: RailState, text: string): void {
-  const shell = state.shell;
-  if (!shell) return;
-  const current = shell.output.textContent ?? "";
-  const next = current + text;
-  shell.output.textContent = next.length > 400_000 ? next.slice(-300_000) : next;
-  shell.output.scrollTop = shell.output.scrollHeight;
 }
 
 function railSection(title: string, children: Node[], count?: number): HTMLElement {
