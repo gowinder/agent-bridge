@@ -14,16 +14,19 @@ import {
 import type {
   DeviceSummary,
   ErrorCode,
+  EventMessage,
   HostInfoResult,
   MessageAttachment,
   PairResult,
   RequestMessage,
   ResponseMessage,
   SessionListParams,
+  ShellEventData,
   WireMessage,
 } from "@agent-bridge/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
+import type { Devtools } from "./devtools.js";
 import type { RelayApi } from "./relay-client.js";
 import type { DeviceRecord, InviteRecord, Store } from "./store.js";
 import type { UploadStore } from "./uploads.js";
@@ -49,6 +52,8 @@ export interface PairingOptions extends SessionOptions {
   store: Store;
   hostName: string;
   deviceTtlSeconds: number | null;
+  /** The code the user must see on both screens; shown in the menu bar while pairing. */
+  onConfirmCode?: (code: string) => void;
 }
 
 function errorResponse(id: string, code: ErrorCode, message: string): ResponseMessage {
@@ -133,6 +138,7 @@ export class PairingSession implements ChannelSession {
       this.browserPublicKey = remote;
       this.expectedCode = await confirmCode(remote, this.options.identity.publicKey);
       this.secure = this.handshake.intoChannel();
+      this.options.onConfirmCode?.(this.expectedCode);
       this.options.log(`配对握手完成，确认码 ${this.expectedCode}`);
       return;
     }
@@ -224,6 +230,7 @@ export interface DeviceSessionOptions extends SessionOptions {
   hostName: string;
   adapters: SessionAdapters;
   uploads: UploadStore;
+  devtools: Devtools;
 }
 
 export class DeviceSession implements ChannelSession {
@@ -299,6 +306,7 @@ export class DeviceSession implements ChannelSession {
           version: "0.1.0",
           platform: `${process.platform} ${process.arch}`,
           adapters: this.options.adapters.hostAdapters(),
+          devtools: this.options.devtools.status(),
         };
         return info;
       }
@@ -428,6 +436,33 @@ export class DeviceSession implements ChannelSession {
         this.options.store.revokeDevice(deviceId);
         return { ok: true };
       }
+      case "fs.roots":
+        return { enabled: this.options.devtools.status().enabled, roots: this.options.devtools.roots() };
+      case "fs.list": {
+        const path = stringParam(params, "path");
+        if (!path) throw new RpcError("invalid_params", "path required");
+        return this.options.devtools.listDirs(path);
+      }
+      case "fs.read": {
+        const path = stringParam(params, "path");
+        if (!path) throw new RpcError("invalid_params", "path required");
+        return this.options.devtools.readFile(path);
+      }
+      case "shell.exec": {
+        const command = stringParam(params, "command") ?? "";
+        return this.options.devtools.exec(
+          this.options.channel,
+          command,
+          stringParam(params, "cwd"),
+          numberParam(params, "timeoutMs"),
+          (data: ShellEventData) => this.emit("shell.output", data),
+        );
+      }
+      case "shell.cancel": {
+        const execId = stringParam(params, "execId");
+        if (!execId) throw new RpcError("invalid_params", "execId required");
+        return this.options.devtools.cancel(execId);
+      }
       default:
         throw new Error(`unsupported method: ${request.method}`);
     }
@@ -458,9 +493,17 @@ export class DeviceSession implements ChannelSession {
     if (!this.secure || this.disposed) return;
     for (const frame of this.secure.seal(message)) this.options.send(frame);
   }
+
+  private emit(event: EventMessage["event"], data: unknown): void {
+    if (!this.secure || this.disposed) return;
+    const message: EventMessage = { v: 1, kind: "event", event, data };
+    for (const frame of this.secure.seal(message)) this.options.send(frame);
+  }
+
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.options.devtools.disposeOwner(this.options.channel);
     this.secure?.close();
     this.secure = null;
     this.handshake?.dispose();

@@ -21,6 +21,17 @@ struct ConnectionInfo: Decodable {
     let since: Double
 }
 
+struct PairingInfo: Decodable {
+    let channel: String
+    let code: String?
+    let since: Double
+}
+
+struct DevtoolsInfo: Decodable {
+    let enabled: Bool
+    let expiresAt: Double?
+}
+
 struct Snapshot: Decodable {
     let version: String
     let hostName: String
@@ -30,6 +41,8 @@ struct Snapshot: Decodable {
     let bridgePid: Int
     let devices: [DeviceInfo]
     let connections: [ConnectionInfo]
+    let devtools: DevtoolsInfo?
+    let pairings: [PairingInfo]?
     let error: String?
 }
 
@@ -132,6 +145,13 @@ final class AdminClient {
             throw AdminError.transport("邀请响应无法解析")
         }
         return url
+    }
+
+    /// Turns remote file browsing and command execution on or off. `ttl` nil keeps it on until turned off.
+    func setDevtools(enabled: Bool, ttlSeconds: Double?) async throws {
+        var body: [String: Any] = ["enabled": enabled]
+        if let ttlSeconds { body["ttlSeconds"] = ttlSeconds }
+        _ = try await request("POST", "/devtools", body: body)
     }
 }
 
@@ -271,6 +291,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastError: String?
     private var bridgeProcess: Process?
     private var bridgeStartedAt: Date?
+    private var pairWindow: NSWindow?
+    private var pairTimer: Timer?
+    private var pairCodeLabel: NSTextField?
+    private var pairStatusLabel: NSTextField?
+    private var pairUrlLabel: NSTextField?
+    private var pairLink = ""
+    private var pairDeviceCountBefore = 0
+    private var pairSawChannel = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -397,6 +425,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(item("邀请新设备…", #selector(inviteDevice), "i"))
+
+        let devtools = snapshot.devtools
+        let devTitle: String
+        if devtools?.enabled == true {
+            if let expiresAt = devtools?.expiresAt {
+                let minutes = max(1, Int((expiresAt / 1000 - Date().timeIntervalSince1970) / 60))
+                devTitle = "远程工具：已开启（约 \(minutes) 分钟）"
+            } else {
+                devTitle = "远程工具：已开启"
+            }
+        } else {
+            devTitle = "远程工具：已关闭"
+        }
+        let devItem = NSMenuItem(title: devTitle, action: nil, keyEquivalent: "")
+        devItem.isEnabled = true
+        let devSub = NSMenu()
+        devSub.addItem(item("开启 1 小时", #selector(enableDevtoolsOneHour), ""))
+        devSub.addItem(item("开启 8 小时", #selector(enableDevtoolsEightHours), ""))
+        devSub.addItem(item("关闭", #selector(disableDevtools), ""))
+        devItem.submenu = devSub
+        menu.addItem(devItem)
+
         menu.addItem(item("在浏览器中打开", #selector(openWeb), "o"))
         menu.addItem(item("刷新", #selector(refreshNow), "r"))
         menu.addItem(.separator())
@@ -464,11 +514,154 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let url = try await client.invite()
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(url, forType: .string)
-                alert("配对链接已复制", "5 分钟内有效，一次性使用。粘贴到浏览器打开即可配对。\n\n\(url)")
+                pairDeviceCountBefore = snapshot?.devices.count ?? 0
+                showPairWindow(url: url)
             } catch {
                 alert("生成邀请失败", error.localizedDescription)
             }
         }
+    }
+
+    @objc private func enableDevtoolsOneHour() {
+        setDevtools(enabled: true, ttlSeconds: 3_600)
+    }
+
+    @objc private func enableDevtoolsEightHours() {
+        setDevtools(enabled: true, ttlSeconds: 8 * 3_600)
+    }
+
+    @objc private func disableDevtools() {
+        setDevtools(enabled: false, ttlSeconds: nil)
+    }
+
+    private func setDevtools(enabled: Bool, ttlSeconds: Double?) {
+        Task {
+            do {
+                try await client.setDevtools(enabled: enabled, ttlSeconds: ttlSeconds)
+                await refresh()
+            } catch {
+                alert("设置远程工具失败", error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func copyPairLink() {
+        guard !pairLink.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(pairLink, forType: .string)
+    }
+
+    /// The pairing page shows a confirm code derived from both keys. The bridge only
+    /// learns it once the browser's handshake finishes, so this window keeps polling
+    /// the admin snapshot and swaps the placeholder for the real code.
+    private func showPairWindow(url: String) {
+        closePairWindow()
+        pairLink = url
+        pairSawChannel = false
+
+        let width: CGFloat = 480
+        let height: CGFloat = 250
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "邀请新设备"
+        window.center()
+        window.isReleasedWhenClosed = false
+
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let hint = NSTextField(wrappingLabelWithString: "链接已复制，粘贴到浏览器打开。客户端显示的确认码要和下面一致，否则取消配对。")
+        hint.frame = NSRect(x: 20, y: height - 62, width: width - 40, height: 42)
+        hint.font = .systemFont(ofSize: 12)
+        hint.textColor = .secondaryLabelColor
+
+        let urlField = NSTextField(labelWithString: url)
+        urlField.frame = NSRect(x: 20, y: height - 96, width: width - 40, height: 20)
+        urlField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        urlField.lineBreakMode = .byTruncatingMiddle
+        urlField.isSelectable = true
+        urlField.toolTip = url
+
+        let status = NSTextField(labelWithString: "等待设备打开链接…")
+        status.frame = NSRect(x: 20, y: height - 132, width: width - 40, height: 20)
+        status.font = .systemFont(ofSize: 13, weight: .medium)
+
+        let code = NSTextField(labelWithString: "— — —")
+        code.frame = NSRect(x: 20, y: 44, width: width - 40, height: 48)
+        code.font = .monospacedDigitSystemFont(ofSize: 38, weight: .semibold)
+        code.alignment = .center
+        code.isSelectable = true
+
+        let copy = NSButton(title: "复制链接", target: self, action: #selector(copyPairLink))
+        copy.frame = NSRect(x: 20, y: 12, width: 100, height: 24)
+        copy.bezelStyle = .rounded
+
+        for view in [hint, urlField, status, code, copy] { content.addSubview(view) }
+        window.contentView = content
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+
+        pairWindow = window
+        pairUrlLabel = urlField
+        pairStatusLabel = status
+        pairCodeLabel = code
+
+        pairTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.pollPairing() }
+        }
+        Task { await pollPairing() }
+    }
+
+    private func pollPairing() async {
+        guard let pairWindow, pairWindow.isVisible else {
+            closePairWindow()
+            return
+        }
+        do {
+            let fresh = try await client.status()
+            snapshot = fresh
+            let pairing = fresh.pairings?.first
+            if let pairing {
+                pairSawChannel = true
+                if let code = pairing.code {
+                    pairCodeLabel?.stringValue = code
+                    pairCodeLabel?.textColor = .labelColor
+                    pairStatusLabel?.stringValue = "核对这个确认码与客户端显示的是否一致"
+                } else {
+                    pairCodeLabel?.stringValue = "等待握手…"
+                    pairStatusLabel?.stringValue = "设备已连接，正在建立加密通道…"
+                }
+                return
+            }
+            guard pairSawChannel else { return }
+            // The channel vanished; a new device means the pairing went through.
+            let added = fresh.devices.count > pairDeviceCountBefore
+            pairStatusLabel?.stringValue = added ? "配对完成" : "配对已取消或连接中断"
+            pairCodeLabel?.stringValue = added ? "已配对" : "已结束"
+            pairTimer?.invalidate()
+            pairTimer = nil
+            NSSound.beep()
+            if added {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                    Task { @MainActor in self?.closePairWindow() }
+                }
+            }
+        } catch {
+            pairStatusLabel?.stringValue = "Bridge 未响应：\(error.localizedDescription)"
+        }
+    }
+
+    private func closePairWindow() {
+        pairTimer?.invalidate()
+        pairTimer = nil
+        pairWindow?.orderOut(nil)
+        pairWindow?.close()
+        pairWindow = nil
+        pairCodeLabel = nil
+        pairStatusLabel = nil
+        pairUrlLabel = nil
     }
 
     @objc private func openWeb() {

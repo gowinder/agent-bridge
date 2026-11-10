@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@agent-bridge/crypto";
@@ -13,6 +14,7 @@ import {
   type AdminActions,
   type AdminDevice,
 } from "./admin.js";
+import { Devtools } from "./devtools.js";
 import {
   RelayApi,
   RelayClient,
@@ -41,6 +43,7 @@ function usage(): void {
   agent-bridge serve
   agent-bridge devices
   agent-bridge revoke <deviceId>
+  agent-bridge devtools [on|off|status] [--ttl 3600]
   agent-bridge status
   agent-bridge info
 
@@ -215,6 +218,80 @@ async function commandRevoke(args: string[]): Promise<void> {
   }
 }
 
+interface DevtoolsSwitchState {
+  enabled: boolean;
+  expiresAt: number | null;
+}
+
+/**
+ * Asks the running bridge to flip the switch: it owns the running commands, so a
+ * direct database write from this process would leave them executing.
+ */
+async function setDevtoolsOnBridge(
+  store: Store,
+  enabled: boolean,
+  ttlSeconds: number | null,
+): Promise<DevtoolsSwitchState | null> {
+  let token: string;
+  try {
+    token = readFileSync(join(store.dir, "admin-token"), "utf8").trim();
+  } catch {
+    return null;
+  }
+  if (!token) return null;
+  const configured = process.env["AGENT_BRIDGE_ADMIN_PORT"] ?? store.meta("admin_port");
+  const port = Number(configured) || DEFAULT_ADMIN_PORT;
+  try {
+    const response = await fetch(`http://${ADMIN_HOST}:${port}/devtools`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ enabled, ttlSeconds }),
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!response.ok) return null;
+    return (await response.json()) as DevtoolsSwitchState;
+  } catch {
+    return null;
+  }
+}
+
+/** Remote file browsing and command execution are off unless turned on here or in the menu bar. */
+async function commandDevtools(args: string[]): Promise<void> {
+  const store = new Store();
+  try {
+    let local: Devtools | null = null;
+    const localDevtools = (): Devtools => {
+      local ??= new Devtools(store, new SessionAdapters(), (line) => console.log(line));
+      return local;
+    };
+    const action = args[0] ?? "status";
+    let next: DevtoolsSwitchState | null = null;
+    if (action === "on") {
+      const ttlRaw = flag(args, "ttl") ?? "3600";
+      const ttl = Number(ttlRaw);
+      if (!Number.isFinite(ttl) || ttl < 60 || ttl > 86_400) throw new Error("--ttl 必须在 60..86400 秒之间");
+      next = await setDevtoolsOnBridge(store, true, ttl);
+      if (!next) next = localDevtools().setEnabled(true, ttl);
+    } else if (action === "off") {
+      next = await setDevtoolsOnBridge(store, false, null);
+      if (!next) {
+        console.log("Bridge 未在运行：只更新本地状态，下次启动时生效");
+        next = localDevtools().setEnabled(false);
+      }
+    } else if (action !== "status") {
+      throw new Error("用法：agent-bridge devtools [on|off|status] [--ttl 3600]");
+    }
+    const status = next ?? localDevtools().status();
+    console.log(
+      `远程工具：${status.enabled ? "已开启" : "已关闭"}${
+        status.expiresAt ? `（${new Date(status.expiresAt).toLocaleTimeString()} 失效）` : ""
+      }`,
+    );
+  } finally {
+    store.close();
+  }
+}
+
 /** Prints one JSON line describing the local state; never throws when uninitialized. */
 async function commandInfo(): Promise<void> {
   const store = new Store();
@@ -263,6 +340,7 @@ async function commandServe(): Promise<void> {
   store.clearExpiredInvites();
   const adapters = new SessionAdapters();
   const uploads = new UploadStore(store.dir);
+  const devtools = new Devtools(store, adapters, log);
 
   let stopping = false;
   let relay: RelayClient | null = null;
@@ -275,6 +353,8 @@ async function commandServe(): Promise<void> {
       kind: "pair" | "device";
       deviceId?: string;
       name?: string;
+      /** Pairing only: the code the user compares on both screens. */
+      code?: string;
       since: number;
     }
   >();
@@ -292,6 +372,7 @@ async function commandServe(): Promise<void> {
 
   const adminActions: AdminActions = {
     async snapshot() {
+      const devtoolsStatus = devtools.status();
       const local = new Map(store.devices().map((device) => [device.id, device]));
       const online = new Set(
         [...sessions.values()].flatMap((entry) => (entry.deviceId ? [entry.deviceId] : [])),
@@ -327,6 +408,13 @@ async function commandServe(): Promise<void> {
           name: entry.name ?? null,
           since: entry.since,
         })),
+        devtools: {
+          enabled: devtoolsStatus.enabled,
+          expiresAt: devtoolsStatus.expiresAt,
+        },
+        pairings: [...sessions.values()]
+          .filter((entry) => entry.kind === "pair")
+          .map((entry) => ({ channel: entry.channel, code: entry.code ?? null, since: entry.since })),
         ...(error ? { error } : {}),
       };
     },
@@ -340,6 +428,10 @@ async function commandServe(): Promise<void> {
     },
     async createInvite(ttlSeconds: number) {
       return mintInvite(api, store, config, ttlSeconds);
+    },
+    async setDevtools(enabled: boolean, ttlSeconds: number | null) {
+      const status = devtools.setEnabled(enabled, ttlSeconds);
+      return { enabled: status.enabled, expiresAt: status.expiresAt };
     },
   };
 
@@ -385,6 +477,10 @@ async function commandServe(): Promise<void> {
             store,
             hostName: config.hostName,
             deviceTtlSeconds: DEVICE_TTL_OPTIONS[store.meta("device_ttl") ?? "manual"] ?? null,
+            onConfirmCode: (code) => {
+              const entry = sessions.get(message.channel);
+              if (entry) entry.code = code;
+            },
           }),
           kind: "pair",
           since: Date.now(),
@@ -425,6 +521,7 @@ async function commandServe(): Promise<void> {
           hostName: config.hostName,
           adapters,
           uploads,
+          devtools,
         }),
         kind: "device",
         deviceId: device.id,
@@ -529,6 +626,9 @@ async function main(): Promise<void> {
       return;
     case "revoke":
       await commandRevoke(args);
+      return;
+    case "devtools":
+      await commandDevtools(args);
       return;
     case "status":
       await commandStatus();
