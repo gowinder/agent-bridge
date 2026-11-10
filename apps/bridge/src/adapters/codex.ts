@@ -68,6 +68,12 @@ interface BusyState {
   sawStart: boolean;
 }
 
+/** How far into a rollout the busy markers have been read, so appends are followed. */
+interface BusyTail {
+  offset: number;
+  state: BusyState;
+}
+
 interface CachedMessages {
   mtimeMs: number;
   size: number;
@@ -160,11 +166,46 @@ const BUSY_MAX_AGE_MS = 30 * 60_000;
 
 /** Rollout tail scanned for the latest task markers when listing sessions. */
 const BUSY_TAIL_BYTES = 512 * 1024;
+/** A seed walks back this far when the newest tail chunk holds no task marker. */
+const BUSY_TAIL_MAX_BACK_BYTES = 32 * 1024 * 1024;
+/** A single poll replays at most this many appended bytes before re-seeding. */
+const BUSY_FOLLOW_MAX_BYTES = 8 * 1024 * 1024;
 
 function rolloutBusy(busy: BusyState | undefined): boolean {
   if (!busy || !busy.sawStart) return false;
   if (busy.lastStart <= busy.lastEnd) return false;
   return Date.now() - busy.lastStart < BUSY_MAX_AGE_MS;
+}
+
+/** Reads `length` bytes at `start`; a record cut at the start is dropped. */
+function readTailText(path: string, start: number, length: number): string {
+  let fd: number | undefined;
+  try {
+    const buffer = Buffer.alloc(length);
+    fd = openSync(path, "r");
+    readSync(fd, buffer, 0, length, start);
+    if (start === 0) return buffer.toString("utf8");
+    const text = buffer.toString("utf8");
+    const newline = text.indexOf("\n");
+    return newline === -1 ? "" : text.slice(newline + 1);
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function scanBusyLines(text: string, state: BusyState): void {
+  for (const line of text.split("\n")) {
+    if (!line.includes("task_started") && !line.includes("task_complete") && !line.includes("turn_aborted")) {
+      continue;
+    }
+    let entry: RawLine;
+    try {
+      entry = JSON.parse(line) as RawLine;
+    } catch {
+      continue;
+    }
+    trackRolloutBusy(state, entry);
+  }
 }
 
 const CATALOG_PATH = join(SQLITE_DIR, "codex.db");
@@ -417,7 +458,7 @@ export class CodexAdapter implements SessionAdapter {
   private messageCache = new Map<string, CachedMessages>();
   private rolloutCache = new Map<string, { path: string; compressed: boolean }>();
   private settingsCache = new Map<string, { mtimeMs: number; size: number; settings: ThreadSettings | null }>();
-  private busyTail = new Map<string, { size: number; mtimeMs: number; busy: boolean }>();
+  private busyTail = new Map<string, BusyTail>();
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
@@ -484,55 +525,71 @@ export class CodexAdapter implements SessionAdapter {
     });
   }
 
-  /** The thread DB carries no run state, so the rollout tail supplies the latest task markers. */
+  /**
+   * The thread DB carries no run state, so the rollout supplies the latest task markers. The
+   * rollout is append-only: the first look seeds from the tail (walking back until a marker is
+   * found), then each poll reads only the appended bytes, so a long turn keeps its start marker.
+   */
   private threadBusy(thread: ThreadRow): boolean {
     const file = this.rolloutFor(thread);
-    if (!file) return false;
-    let stat;
+    if (!file || file.compressed) return false;
+    let size: number;
     try {
-      stat = statSync(file.path);
+      size = statSync(file.path).size;
     } catch {
       return false;
     }
-    const cached = this.busyTail.get(file.path);
-    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.busy;
-    let busy = false;
-    if (!file.compressed && stat.size > 0) {
-      let fd: number | undefined;
-      try {
-        const start = Math.max(0, stat.size - BUSY_TAIL_BYTES);
-        const length = stat.size - start;
-        const buffer = Buffer.alloc(length);
-        fd = openSync(file.path, "r");
-        readSync(fd, buffer, 0, length, start);
-        let text = buffer.toString("utf8");
-        if (start > 0) {
-          // The first line is cut mid-record; drop it.
-          const newline = text.indexOf("\n");
-          text = newline === -1 ? "" : text.slice(newline + 1);
-        }
-        const state: BusyState = { lastStart: 0, lastEnd: 0, sawStart: false };
-        for (const line of text.split("\n")) {
-          if (!line.includes("task_started") && !line.includes("task_complete") && !line.includes("turn_aborted")) {
-            continue;
-          }
-          let entry: RawLine;
-          try {
-            entry = JSON.parse(line) as RawLine;
-          } catch {
-            continue;
-          }
-          trackRolloutBusy(state, entry);
-        }
-        busy = rolloutBusy(state);
-      } catch {
-        busy = false;
-      } finally {
-        if (fd !== undefined) closeSync(fd);
-      }
+    let tail = this.busyTail.get(file.path);
+    if (!tail || size < tail.offset) {
+      tail = this.seedBusy(file.path, size);
+      this.busyTail.set(file.path, tail);
+    } else if (size > tail.offset) {
+      this.followBusy(file.path, size, tail);
     }
-    this.busyTail.set(file.path, { size: stat.size, mtimeMs: stat.mtimeMs, busy });
-    return busy;
+    return rolloutBusy(tail.state);
+  }
+
+  private seedBusy(path: string, size: number): BusyTail {
+    const state: BusyState = { lastStart: 0, lastEnd: 0, sawStart: false };
+    const floor = Math.max(0, size - BUSY_TAIL_MAX_BACK_BYTES);
+    let end = size;
+    while (end > floor) {
+      const start = Math.max(floor, end - BUSY_TAIL_BYTES);
+      try {
+        scanBusyLines(readTailText(path, start, end - start), state);
+      } catch {
+        break;
+      }
+      if (state.sawStart || state.lastEnd > 0) break;
+      end = start;
+    }
+    return { offset: size, state };
+  }
+
+  private followBusy(path: string, size: number, tail: BusyTail): void {
+    if (size - tail.offset > BUSY_FOLLOW_MAX_BYTES) {
+      // Too much new data to replay cheaply; re-seed from the newest markers instead.
+      const seeded = this.seedBusy(path, size);
+      tail.state = seeded.state;
+      tail.offset = seeded.offset;
+      return;
+    }
+    let fd: number | undefined;
+    try {
+      const length = size - tail.offset;
+      const buffer = Buffer.alloc(length);
+      fd = openSync(path, "r");
+      readSync(fd, buffer, 0, length, tail.offset);
+      // Stop at the last complete line: a record still being written is read next time.
+      const lastNewline = buffer.lastIndexOf(0x0a);
+      if (lastNewline === -1) return;
+      scanBusyLines(buffer.subarray(0, lastNewline).toString("utf8"), tail.state);
+      tail.offset += lastNewline + 1;
+    } catch {
+      // Keep the last known markers; the next poll retries.
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   }
 
   session(sessionId: string): SessionSummary | null {

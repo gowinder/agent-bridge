@@ -1075,14 +1075,25 @@ a.crumb:hover {
   display: flex;
 }
 
-.rail.is-expanded .rail-preview-text {
+.rail.is-expanded .rail-preview-text,
+.rail.is-preview-full .rail-preview-text {
   font-size: 12.5px;
   line-height: 1.6;
 }
 
-.rail.is-expanded .rail-preview-img {
+.rail.is-expanded .rail-preview-img,
+.rail.is-preview-full .rail-preview-img {
   max-height: calc(100dvh - 120px);
   align-self: center;
+}
+
+/* Only the reader takes the viewport; the rail header and tabs stay behind it. */
+.rail.is-preview-full .rail-preview {
+  position: fixed;
+  inset: 0;
+  z-index: calc(var(--z-sheet) + 10);
+  background: var(--surface);
+  overflow-y: auto;
 }
 
 .rail-head {
@@ -1092,6 +1103,12 @@ a.crumb:hover {
   gap: 8px;
   padding: 7px 6px 7px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.rail-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .rail-title {

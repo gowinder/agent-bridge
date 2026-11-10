@@ -371,10 +371,17 @@ async function watchSessions(): Promise<void> {
     );
     const sessions = pages.flatMap((page) => page.sessions);
     if (!snapshot) return;
+    const before = snapshotSignature();
     // Chrome pages keep their own session summary; refreshing the list in place lets the
     // back navigation show what the background watch saw without another reload.
     snapshot = { ...snapshot, sessions };
     observeSessions(sessions);
+    // The list poller compares against this snapshot, so a change seen here would otherwise
+    // never repaint; re-render the visible list from the data this watcher just stored.
+    if (document.visibilityState !== "visible") return;
+    const route = parseRoute();
+    if (route.level !== "clients" && route.level !== "projects" && route.level !== "sessions") return;
+    if (snapshotSignature() !== before) void renderRoute();
   } catch {
     // The connection layer already reports disconnects; the next tick retries.
   }
@@ -1296,7 +1303,9 @@ function snapshotSignature(): string {
     snapshot.projects.length,
     ...snapshot.sessions.map(
       (session) =>
-        `${session.sessionId}:${session.updatedAt}:${session.live ? 1 : 0}:${session.busy ? 1 : 0}`,
+        `${session.sessionId}:${session.updatedAt}:${session.live ? 1 : 0}:${session.busy ? 1 : 0}:${
+          unreadAt(session.sessionId) !== undefined ? 1 : 0
+        }`,
     ),
   ].join("|");
 }
@@ -2260,7 +2269,7 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
   const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } }, [
     el("div", { className: "rail-head" }, [
       el("span", { className: "rail-title", text: "会话侧栏" }),
-      close,
+      el("div", { className: "rail-head-actions" }, [railExpandButton(state), close]),
     ]),
     tabBar,
     overview,
@@ -2275,7 +2284,8 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     state,
     setOpen(open: boolean) {
       root.classList.toggle("is-open", open);
-      if (!open) root.classList.remove("is-expanded");
+      if (!open) root.classList.remove("is-expanded", "is-preview-full");
+      syncRailToggles(root);
       backdrop.classList.toggle("is-open", open);
       if (open) void refreshRail(state);
       handle.onChange?.(open);
@@ -2339,10 +2349,15 @@ let currentRail: RailHandle | null = null;
 function dismissRail(): void {
   const rail = currentRail;
   if (!rail || !rail.root.classList.contains("is-open")) return;
-  // Escape leaves fullscreen first; only the next press closes the rail.
+  // Escape unwinds fullscreen first: reader, then the whole rail, and only then closes it.
+  if (rail.root.classList.contains("is-preview-full")) {
+    rail.root.classList.remove("is-preview-full");
+    syncRailToggles(rail.root);
+    return;
+  }
   if (rail.root.classList.contains("is-expanded")) {
     rail.root.classList.remove("is-expanded");
-    if (rail.state.tab === "files") paintFiles(rail.state);
+    syncRailToggles(rail.root);
     return;
   }
   rail.setOpen(false);
@@ -2479,21 +2494,52 @@ async function openFile(state: RailState, path: string): Promise<void> {
   paintFiles(state);
 }
 
-/** The file pane shares the 300px rail; this button gives it the whole viewport and back. */
+/** In the rail header: the whole rail takes the viewport, tabs and all. */
 function railExpandButton(state: RailState): HTMLButtonElement {
+  return classToggleButton(
+    state.root,
+    "is-expanded",
+    "全屏侧栏",
+    "退出全屏侧栏",
+  );
+}
+
+/** In the file preview header: only the reader goes fullscreen, no rail chrome. */
+function previewFullButton(state: RailState): HTMLButtonElement {
+  return classToggleButton(state.root, "is-preview-full", "全屏查看文件", "退出全屏查看");
+}
+
+function classToggleButton(
+  target: HTMLElement,
+  className: string,
+  title: string,
+  activeTitle: string,
+): HTMLButtonElement {
   const node = button("", () => {
-    state.root.classList.toggle("is-expanded");
-    paint();
-  }, "icon-btn rail-icon-btn");
-  const paint = (): void => {
-    const expanded = state.root.classList.contains("is-expanded");
-    node.replaceChildren(icon(expanded ? "collapse" : "expand", "icon"));
-    node.title = expanded ? "退出全屏" : "全屏查看";
-    node.setAttribute("aria-label", node.title);
-    node.setAttribute("aria-pressed", String(expanded));
-  };
-  paint();
+    target.classList.toggle(className);
+    syncToggle(node);
+  }, "icon-btn rail-icon-btn rail-toggle-btn");
+  node.dataset["toggle"] = className;
+  node.dataset["title"] = title;
+  node.dataset["activeTitle"] = activeTitle;
+  syncToggle(node);
   return node;
+}
+
+/** Esc and tab switches change the rail classes outside the button; repaint from the class. */
+function syncToggle(node: HTMLButtonElement): void {
+  const rail = node.closest(".rail");
+  const className = node.dataset["toggle"];
+  if (!rail || !className) return;
+  const active = rail.classList.contains(className);
+  node.replaceChildren(icon(active ? "collapse" : "expand", "icon"));
+  node.title = (active ? node.dataset["activeTitle"] : node.dataset["title"]) ?? "";
+  node.setAttribute("aria-label", node.title);
+  node.setAttribute("aria-pressed", String(active));
+}
+
+function syncRailToggles(root: HTMLElement): void {
+  for (const node of root.querySelectorAll<HTMLButtonElement>(".rail-toggle-btn")) syncToggle(node);
 }
 
 function paintFiles(state: RailState, placeholder?: string): void {
@@ -2529,7 +2575,6 @@ function paintFiles(state: RailState, placeholder?: string): void {
   refresh.append(icon("refresh", "icon"));
   refresh.title = "刷新目录";
   bar.append(refresh);
-  bar.append(railExpandButton(state));
   pane.append(bar);
 
   if (files.root) pane.append(fileCrumbs(state));
@@ -2590,6 +2635,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     const files = state.files;
     if (!files) return;
     files.preview = null;
+    state.root.classList.remove("is-preview-full");
     paintFiles(state);
   }, "icon-btn rail-icon-btn");
   back.append(icon("back"));
@@ -2598,7 +2644,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     el("div", { className: "rail-filebar" }, [
       back,
       el("span", { className: "rail-filebar-name", text: file.name, attrs: { title: file.path } }),
-      railExpandButton(state),
+      previewFullButton(state),
     ]),
   );
   if (file.dataBase64) {
