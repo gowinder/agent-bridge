@@ -65,10 +65,14 @@ export class RelayApi {
     return body;
   }
 
-  async createInvite(ttlSeconds = 300): Promise<InviteResponse> {
+  async createInvite(input: {
+    inviteId: string;
+    tokenHash: string;
+    ttlSeconds?: number;
+  }): Promise<InviteResponse> {
     return (await this.call("/invites", {
       method: "POST",
-      body: JSON.stringify({ ttlSeconds }),
+      body: JSON.stringify(input),
     })) as InviteResponse;
   }
 

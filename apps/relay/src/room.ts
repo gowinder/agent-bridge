@@ -26,6 +26,7 @@ const INVITE_TTL_SECONDS = 300;
 const MAX_INVITE_TTL_SECONDS = 600;
 const MAX_DEVICE_TTL_SECONDS = 30 * 24 * 3600;
 const MAX_FRAME_BYTES = 64 * 1024;
+const MAX_CONTROL_BYTES = 8 * 1024;
 const HELLO_TIMEOUT_MS = 5_000;
 /** 认领房间所需的 bridge 凭据最小长度，避免用可猜的短串占号。 */
 const MIN_BRIDGE_TOKEN_CHARS = 16;
@@ -41,6 +42,15 @@ function errorResponse(code: string, message: string, status: number): Response 
   return json({ error: { code, message } }, status);
 }
 
+function token(bytes = 32): string {
+  const data = new Uint8Array(bytes);
+  crypto.getRandomValues(data);
+  return btoa(String.fromCharCode(...data))
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replaceAll("=", "");
+}
+
 async function sha256Hex(value: string): Promise<string> {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
   let out = "";
@@ -53,15 +63,6 @@ function constantTimeEqual(a: string, b: string): boolean {
   let diff = 0;
   for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return diff === 0;
-}
-
-function token(bytes = 32): string {
-  const data = new Uint8Array(bytes);
-  crypto.getRandomValues(data);
-  return btoa(String.fromCharCode(...data))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll("=", "");
 }
 
 function hex(bytes: Uint8Array): string {
@@ -148,22 +149,32 @@ export class Room {
     }
 
     if (path === "/invites" && request.method === "POST") {
-      const body = (await request.json().catch(() => ({}))) as { ttlSeconds?: number };
+      const body = (await request.json().catch(() => ({}))) as {
+        inviteId?: string;
+        tokenHash?: string;
+        ttlSeconds?: number;
+      };
+      // The bridge mints the token and sends only its hash: the relay must never
+      // learn the raw token, because it is the pairing PSK input.
+      if (!body.inviteId || !/^[a-z0-9-]{8,64}$/.test(body.inviteId)) {
+        return errorResponse("bad_request", "bad inviteId", 400);
+      }
+      if (!body.tokenHash || !/^[0-9a-f]{64}$/.test(body.tokenHash)) {
+        return errorResponse("bad_request", "bad tokenHash", 400);
+      }
       const ttl = Math.min(
         Math.max(Math.trunc(body.ttlSeconds ?? INVITE_TTL_SECONDS), 30),
         MAX_INVITE_TTL_SECONDS,
       );
-      const inviteToken = token();
-      const inviteId = crypto.randomUUID();
       const now = Date.now();
       this.sql.exec(
         "INSERT INTO invites (id, hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
-        inviteId,
-        await sha256Hex(inviteToken),
+        body.inviteId,
+        body.tokenHash,
         now,
         now + ttl * 1000,
       );
-      return json({ inviteId, inviteToken, expiresAt: now + ttl * 1000 });
+      return json({ inviteId: body.inviteId, expiresAt: now + ttl * 1000 });
     }
 
     if (path === "/devices" && request.method === "GET") {
@@ -281,8 +292,32 @@ export class Room {
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
-    server.serializeAttachment({ pending: true, deadline: Date.now() + HELLO_TIMEOUT_MS } as Attachment);
+    const deadline = Date.now() + HELLO_TIMEOUT_MS;
+    server.serializeAttachment({ pending: true, deadline } as Attachment);
+    void this.scheduleHelloSweep(deadline);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /** Wakes the room so unauthenticated sockets cannot hang forever. */
+  private async scheduleHelloSweep(deadline: number): Promise<void> {
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || deadline < existing) await this.ctx.storage.setAlarm(deadline);
+  }
+
+  async alarm(): Promise<void> {
+    const now = Date.now();
+    let next: number | null = null;
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as (Attachment & { deadline?: number }) | null;
+      if (!attachment?.pending) continue;
+      const deadline = attachment.deadline ?? 0;
+      if (deadline <= now) {
+        this.fail(ws, "invalid_credential", "hello timeout");
+        continue;
+      }
+      next = next === null ? deadline : Math.min(next, deadline);
+    }
+    if (next !== null) await this.ctx.storage.setAlarm(next);
   }
 
   private sendControl(ws: WebSocket, message: RelayServerMessage): void {
@@ -313,6 +348,10 @@ export class Room {
         this.fail(ws, "invalid_credential", "hello timeout");
         return;
       }
+      if (data.length > MAX_CONTROL_BYTES) {
+        this.fail(ws, "bad_request", "hello too large");
+        return;
+      }
       const hello = parseRelayHello(this.safeJson(data));
       if (!hello) {
         this.fail(ws, "bad_request", "invalid hello");
@@ -322,6 +361,7 @@ export class Room {
       return;
     }
     if (typeof data === "string") {
+      if (data.length > MAX_CONTROL_BYTES) return;
       if (raw.role === "bridge") this.handleBridgeControl(data);
       return;
     }
@@ -404,9 +444,8 @@ export class Room {
     let inviteId: string | undefined;
 
     if (hello.credential.kind === "invite") {
-      const hash = await sha256Hex(hello.credential.token);
       const row = this.sql
-        .exec("SELECT id, expires_at, used_at FROM invites WHERE hash = ?", hash)
+        .exec("SELECT id, expires_at, used_at FROM invites WHERE hash = ?", hello.credential.tokenHash)
         .toArray()[0];
       if (!row) {
         this.fail(ws, "invalid_credential", "unknown invite");
