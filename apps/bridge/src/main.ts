@@ -498,7 +498,8 @@ async function commandServe(): Promise<void> {
             api,
             store,
             hostName: config.hostName,
-            deviceTtlSeconds: DEVICE_TTL_OPTIONS[store.meta("device_ttl") ?? "manual"] ?? null,
+            // 默认 30 天：长期有效的设备凭据一旦丢失就再也不会自己失效，需要用户显式改回 manual。
+            deviceTtlSeconds: DEVICE_TTL_OPTIONS[store.meta("device_ttl") ?? "30d"] ?? null,
             onConfirmCode: (code) => {
               const entry = sessions.get(message.channel);
               if (entry) entry.code = code;

@@ -31,7 +31,21 @@ import type {
   TransferCommitResult,
   TransferPrepareResult,
 } from "@agent-bridge/protocol";
-import { expireLabel, listDevices, removeDevice, type StoredDevice } from "./credentials.js";
+import {
+  expireLabel,
+  getDeviceSecrets,
+  hasVault,
+  isExpiringSoon,
+  listDevices,
+  LockedError,
+  needsUnlock,
+  removeDevice,
+  resetCredentials,
+  setupPassword,
+  unlock,
+  type DeviceMeta,
+  type DeviceSecrets,
+} from "./credentials.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
 import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
@@ -233,7 +247,7 @@ function setReconnecting(message: string | null): void {
 }
 
 interface ConnectedState {
-  device: StoredDevice;
+  device: DeviceMeta;
   info: HostInfoResult;
   devices: DeviceSummary[];
 }
@@ -526,6 +540,15 @@ function renderHome(): HTMLElement {
   ]);
 
   const section = el("section", { className: "panel" });
+  const expiring = devices.filter((device) => isExpiringSoon(device.expiresAt));
+  if (expiring.length > 0) {
+    section.append(
+      el("p", {
+        className: "notice warn",
+        text: `${expiring.length === 1 ? "有一台设备" : `有 ${expiring.length} 台设备`}的凭据将在 3 天内过期。到期后会无法连接，请在 Mac 上重新生成配对链接并重新配对。`,
+      }),
+    );
+  }
   section.append(el("h2", { className: "panel-title", text: "已配对设备" }));
   if (devices.length === 0) {
     section.append(
@@ -577,9 +600,10 @@ function renderHome(): HTMLElement {
   return page;
 }
 
-function renderDeviceRow(device: StoredDevice): HTMLElement {
-  const status = el("span", { className: "pill", text: expireLabel(device.expiresAt) });
-  return el("li", { className: "device-row" }, [
+function renderDeviceRow(device: DeviceMeta): HTMLElement {
+  const soon = isExpiringSoon(device.expiresAt);
+  const status = el("span", { className: soon ? "pill warn" : "pill", text: expireLabel(device.expiresAt) });
+  const row = el("li", { className: "device-row" }, [
     el("div", { className: "row-main" }, [
       el("strong", { text: device.bridge?.name ? `${device.bridge.name}` : device.name }),
       el("span", { className: "meta", text: `${device.name} · ${new URL(device.relayUrl).host}` }),
@@ -593,11 +617,17 @@ function renderDeviceRow(device: StoredDevice): HTMLElement {
         });
       }, "btn small"),
       button("移除", () => {
-        removeDevice(device.relayUrl, device.roomId);
-        showHome();
+        void removeDevice(device.relayUrl, device.roomId).then(() => showHome());
       }, "btn ghost small"),
     ]),
   ]);
+  if (soon) {
+    row.append(el("p", {
+      className: "hint warn",
+      text: "这台设备的凭据即将过期，到期后就无法连接。请在 Mac 上重新生成配对链接并重新配对。",
+    }));
+  }
+  return row;
 }
 
 async function beginPairing(link: PairingLink): Promise<void> {
@@ -632,7 +662,11 @@ function showConfirm(challenge: PairingChallenge): void {
       return;
     }
     confirm.disabled = true;
-    void finishPairing(challenge, name)
+    void (async () => {
+      // 私钥要落盘，必须先有加密口令；用户在对话框里取消就当作放弃配对。
+      await ensureVault();
+      await finishPairing(challenge, name);
+    })()
       .then(() => showHome())
       .catch((failure: unknown) => {
         confirm.disabled = false;
@@ -663,7 +697,177 @@ function defaultDeviceName(): string {
   return agent ? `浏览器 · ${agent[1]}` : "浏览器";
 }
 
-async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> {
+/**
+ * Secrets live encrypted on disk; the password is asked once and the derived key is
+ * dropped after 30 minutes without use, so an idle tab cannot reconnect on its own.
+ */
+async function ensureSecrets(device: DeviceMeta): Promise<DeviceSecrets> {
+  if (!hasVault()) {
+    // 还没有口令：先把老版本的明文迁移进加密存储；没有可迁移的凭据就只能重新配对。
+    if (!getDeviceSecrets(device)) throw new Error("本地没有这台设备的凭据，需要重新配对");
+    await ensureVault();
+  } else if (needsUnlock()) {
+    await ensureVault();
+  }
+  const found = getDeviceSecrets(device);
+  if (!found) throw new Error("本地没有这台设备的凭据，需要重新配对");
+  return found;
+}
+
+/** Pairing stores a private key, so a password must exist and be unlocked before saving. */
+async function ensureVault(): Promise<void> {
+  if (!hasVault()) {
+    const created = await passwordDialog({
+      title: "设置凭据密码",
+      hint: "设备私钥会用这个密码加密后保存在本机，密码不会离开浏览器。忘记密码只能重新配对。",
+      confirm: true,
+      submit: setupPassword,
+    });
+    if (created === null) throw new LockedError("未设置密码，操作已取消");
+    return;
+  }
+  if (!needsUnlock()) return;
+  const password = await passwordDialog({
+    title: "解锁设备凭据",
+    hint: "设备私钥已加密保存在本机。输入密码后 30 分钟内不需要再次输入。",
+    submit: unlock,
+    // 密码不可找回，唯一出路是清空本机凭据后重新配对，所以给一个显式出口。
+    forgot: async () => {
+      if (!window.confirm("清除本机保存的所有设备凭据？之后需要重新配对。")) return false;
+      resetCredentials();
+      return true;
+    },
+  });
+  if (password === null) throw new LockedError();
+}
+
+function passwordDialog(options: {
+  title: string;
+  hint: string;
+  confirm?: boolean;
+  submit: (password: string) => Promise<void>;
+  /** Resolves true once the credentials are gone and the dialog should close. */
+  forgot?: () => Promise<boolean>;
+}): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = el("input", {
+      className: "input",
+      attrs: {
+        type: "password",
+        autocomplete: options.confirm ? "new-password" : "current-password",
+        placeholder: "密码",
+      },
+    }) as HTMLInputElement;
+    const again = el("input", {
+      className: "input",
+      attrs: { type: "password", autocomplete: "new-password", placeholder: "再输入一次" },
+    }) as HTMLInputElement;
+    const error = el("p", { className: "notice error hidden" });
+    const mask = el("div", { className: "sheet-mask" });
+    let busy = false;
+
+    const finish = (value: string | null): void => {
+      document.removeEventListener("keydown", onKey);
+      mask.remove();
+      resolve(value);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") finish(null);
+    };
+    const submit = button("继续", () => {
+      void run();
+    }, "btn primary");
+    const cancel = button("取消", () => finish(null), "btn secondary");
+    const fail = (message: string): void => {
+      error.textContent = message;
+      error.classList.remove("hidden");
+      busy = false;
+      submit.disabled = false;
+    };
+    const run = async (): Promise<void> => {
+      if (busy) return;
+      const value = input.value;
+      if (value.length < 8) return fail("密码至少 8 位");
+      if (options.confirm && again.value !== value) return fail("两次输入的密码不一致");
+      busy = true;
+      submit.disabled = true;
+      try {
+        await options.submit(value);
+        finish(value);
+      } catch (failure) {
+        fail(messageOf(failure));
+      }
+    };
+    for (const field of options.confirm ? [input, again] : [input]) {
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void run();
+      });
+    }
+    document.addEventListener("keydown", onKey);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) finish(null);
+    });
+
+    const fields = [el("label", { className: "field" }, [el("span", { text: "密码" }), input])];
+    if (options.confirm) {
+      fields.push(el("label", { className: "field" }, [el("span", { text: "确认密码" }), again]));
+    }
+    const leading = el("div", {});
+    const forgot = options.forgot;
+    if (forgot) {
+      leading.append(
+        button("忘记密码", () => {
+          if (busy) return;
+          busy = true;
+          void (async () => {
+            try {
+              if (await forgot()) finish(null);
+            } finally {
+              busy = false;
+            }
+          })();
+        }, "btn ghost"),
+      );
+    }
+    mask.append(
+      el("aside", { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": options.title } }, [
+        el("header", { className: "sheet-head" }, [
+          el("h2", { className: "sheet-title", text: options.title }),
+        ]),
+        el("p", { className: "sheet-source", text: options.hint }),
+        ...fields,
+        error,
+        el("footer", { className: "sheet-foot" }, [
+          leading,
+          el("div", { className: "actions" }, [cancel, submit]),
+        ]),
+      ]),
+    );
+    document.body.append(mask);
+    input.focus();
+  });
+}
+
+function showLocked(device: DeviceMeta): void {
+  app.replaceChildren(
+    el("main", { className: "page narrow" }, [
+      el("p", { className: "eyebrow", text: "凭据已锁定" }),
+      el("h1", { className: "display", text: "需要解锁" }),
+      el("p", {
+        className: "lede",
+        text: "设备私钥已加密保存在本机，超过 30 分钟没有使用就需要重新输入密码。",
+      }),
+      el("div", { className: "actions" }, [
+        button("输入密码", () => {
+          void connectAndShow(device);
+        }, "btn primary"),
+        button("返回", () => showHome(), "btn secondary"),
+      ]),
+    ]),
+  );
+}
+
+async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   const gen = generation;
   const soft = connected !== null;
   if (soft) {
@@ -680,9 +884,16 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
   }
   let opened: { client: PeerClient; connection: RelayConnection };
   try {
-    opened = await connectDevice(device);
+    opened = await connectDevice({ ...device, ...(await ensureSecrets(device)) });
   } catch (error) {
     if (gen !== generation) return;
+    if (error instanceof LockedError) {
+      progressDone();
+      // 用户可能在解锁框里清空了本机凭据，这时设备已经不存在，回首页重新配对。
+      if (!hasVault() && listDevices().length === 0) showHome();
+      else showLocked(device);
+      return;
+    }
     if (attempt >= 5) {
       progressDone();
       setReconnecting("重连失败，30 秒后继续重试…");
@@ -731,7 +942,7 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
   });
 }
 
-function scheduleRetry(device: StoredDevice, attempt: number, message?: string): void {
+function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): void {
   const gen = generation;
   const delay = Math.min(1000 * 2 ** (attempt - 1), 30_000);
   if (connected) {
