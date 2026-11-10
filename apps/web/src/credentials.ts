@@ -342,6 +342,12 @@ export function getDeviceSecrets(device: { relayUrl: string; roomId: string }): 
   return null;
 }
 
+/** 锁定期间删掉的设备只删了元数据，密文里的条目在下一次写入时一并清掉。 */
+function prune(map: Map<string, DeviceSecrets>, devices: DeviceMeta[]): void {
+  const live = new Set(devices.map(keyOf));
+  for (const key of [...map.keys()]) if (!live.has(key)) map.delete(key);
+}
+
 export function saveDevice(device: StoredDevice): Promise<void> {
   return withVaultLock(() => writeDevice(device));
 }
@@ -361,6 +367,7 @@ async function writeDevice(device: StoredDevice): Promise<void> {
   );
   devices.push(meta);
   map.set(keyOf(device), { privateKey, reconnectToken });
+  prune(map, devices);
   const vault = await seal(sessionKey, fromBase64(store.vault.salt), map);
   writeStore({ devices, vault });
   vaultData = vault.data;
@@ -384,12 +391,12 @@ async function deleteDevice(relayUrl: string, roomId: string): Promise<void> {
     (item) => !(item.relayUrl === relayUrl && item.roomId === roomId),
   );
   if (sessionKey === null || secrets === null) {
-    // 锁定时改不了密文，只删元数据；残留的密文条目下一次保存时会被一并覆盖。
+    // 锁定时改不了密文，只删元数据；残留的密文条目在下一次加密写入时清理。
     writeStore({ devices, vault: store.vault });
     return;
   }
   const map = await latestSecrets(store);
-  map.delete(keyOf({ relayUrl, roomId }));
+  prune(map, devices);
   const vault = await seal(sessionKey, fromBase64(store.vault.salt), map);
   writeStore({ devices, vault });
   vaultData = vault.data;

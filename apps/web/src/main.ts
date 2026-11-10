@@ -858,6 +858,11 @@ function passwordDialog(options: {
 }
 
 function showLocked(device: DeviceMeta): void {
+  // 锁屏会替换掉聊天 DOM，旧的恢复闭包和连接状态必须一起丢掉，
+  // 否则解锁后会被当成软重连，去恢复已经不存在的界面。
+  stopActive();
+  chatResume = null;
+  chatResumeKey = null;
   app.replaceChildren(
     el("main", { className: "page narrow" }, [
       el("p", { className: "eyebrow", text: "凭据已锁定" }),
