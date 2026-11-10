@@ -118,6 +118,11 @@ export const METHODS = [
   "operation.get",
   "device.list",
   "device.revoke",
+  "fs.roots",
+  "fs.list",
+  "fs.read",
+  "shell.exec",
+  "shell.cancel",
 ] as const;
 
 export type Method = (typeof METHODS)[number];
@@ -129,6 +134,7 @@ export const EVENT_NAMES = [
   "approval.required",
   "capabilities.changed",
   "host.status",
+  "shell.output",
 ] as const;
 
 export type EventName = (typeof EVENT_NAMES)[number];
@@ -224,7 +230,97 @@ export interface HostInfoResult {
     label?: string;
     detail?: string;
   }>;
+  /** Present only while the local user has opened the remote devtools switch. */
+  devtools?: DevtoolsStatus;
 }
+
+// ---- Remote devtools (files + single command execution) ----
+
+/** Off unless the local user turns it on; `expiresAt` null means until the bridge exits. */
+export interface DevtoolsStatus {
+  enabled: boolean;
+  expiresAt: number | null;
+  terminal: boolean;
+  files: boolean;
+}
+
+export interface FsRoot {
+  name: string;
+  path: string;
+}
+
+export interface FsRootsResult {
+  enabled: boolean;
+  roots: FsRoot[];
+}
+
+export interface FsEntry {
+  name: string;
+  path: string;
+  type: "file" | "dir";
+  size?: number;
+  mtime?: number;
+}
+
+export interface FsListParams {
+  path: string;
+}
+
+export interface FsListResult {
+  path: string;
+  /** Parent directory, null at a root. */
+  parent: string | null;
+  entries: FsEntry[];
+}
+
+export interface FsReadParams {
+  path: string;
+}
+
+export interface FsReadResult {
+  path: string;
+  name: string;
+  mime: string;
+  size: number;
+  mtime: number;
+  truncated: boolean;
+  /** Set for text-like files. */
+  text?: string;
+  /** Set for images, base64 encoded. */
+  dataBase64?: string;
+}
+
+export interface ShellExecParams {
+  command: string;
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+export interface ShellExecResult {
+  execId: string;
+  cwd: string;
+}
+
+export interface ShellCancelParams {
+  execId: string;
+}
+
+export interface ShellCancelResult {
+  ok: boolean;
+  killed: boolean;
+}
+
+export type ShellEventData =
+  | { execId: string; type: "stdout" | "stderr"; data: string }
+  | {
+      execId: string;
+      type: "exit";
+      code: number | null;
+      signal: string | null;
+      killed: boolean;
+      durationMs: number;
+      truncated: boolean;
+    };
 
 // ---- Sessions ----
 

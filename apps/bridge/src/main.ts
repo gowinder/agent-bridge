@@ -13,6 +13,7 @@ import {
   type AdminActions,
   type AdminDevice,
 } from "./admin.js";
+import { Devtools } from "./devtools.js";
 import {
   RelayApi,
   RelayClient,
@@ -41,6 +42,7 @@ function usage(): void {
   agent-bridge serve
   agent-bridge devices
   agent-bridge revoke <deviceId>
+  agent-bridge devtools [on|off|status] [--ttl 3600]
   agent-bridge status
   agent-bridge info
 
@@ -215,6 +217,33 @@ async function commandRevoke(args: string[]): Promise<void> {
   }
 }
 
+/** Remote file browsing and command execution are off unless turned on here or in the menu bar. */
+function commandDevtools(args: string[]): void {
+  const store = new Store();
+  try {
+    const devtools = new Devtools(store, new SessionAdapters(), (line) => console.log(line));
+    const action = args[0] ?? "status";
+    if (action === "on") {
+      const ttlRaw = flag(args, "ttl") ?? "3600";
+      const ttl = Number(ttlRaw);
+      if (!Number.isFinite(ttl) || ttl < 60 || ttl > 86_400) throw new Error("--ttl 必须在 60..86400 秒之间");
+      devtools.setEnabled(true, ttl);
+    } else if (action === "off") {
+      devtools.setEnabled(false);
+    } else if (action !== "status") {
+      throw new Error("用法：agent-bridge devtools [on|off|status] [--ttl 3600]");
+    }
+    const status = devtools.status();
+    console.log(
+      `远程工具：${status.enabled ? "已开启" : "已关闭"}${
+        status.expiresAt ? `（${new Date(status.expiresAt).toLocaleTimeString()} 失效）` : ""
+      }`,
+    );
+  } finally {
+    store.close();
+  }
+}
+
 /** Prints one JSON line describing the local state; never throws when uninitialized. */
 async function commandInfo(): Promise<void> {
   const store = new Store();
@@ -263,6 +292,7 @@ async function commandServe(): Promise<void> {
   store.clearExpiredInvites();
   const adapters = new SessionAdapters();
   const uploads = new UploadStore(store.dir);
+  const devtools = new Devtools(store, adapters, log);
 
   let stopping = false;
   let relay: RelayClient | null = null;
@@ -275,6 +305,8 @@ async function commandServe(): Promise<void> {
       kind: "pair" | "device";
       deviceId?: string;
       name?: string;
+      /** Pairing only: the code the user compares on both screens. */
+      code?: string;
       since: number;
     }
   >();
@@ -292,6 +324,7 @@ async function commandServe(): Promise<void> {
 
   const adminActions: AdminActions = {
     async snapshot() {
+      const devtoolsStatus = devtools.status();
       const local = new Map(store.devices().map((device) => [device.id, device]));
       const online = new Set(
         [...sessions.values()].flatMap((entry) => (entry.deviceId ? [entry.deviceId] : [])),
@@ -327,6 +360,13 @@ async function commandServe(): Promise<void> {
           name: entry.name ?? null,
           since: entry.since,
         })),
+        devtools: {
+          enabled: devtoolsStatus.enabled,
+          expiresAt: devtoolsStatus.expiresAt,
+        },
+        pairings: [...sessions.values()]
+          .filter((entry) => entry.kind === "pair")
+          .map((entry) => ({ channel: entry.channel, code: entry.code ?? null, since: entry.since })),
         ...(error ? { error } : {}),
       };
     },
@@ -340,6 +380,10 @@ async function commandServe(): Promise<void> {
     },
     async createInvite(ttlSeconds: number) {
       return mintInvite(api, store, config, ttlSeconds);
+    },
+    async setDevtools(enabled: boolean, ttlSeconds: number | null) {
+      const status = devtools.setEnabled(enabled, ttlSeconds);
+      return { enabled: status.enabled, expiresAt: status.expiresAt };
     },
   };
 
@@ -385,6 +429,10 @@ async function commandServe(): Promise<void> {
             store,
             hostName: config.hostName,
             deviceTtlSeconds: DEVICE_TTL_OPTIONS[store.meta("device_ttl") ?? "manual"] ?? null,
+            onConfirmCode: (code) => {
+              const entry = sessions.get(message.channel);
+              if (entry) entry.code = code;
+            },
           }),
           kind: "pair",
           since: Date.now(),
@@ -425,6 +473,7 @@ async function commandServe(): Promise<void> {
           hostName: config.hostName,
           adapters,
           uploads,
+          devtools,
         }),
         kind: "device",
         deviceId: device.id,
@@ -529,6 +578,9 @@ async function main(): Promise<void> {
       return;
     case "revoke":
       await commandRevoke(args);
+      return;
+    case "devtools":
+      commandDevtools(args);
       return;
     case "status":
       await commandStatus();

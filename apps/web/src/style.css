@@ -1180,6 +1180,264 @@ a.crumb:hover {
   color: var(--text);
 }
 
+/* ---- rail tabs: overview / files / shell ---- */
+
+.rail-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.rail-tab {
+  flex: 1;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.rail-tab:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.rail-tab[aria-selected="true"] {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+  color: var(--accent);
+}
+
+.rail-pane[hidden] {
+  display: none;
+}
+
+.rail-pane {
+  padding-bottom: 0;
+  overflow-y: auto;
+}
+
+.rail-error {
+  color: var(--danger);
+}
+
+.rail-filebar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  z-index: 1;
+}
+
+.rail-filebar-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.rail-icon-btn {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+}
+
+.rail-root-select {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  font-size: 12px;
+  padding: 0 6px;
+}
+
+.rail-crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1px;
+  padding: 6px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 45%, transparent);
+  font-size: 11px;
+}
+
+.rail-crumb {
+  padding: 2px 4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 11px;
+  cursor: pointer;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-crumb:hover {
+  background: var(--surface-2);
+}
+
+.rail-crumb-up {
+  display: inline-flex;
+  align-items: center;
+  color: var(--muted);
+  padding: 2px;
+}
+
+.rail-crumb-up .icon svg {
+  width: 11px;
+  height: 11px;
+}
+
+.rail-crumb-sep {
+  color: var(--muted);
+}
+
+.rail-files {
+  display: flex;
+  flex-direction: column;
+  padding: 4px;
+}
+
+.rail-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.rail-file:hover {
+  background: var(--surface-2);
+}
+
+.rail-file-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--muted);
+}
+
+.rail-file.is-dir .rail-file-icon {
+  color: var(--accent);
+}
+
+.rail-file-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-file-meta {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+
+.rail-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.rail-preview-img {
+  max-width: 100%;
+  padding: 10px;
+  box-sizing: border-box;
+}
+
+.rail-preview-text {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.rail-markdown {
+  padding: 10px 12px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.rail-markdown pre {
+  overflow-x: auto;
+}
+
+.shell-hint {
+  padding: 10px 12px 0;
+}
+
+.shell-cwd {
+  padding: 0 12px 8px;
+  font-size: 10.5px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-output {
+  flex: 1;
+  min-height: 120px;
+  margin: 0 8px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-y: auto;
+}
+
+.shell-form {
+  display: flex;
+  gap: 6px;
+  padding: 8px;
+}
+
+.shell-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+.shell-run,
+.shell-stop {
+  flex: none;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+
 .rail-task {
   display: flex;
   align-items: center;

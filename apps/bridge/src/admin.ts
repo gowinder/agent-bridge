@@ -27,6 +27,13 @@ export interface AdminConnection {
   since: number;
 }
 
+export interface AdminPairing {
+  channel: string;
+  /** Null until the browser's handshake finishes. */
+  code: string | null;
+  since: number;
+}
+
 export interface AdminSnapshot {
   version: string;
   hostName: string;
@@ -36,6 +43,9 @@ export interface AdminSnapshot {
   bridgePid: number;
   devices: AdminDevice[];
   connections: AdminConnection[];
+  devtools: { enabled: boolean; expiresAt: number | null };
+  /** Pairing channels that are still waiting for the confirm-code check. */
+  pairings: AdminPairing[];
   /** Set when the relay could not be asked for the device list. */
   error?: string;
 }
@@ -45,6 +55,7 @@ export interface AdminActions {
   disconnectDevice(deviceId: string): Promise<{ closed: number }>;
   revokeDevice(deviceId: string): Promise<{ closed: number }>;
   createInvite(ttlSeconds: number): Promise<{ url: string; expiresAt: number }>;
+  setDevtools(enabled: boolean, ttlSeconds: number | null): Promise<{ enabled: boolean; expiresAt: number | null }>;
 }
 
 export interface AdminServerOptions {
@@ -144,6 +155,13 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           const body = await readBody(request);
           const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : 300;
           send(response, 200, await actions.createInvite(Math.min(Math.max(ttl, 30), 600)));
+          return;
+        }
+        if (path === "/devtools" && request.method === "POST") {
+          const body = await readBody(request);
+          const enabled = body["enabled"] === true;
+          const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : null;
+          send(response, 200, await actions.setDevtools(enabled, ttl));
           return;
         }
         const action = /^\/devices\/([A-Za-z0-9_-]{8,64})\/(disconnect|revoke)$/.exec(path);

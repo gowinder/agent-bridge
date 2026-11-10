@@ -3,9 +3,15 @@ import type {
   AppListResult,
   ContextUsage,
   DeviceSummary,
+  DevtoolsStatus,
   FileUploadBeginResult,
   FileUploadChunkResult,
   FileUploadFinishResult,
+  FsEntry,
+  FsListResult,
+  FsReadResult,
+  FsRoot,
+  FsRootsResult,
   HostInfoResult,
   MessageAttachment,
   MessageListResult,
@@ -19,6 +25,8 @@ import type {
   SessionListResult,
   SessionRailResult,
   SessionSummary,
+  ShellEventData,
+  ShellExecResult,
   TransferCommitResult,
   TransferPrepareResult,
 } from "@agent-bridge/protocol";
@@ -512,6 +520,9 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
   }
   stopActive();
   active = opened.client;
+  opened.client.onEvent((message) => {
+    if (message.event === "shell.output") shellSink?.(message.data as ShellEventData);
+  });
   const infoResponse = await opened.client.request("host.info");
   const devicesResponse = await opened.client.request("device.list");
   if (!infoResponse.ok || !devicesResponse.ok) {
@@ -1674,7 +1685,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     ]),
   );
 
-  const rail = createRail(summary.sessionId, summary.appId);
+  const rail = createRail(summary.sessionId, summary.appId, project?.cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
   const main = el("main", { className: `main chat${rail.root.classList.contains("is-open") ? " has-rail" : ""}` }, [
@@ -1897,6 +1908,33 @@ function writeRailOpen(open: boolean): void {
   }
 }
 
+type RailTab = "overview" | "files" | "shell";
+
+interface FileBrowserState {
+  roots: FsRoot[];
+  root: FsRoot | null;
+  path: string;
+  parent: string | null;
+  entries: FsEntry[];
+  preview: FsReadResult | null;
+  error: string | null;
+  loading: boolean;
+}
+
+interface ShellPaneState {
+  output: HTMLPreElement;
+  input: HTMLInputElement;
+  run: HTMLButtonElement;
+  stop: HTMLButtonElement;
+  cwdLine: HTMLElement;
+  running: string | null;
+  /** Executions whose exit event arrived before the exec response did. */
+  finished: Set<string>;
+  history: string[];
+  historyIndex: number;
+  cwd?: string;
+}
+
 interface RailState {
   sessionId: string;
   appId: string;
@@ -1904,6 +1942,12 @@ interface RailState {
   body: HTMLElement;
   loading: boolean;
   signature: string;
+  devtools: DevtoolsStatus | undefined;
+  tab: RailTab;
+  panes: Record<RailTab, HTMLElement>;
+  tabs: HTMLButtonElement[];
+  files: FileBrowserState | null;
+  shell: ShellPaneState | null;
 }
 
 interface RailHandle {
@@ -1914,19 +1958,58 @@ interface RailHandle {
   onChange?: (open: boolean) => void;
 }
 
-function createRail(sessionId: string, appId: string): RailHandle {
-  const body = el("div", { className: "rail-body" });
-  const state: RailState = { sessionId, appId, root: el("div"), body, loading: false, signature: "" };
+/** Output of the running `shell.exec`, routed here by the peer event listener. */
+let shellSink: ((data: ShellEventData) => void) | null = null;
+
+function createRail(sessionId: string, appId: string, projectCwd: string | undefined): RailHandle {
+  const overview = el("div", { className: "rail-body" });
+  const files = el("div", { className: "rail-body rail-pane" });
+  const shell = el("div", { className: "rail-body rail-pane" });
+  files.hidden = true;
+  shell.hidden = true;
+  const panes: Record<RailTab, HTMLElement> = { overview, files, shell };
+  const state: RailState = {
+    sessionId,
+    appId,
+    root: el("div"),
+    body: overview,
+    loading: false,
+    signature: "",
+    devtools: connected?.info.devtools,
+    tab: "overview",
+    panes,
+    tabs: [],
+    files: null,
+    shell: null,
+  };
   const close = el("button", {
     className: "icon-btn",
     attrs: { type: "button", "aria-label": "关闭侧栏", title: "关闭侧栏" },
   }, [icon("close")]);
+  const tabBar = el("div", { className: "rail-tabs", attrs: { role: "tablist" } });
+  const labels: Array<[RailTab, string]> = [
+    ["overview", "概览"],
+    ["files", "文件"],
+    ["shell", "命令"],
+  ];
+  for (const [tab, label] of labels) {
+    const node = button(label, () => selectRailTab(state, tab), "rail-tab");
+    node.setAttribute("role", "tab");
+    node.dataset["tab"] = tab;
+    node.setAttribute("aria-selected", String(tab === "overview"));
+    state.tabs.push(node);
+    tabBar.append(node);
+  }
+  if (state.devtools?.enabled) tabBar.dataset["hint"] = "远程工具已开启";
   const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } }, [
     el("div", { className: "rail-head" }, [
       el("span", { className: "rail-title", text: "会话侧栏" }),
       close,
     ]),
-    body,
+    tabBar,
+    overview,
+    files,
+    shell,
   ]);
   state.root = root;
   const backdrop = el("div", { className: "rail-backdrop" });
@@ -1950,8 +2033,22 @@ function createRail(sessionId: string, appId: string): RailHandle {
   };
   close.addEventListener("click", dismiss);
   backdrop.addEventListener("click", dismiss);
+  if (projectCwd) root.dataset["cwd"] = projectCwd;
   currentRail = handle;
   return handle;
+}
+
+function selectRailTab(state: RailState, tab: RailTab): void {
+  state.tab = tab;
+  for (const [name, pane] of Object.entries(state.panes)) {
+    pane.hidden = name !== tab;
+  }
+  for (const node of state.tabs) {
+    node.setAttribute("aria-selected", String(node.dataset["tab"] === tab));
+  }
+  if (tab === "overview") void refreshRail(state);
+  if (tab === "files") void openFilesPane(state);
+  if (tab === "shell") openShellPane(state);
 }
 
 /** The rail of the chat on screen; one document key listener serves every render. */
@@ -1997,6 +2094,337 @@ function paintRail(state: RailState, result: SessionRailResult): void {
   );
   if (result.note) state.body.append(el("p", { className: "rail-note", text: result.note }));
   state.body.scrollTop = scroll;
+}
+
+// ---- rail: files ----
+
+async function openFilesPane(state: RailState): Promise<void> {
+  if (state.files) {
+    if (state.files.roots.length === 0 && !state.files.loading) await loadFileRoots(state);
+    return;
+  }
+  state.files = {
+    roots: [],
+    root: null,
+    path: "",
+    parent: null,
+    entries: [],
+    preview: null,
+    error: null,
+    loading: false,
+  };
+  paintFiles(state, "正在读取项目目录…");
+  await loadFileRoots(state);
+}
+
+async function loadFileRoots(state: RailState): Promise<void> {
+  const files = state.files;
+  if (!files) return;
+  files.loading = true;
+  paintFiles(state, "正在读取项目目录…");
+  try {
+    const result = await call<FsRootsResult>("fs.roots");
+    files.roots = result.roots;
+    files.error = result.roots.length === 0 ? "没有可浏览的项目目录" : null;
+  } catch (error) {
+    files.error = messageOf(error);
+  }
+  files.loading = false;
+  const first = files.roots[0];
+  if (!first) {
+    paintFiles(state);
+    return;
+  }
+  files.root = first;
+  await listFiles(state, first.path);
+}
+
+async function listFiles(state: RailState, path: string): Promise<void> {
+  const files = state.files;
+  if (!files) return;
+  files.loading = true;
+  files.preview = null;
+  paintFiles(state, "正在读取…");
+  try {
+    const result = await call<FsListResult>("fs.list", { path });
+    files.path = result.path;
+    files.parent = result.parent;
+    files.entries = result.entries;
+    files.error = null;
+  } catch (error) {
+    files.error = messageOf(error);
+  }
+  files.loading = false;
+  paintFiles(state);
+}
+
+async function openFile(state: RailState, path: string): Promise<void> {
+  const files = state.files;
+  if (!files) return;
+  files.loading = true;
+  paintFiles(state, "正在读取文件…");
+  try {
+    files.preview = await call<FsReadResult>("fs.read", { path });
+    files.error = null;
+  } catch (error) {
+    files.error = messageOf(error);
+  }
+  files.loading = false;
+  paintFiles(state);
+}
+
+function paintFiles(state: RailState, placeholder?: string): void {
+  const files = state.files;
+  const pane = state.panes.files;
+  pane.replaceChildren();
+  if (!files) return;
+  if (files.preview) {
+    pane.append(filePreview(state, files.preview));
+    return;
+  }
+  const bar = el("div", { className: "rail-filebar" });
+  if (files.roots.length > 1) {
+    const select = el("select", { className: "input rail-root-select" });
+    for (const root of files.roots) {
+      select.append(el("option", { text: root.name, attrs: { value: root.path } }));
+    }
+    select.value = files.root?.path ?? "";
+    select.addEventListener("change", () => {
+      const next = files.roots.find((item) => item.path === select.value);
+      if (!next) return;
+      files.root = next;
+      void listFiles(state, next.path);
+    });
+    bar.append(select);
+  } else if (files.root) {
+    bar.append(el("span", { className: "rail-filebar-name", text: files.root.name, attrs: { title: files.root.path } }));
+  }
+  const refresh = button("", () => {
+    if (files.path) void listFiles(state, files.path);
+    else void loadFileRoots(state);
+  }, "icon-btn rail-icon-btn");
+  refresh.append(icon("refresh", "icon"));
+  refresh.title = "刷新目录";
+  bar.append(refresh);
+  pane.append(bar);
+
+  if (files.root) pane.append(fileCrumbs(state));
+  if (files.loading) {
+    pane.append(el("p", { className: "rail-empty", text: placeholder ?? "正在读取…" }));
+    return;
+  }
+  if (files.error) {
+    pane.append(el("p", { className: "rail-empty rail-error", text: files.error }));
+    return;
+  }
+  if (files.entries.length === 0) {
+    pane.append(el("p", { className: "rail-empty", text: "这个目录是空的" }));
+    return;
+  }
+  const list = el("div", { className: "rail-files" });
+  for (const entry of files.entries) list.append(fileRow(state, entry));
+  pane.append(list);
+}
+
+function fileCrumbs(state: RailState): HTMLElement {
+  const files = state.files!;
+  const root = files.root!;
+  const bar = el("div", { className: "rail-crumbs" });
+  if (files.parent) {
+    const up = button("", () => void listFiles(state, files.parent!), "rail-crumb rail-crumb-up");
+    up.append(icon("back"));
+    up.title = "上一级";
+    bar.append(up);
+  }
+  bar.append(button(root.name || "/", () => void listFiles(state, root.path), "rail-crumb"));
+  const rel = files.path === root.path ? "" : files.path.slice(root.path.length + 1);
+  if (!rel) return bar;
+  let acc = root.path;
+  for (const part of rel.split("/")) {
+    acc = `${acc}/${part}`;
+    const at = acc;
+    bar.append(el("span", { className: "rail-crumb-sep", text: "/" }));
+    bar.append(button(part, () => void listFiles(state, at), "rail-crumb"));
+  }
+  return bar;
+}
+
+function fileRow(state: RailState, entry: FsEntry): HTMLElement {
+  const row = button("", () => {
+    if (entry.type === "dir") void listFiles(state, entry.path);
+    else void openFile(state, entry.path);
+  }, `rail-file${entry.type === "dir" ? " is-dir" : ""}`);
+  row.append(icon(entry.type === "dir" ? "chevron" : "file", "rail-file-icon"));
+  row.append(el("span", { className: "rail-file-name", text: entry.name, attrs: { title: entry.path } }));
+  row.append(el("span", { className: "rail-file-meta", text: entry.type === "dir" ? "" : sizeLabel(entry.size ?? 0) }));
+  return row;
+}
+
+function filePreview(state: RailState, file: FsReadResult): HTMLElement {
+  const wrap = el("div", { className: "rail-preview" });
+  const back = button("", () => {
+    const files = state.files;
+    if (!files) return;
+    files.preview = null;
+    paintFiles(state);
+  }, "icon-btn rail-icon-btn");
+  back.append(icon("back"));
+  back.title = "返回目录";
+  wrap.append(
+    el("div", { className: "rail-filebar" }, [
+      back,
+      el("span", { className: "rail-filebar-name", text: file.name, attrs: { title: file.path } }),
+    ]),
+  );
+  if (file.dataBase64) {
+    wrap.append(
+      el("img", {
+        className: "rail-preview-img",
+        attrs: { src: `data:${file.mime};base64,${file.dataBase64}`, alt: file.name },
+      }),
+    );
+  } else if (file.mime === "text/markdown") {
+    const body = el("div", { className: "markdown rail-markdown" });
+    body.append(renderMarkdown(file.text ?? ""));
+    wrap.append(body);
+  } else {
+    wrap.append(el("pre", { className: "rail-preview-text", text: file.text ?? "" }));
+  }
+  wrap.append(
+    el("p", {
+      className: "rail-note",
+      text: `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`,
+    }),
+  );
+  return wrap;
+}
+
+// ---- rail: single-command shell ----
+
+function openShellPane(state: RailState): void {
+  if (state.shell) {
+    state.shell.input.focus();
+    return;
+  }
+  const pane = state.panes.shell;
+  pane.replaceChildren();
+  const output = el("pre", { className: "shell-output" });
+  const cwdLine = el("p", { className: "shell-cwd" });
+  const input = el("input", {
+    className: "input shell-input",
+    attrs: { type: "text", placeholder: "输入命令后回车", autocomplete: "off", spellcheck: "false" },
+  });
+  const run = button("执行", () => void runShell(state), "btn primary shell-run");
+  const stop = button("停止", () => void stopShell(state), "btn secondary shell-stop");
+  stop.hidden = true;
+  const form = el("form", { className: "shell-form" }, [input, run, stop]);
+  form.addEventListener("submit", (event) => {
+    event.preventDefault();
+    void runShell(state);
+  });
+  input.addEventListener("keydown", (event) => {
+    const shell = state.shell;
+    if (!shell) return;
+    if (event.key === "ArrowUp" && shell.history.length > 0) {
+      event.preventDefault();
+      shell.historyIndex = Math.max(0, shell.historyIndex - 1);
+      input.value = shell.history[shell.historyIndex] ?? "";
+    } else if (event.key === "ArrowDown" && shell.history.length > 0) {
+      event.preventDefault();
+      shell.historyIndex = Math.min(shell.history.length, shell.historyIndex + 1);
+      input.value = shell.history[shell.historyIndex] ?? "";
+    }
+  });
+  const cwd = state.root.dataset["cwd"];
+  pane.append(
+    el("p", { className: "rail-empty shell-hint", text: "在项目目录里执行单条命令，输出实时返回。远程工具关闭后立刻不可用。" }),
+    cwdLine,
+    output,
+    form,
+  );
+  if (cwd) cwdLine.textContent = cwd;
+  state.shell = {
+    output,
+    input,
+    run,
+    stop,
+    cwdLine,
+    running: null,
+    finished: new Set<string>(),
+    history: [],
+    historyIndex: 0,
+    cwd,
+  };
+  shellSink = (data) => handleShellEvent(state, data);
+  input.focus();
+}
+
+async function runShell(state: RailState): Promise<void> {
+  const shell = state.shell;
+  if (!shell || shell.running) return;
+  const command = shell.input.value.trim();
+  if (!command) return;
+  shell.input.value = "";
+  shell.history.push(command);
+  shell.historyIndex = shell.history.length;
+  appendShell(state, `$ ${command}\n`);
+  shell.run.disabled = true;
+  shell.stop.hidden = false;
+  try {
+    const result = await call<ShellExecResult>("shell.exec", { command, cwd: shell.cwd }, 20_000);
+    shell.cwdLine.textContent = result.cwd;
+    shell.cwd = result.cwd;
+    if (shell.finished.has(result.execId)) {
+      shell.run.disabled = false;
+      shell.stop.hidden = true;
+    } else {
+      shell.running = result.execId;
+    }
+  } catch (error) {
+    appendShell(state, `${messageOf(error)}\n`);
+    shell.run.disabled = false;
+    shell.stop.hidden = true;
+  }
+}
+
+async function stopShell(state: RailState): Promise<void> {
+  const shell = state.shell;
+  if (!shell?.running) return;
+  try {
+    await call<{ ok: boolean; killed: boolean }>("shell.cancel", { execId: shell.running });
+    appendShell(state, "\n^C 已请求停止\n");
+  } catch (error) {
+    appendShell(state, `${messageOf(error)}\n`);
+  }
+}
+
+function handleShellEvent(state: RailState, data: ShellEventData): void {
+  const shell = state.shell;
+  if (!shell) return;
+  if (data.type !== "exit") {
+    appendShell(state, data.data);
+    return;
+  }
+  shell.finished.add(data.execId);
+  const tail = data.killed ? "已终止" : `退出码 ${data.code ?? data.signal ?? "?"}`;
+  appendShell(
+    state,
+    `\n[${tail}${data.truncated ? "，输出已截断" : ""} · ${(data.durationMs / 1000).toFixed(1)}s]\n`,
+  );
+  if (shell.running === data.execId || shell.running === null) {
+    shell.running = null;
+    shell.run.disabled = false;
+    shell.stop.hidden = true;
+  }
+}
+
+function appendShell(state: RailState, text: string): void {
+  const shell = state.shell;
+  if (!shell) return;
+  const current = shell.output.textContent ?? "";
+  const next = current + text;
+  shell.output.textContent = next.length > 400_000 ? next.slice(-300_000) : next;
+  shell.output.scrollTop = shell.output.scrollHeight;
 }
 
 function railSection(title: string, children: Node[], count?: number): HTMLElement {
