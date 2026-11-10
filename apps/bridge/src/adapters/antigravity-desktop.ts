@@ -449,6 +449,7 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
       updatedAt: summary?.updatedAt || Math.round(entry.mtimeMs),
       archived: false,
       live: summary?.running === true,
+      ...(summary?.running === true ? { busy: true } : {}),
       canSend: false,
       sendBlockedReason: "Antigravity 桌面版暂不支持从 Bridge 发送消息，请在 Antigravity 中继续对话",
     };
@@ -641,7 +642,8 @@ function findEndpoint(): { endpoint: Endpoint | null; error: string | null; curr
   }
   const candidates: Array<{ pid: number; token: string }> = [];
   for (const line of listing.split("\n")) {
-    if (!line.includes("language_server_macos")) continue;
+    // 2.27 起进程名从 language_server_macos 变成 language_server，靠 app_data_dir 区分产品。
+    if (!/(^|[\s/])language_server(_macos)?(?=\s|$)/.test(line)) continue;
     if (!/--app_data_dir[\s=]+antigravity(\s|$)/.test(line)) continue;
     const pid = Number(line.trimStart().split(/\s+/, 1)[0]);
     const token = /--csrf_token[\s=]+(\S+)/.exec(line)?.[1];
@@ -677,17 +679,21 @@ function listeningPorts(pid: number): number[] {
 function probe(port: number, token: string): { ok: boolean; current: Set<string> } {
   const current = new Set<string>();
   try {
+    // 2.30 的 GetUserTrajectoryDescriptions 返回空对象，改用 GetAllCascadeTrajectories 认端点，
+    // 顺带从状态里认出正在运行的会话。
     const output = execFileSync(
       CURL_BIN,
-      curlArgs({ pid: 0, port, token }, "GetUserTrajectoryDescriptions", "{}", PROBE_TIMEOUT_SEC),
+      curlArgs({ pid: 0, port, token }, "GetAllCascadeTrajectories", "{}", PROBE_TIMEOUT_SEC),
       { encoding: "utf8", timeout: (PROBE_TIMEOUT_SEC + 1) * 1000, maxBuffer: 8 * 1024 * 1024 },
     );
     const parsed: unknown = JSON.parse(output);
-    if (!isRecord(parsed) || !Array.isArray(parsed["trajectories"])) return { ok: false, current };
-    for (const item of parsed["trajectories"]) {
-      if (!isRecord(item) || item["current"] !== true) continue;
+    if (!isRecord(parsed) || !isRecord(parsed["trajectorySummaries"])) return { ok: false, current };
+    for (const [cascadeId, item] of Object.entries(parsed["trajectorySummaries"])) {
+      if (!isRecord(item)) continue;
+      const status = typeof item["status"] === "string" ? item["status"] : "";
+      if (!status.includes("RUNNING")) continue;
       const trajectoryId = item["trajectoryId"];
-      if (typeof trajectoryId === "string") current.add(trajectoryId);
+      current.add(typeof trajectoryId === "string" && trajectoryId ? trajectoryId : cascadeId);
     }
     return { ok: true, current };
   } catch {

@@ -108,6 +108,14 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 8.4l2.8 2.8 6-6.2"/></svg>',
   rail:
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="10" rx="1.6"/><path d="M9.6 3v10"/><path d="M4.4 6.2h2.4M4.4 8.6h2.4"/></svg>',
+  bell:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 7.6 0c0 3 1 4.2 1.6 4.7H2.6c.6-.5 1.6-1.7 1.6-4.7Z"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/></svg>',
+  bellOff:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 5.6-3.3M11.8 7.4c.1 2 1 3.1 1.5 3.6H5.2"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+  expand:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
+  collapse:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -239,6 +247,172 @@ interface Snapshot {
 }
 let snapshot: Snapshot | null = null;
 
+const UNREAD_KEY = "ab.unreadSessions";
+const NOTIFY_KEY = "ab.completionNotifications";
+
+/** sessionId -> completion time, kept across reloads until the chat is opened again. */
+function readUnread(): Record<string, number> {
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(UNREAD_KEY) ?? "{}");
+    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return {};
+    const out: Record<string, number> = {};
+    for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+      if (typeof value === "number" && Number.isFinite(value)) out[key] = value;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+let unreadSessions = readUnread();
+
+function persistUnread(): void {
+  try {
+    localStorage.setItem(UNREAD_KEY, JSON.stringify(unreadSessions));
+  } catch {
+    // storage unavailable; the badge still lives in memory
+  }
+}
+
+function markUnread(sessionId: string, at: number): void {
+  unreadSessions[sessionId] = at;
+  persistUnread();
+}
+
+function markRead(sessionId: string): void {
+  if (!(sessionId in unreadSessions)) return;
+  delete unreadSessions[sessionId];
+  persistUnread();
+}
+
+function unreadAt(sessionId: string): number | undefined {
+  return unreadSessions[sessionId];
+}
+
+function unreadCount(sessions: SessionSummary[]): number {
+  return sessions.filter((session) => unreadAt(session.sessionId) !== undefined).length;
+}
+
+function notificationsSupported(): boolean {
+  return "Notification" in window;
+}
+
+function notificationsOn(): boolean {
+  if (!notificationsSupported()) return false;
+  if (Notification.permission !== "granted") return false;
+  try {
+    return localStorage.getItem(NOTIFY_KEY) !== "0";
+  } catch {
+    return true;
+  }
+}
+
+function notifyCompletion(session: SessionSummary): void {
+  if (!notificationsOn()) return;
+  const appName = snapshot?.apps.find((item) => item.appId === session.appId)?.name ?? "Agent Bridge";
+  try {
+    const note = new Notification(session.title || "对话已完成", {
+      body: `${appName} · 回复已完成`,
+      tag: `ab-complete-${session.sessionId}`,
+    });
+    note.onclick = () => {
+      window.focus();
+      note.close();
+      navigate({
+        level: "chat",
+        appId: session.appId,
+        projectId: session.projectId,
+        sessionId: session.sessionId,
+      });
+    };
+  } catch {
+    // Notification constructor refused; the unread badge still marks the chat.
+  }
+}
+
+/** The last busy flag seen per chat; a true -> false edge is a finished turn. */
+const busySeen = new Map<string, boolean>();
+let watchedAt = 0;
+
+function observeSessions(sessions: SessionSummary[]): void {
+  const route = parseRoute();
+  for (const session of sessions) {
+    const busy = session.busy === true;
+    const was = busySeen.get(session.sessionId);
+    busySeen.set(session.sessionId, busy);
+    const viewing =
+      route.level === "chat" &&
+      route.sessionId === session.sessionId &&
+      document.visibilityState === "visible";
+    if (viewing) {
+      // A background completion can land while this chat stays open without re-rendering,
+      // so clear the badge here instead of only on the busy edge below.
+      markRead(session.sessionId);
+      continue;
+    }
+    if (was !== true || busy) continue;
+    markUnread(session.sessionId, Date.now());
+    notifyCompletion(session);
+  }
+}
+
+/**
+ * Chat pages do not rebuild the snapshot, so a finished turn in another chat would go
+ * unnoticed; re-read the session list in the background and only record the edges.
+ */
+async function watchSessions(): Promise<void> {
+  if (!active || !snapshot) return;
+  const now = Date.now();
+  if (now - watchedAt < 8_000) return;
+  watchedAt = now;
+  const apps = snapshot.apps;
+  try {
+    const pages = await Promise.all(
+      apps.map((app) => call<SessionListResult>("session.list", { appId: app.appId, limit: 500 })),
+    );
+    const sessions = pages.flatMap((page) => page.sessions);
+    if (!snapshot) return;
+    const before = snapshotSignature();
+    // Chrome pages keep their own session summary; refreshing the list in place lets the
+    // back navigation show what the background watch saw without another reload.
+    snapshot = { ...snapshot, sessions };
+    observeSessions(sessions);
+    // The list poller compares against this snapshot, so a change seen here would otherwise
+    // never repaint; re-render the visible list from the data this watcher just stored.
+    if (document.visibilityState !== "visible") return;
+    const route = parseRoute();
+    if (route.level !== "clients" && route.level !== "projects" && route.level !== "sessions") return;
+    if (snapshotSignature() !== before) void renderRoute();
+  } catch {
+    // The connection layer already reports disconnects; the next tick retries.
+  }
+}
+
+let watchTimer: number | null = null;
+
+/** Every page watches completions, including while the tab is hidden or showing another route. */
+function startSessionWatch(): void {
+  if (watchTimer !== null) return;
+  watchTimer = window.setInterval(() => void watchSessions(), 10_000);
+  document.addEventListener("visibilitychange", onWatchVisible);
+}
+
+/** Background tabs throttle the timer, so returning to the tab refreshes at once. */
+function onWatchVisible(): void {
+  if (document.visibilityState !== "visible") return;
+  watchedAt = 0;
+  void watchSessions();
+}
+
+function stopSessionWatch(): void {
+  document.removeEventListener("visibilitychange", onWatchVisible);
+  if (watchTimer !== null) {
+    clearInterval(watchTimer);
+    watchTimer = null;
+  }
+}
+
 type Route =
   | { level: "clients" }
   | { level: "projects"; appId: string }
@@ -301,6 +475,7 @@ function stopActive(): void {
     retryTimer = null;
   }
   stopPolling();
+  stopSessionWatch();
   active?.stop();
   active = null;
   connected = null;
@@ -540,6 +715,7 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
     history.replaceState(null, "", `${location.pathname}${location.search}#/clients`);
   }
   await renderRoute(soft);
+  startSessionWatch();
   progressDone();
   setReconnecting(null);
   void opened.connection.closed().then((info) => {
@@ -696,6 +872,7 @@ async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot 
     sessions: sessionPages.flatMap((page) => page.sessions),
     ...(notes.length > 0 ? { note: notes.join("；") } : {}),
   };
+  observeSessions(snapshot.sessions);
   return snapshot;
 }
 
@@ -1014,6 +1191,8 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     if (recents) right.append(recents);
     const switcher = agentSwitcher(parseRoute());
     if (switcher) right.append(switcher);
+    const notify = notifyButton();
+    if (notify) right.append(notify);
     right.append(
       el("span", { className: "conn" }, [
         el("span", { className: "dot" }),
@@ -1031,6 +1210,51 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     nav,
     right,
   ]);
+}
+
+/**
+ * Completion notifications need the browser's permission, which only a user gesture can
+ * request in Safari; the topbar button is that gesture, and it also switches them off.
+ */
+function notifyButton(): HTMLButtonElement | null {
+  if (!notificationsSupported()) return null;
+  const denied = Notification.permission === "denied";
+  const enabled = notificationsOn();
+  const node = button("", () => void toggleNotifications(), `btn ghost small notify-btn${enabled ? " is-on" : ""}`);
+  node.append(icon(enabled ? "bell" : "bellOff"), el("span", { text: enabled ? "提醒已开" : "开启提醒" }));
+  node.title = denied
+    ? "通知已被浏览器禁止，请在站点设置中允许通知"
+    : enabled
+      ? "关闭对话完成提醒"
+      : "开启浏览器通知，对话完成后弹出提醒";
+  return node;
+}
+
+async function toggleNotifications(): Promise<void> {
+  if (!notificationsSupported()) return;
+  if (Notification.permission === "denied") {
+    window.alert("通知已被浏览器禁止。请在浏览器的站点设置中允许通知，然后刷新页面。");
+    return;
+  }
+  // Read the switch before the prompt: a granted permission alone already makes
+  // notificationsOn() true, so negating it afterwards would save "0" and turn them off.
+  const wasOn = notificationsOn();
+  if (Notification.permission !== "granted") {
+    let result: NotificationPermission = "denied";
+    try {
+      result = await Notification.requestPermission();
+    } catch {
+      result = "denied";
+    }
+    if (result !== "granted") return;
+  }
+  const next = !wasOn;
+  try {
+    localStorage.setItem(NOTIFY_KEY, next ? "1" : "0");
+  } catch {
+    // storage unavailable; the choice lasts this page only
+  }
+  void renderRoute(true);
 }
 
 async function renderRoute(soft = false): Promise<void> {
@@ -1090,7 +1314,9 @@ function snapshotSignature(): string {
     snapshot.projects.length,
     ...snapshot.sessions.map(
       (session) =>
-        `${session.sessionId}:${session.updatedAt}:${session.live ? 1 : 0}:${session.busy ? 1 : 0}`,
+        `${session.sessionId}:${session.updatedAt}:${session.live ? 1 : 0}:${session.busy ? 1 : 0}:${
+          unreadAt(session.sessionId) !== undefined ? 1 : 0
+        }`,
     ),
   ].join("|");
 }
@@ -1134,13 +1360,14 @@ function renderClients(): void {
   for (const item of data.apps) {
     const projects = data.projects.filter((project) => project.appId === item.appId);
     const sessions = data.sessions.filter((session) => session.appId === item.appId);
+    const unread = unreadCount(sessions);
     const row = el("button", { className: `row client-row${item.status === "ready" ? "" : " muted-row"}`, attrs: { type: "button" } }, [
       el("span", { className: "mark", text: agentMark(item.kind) }),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title", text: item.name }),
         el("span", {
           className: "meta",
-          text: `${projects.length} 个工程 · ${sessions.length} 个会话 · 枚举${completenessLabel(item.capabilities.enumerate)} · 读取${completenessLabel(item.capabilities.read)} · ${item.capabilities.send ? "可发送" : "不可发送"}`,
+          text: `${projects.length} 个工程 · ${sessions.length} 个会话${unread > 0 ? ` · ${unread} 未读` : ""} · 枚举${completenessLabel(item.capabilities.enumerate)} · 读取${completenessLabel(item.capabilities.read)} · ${item.capabilities.send ? "可发送" : "不可发送"}`,
         }),
         ...(item.capabilities.reason || item.capabilities.sendDetail
           ? [el("span", { className: "meta dim", text: item.capabilities.reason ?? item.capabilities.sendDetail ?? "" })]
@@ -1178,13 +1405,17 @@ function renderProjects(route: Route & { level: "projects" }): void {
   }
   for (const project of projects) {
     const sessions = data.sessions.filter((session) => session.projectId === project.projectId);
+    const unread = unreadCount(sessions);
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
       el("span", { className: "mark mono", text: initials(project.name) }),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title", text: project.name }),
         el("span", { className: "meta mono path", text: project.cwd ?? project.projectId }),
       ]),
-      el("span", { className: "row-count", text: `${sessions.length || project.sessionCount} 个会话` }),
+      el("span", {
+        className: "row-count",
+        text: `${sessions.length || project.sessionCount} 个会话${unread > 0 ? ` · ${unread} 未读` : ""}`,
+      }),
       icon("chevron", "icon chev"),
     ]);
     row.addEventListener("click", () => navigate({ level: "sessions", appId: route.appId, projectId: project.projectId }));
@@ -1200,6 +1431,14 @@ function renderProjects(route: Route & { level: "projects" }): void {
           el("h1", { className: "display", text: "工程" }),
           el("p", { className: "meta", text: `${projects.length} 个工程，按会话数量排列` }),
         ]),
+        button(
+          "刷新",
+          () => {
+            snapshot = null;
+            void renderRoute();
+          },
+          "btn ghost small",
+        ),
       ]),
       list,
     ]),
@@ -1223,6 +1462,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   }
   for (const session of sessions) {
     const busy = session.busy === true;
+    const unread = unreadAt(session.sessionId) !== undefined;
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
       el(
         "span",
@@ -1246,6 +1486,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
             document.createTextNode("执行中"),
           ])
         : el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
+      ...(unread ? [el("span", { className: "pill unread", text: "未读" })] : []),
       icon("chevron", "icon chev"),
     ]);
     row.addEventListener("click", () =>
@@ -1408,6 +1649,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   }
   document.title = `${summary.title} · Agent Bridge`;
   rememberSession(summary);
+  markRead(summary.sessionId);
 
   const note = el("p", { className: "hint" });
   const list = el("div", { className: "transcript-body" });
@@ -1777,6 +2019,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     return;
   }
   document.title = `后台任务 · ${summary.title} · Agent Bridge`;
+  markRead(summary.sessionId);
 
   const note = el("p", { className: "hint", text: "正在读取子任务记录…" });
   const list = el("div", { className: "transcript-body" });
@@ -2034,17 +2277,19 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     tabBar.append(node);
   }
   paintRailHint(state);
-  const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } }, [
+  const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } });
+  // The header's toggle reads state.root when clicked, so bind the real node before building it.
+  state.root = root;
+  root.append(
     el("div", { className: "rail-head" }, [
       el("span", { className: "rail-title", text: "会话侧栏" }),
-      close,
+      el("div", { className: "rail-head-actions" }, [railExpandButton(state), close]),
     ]),
     tabBar,
     overview,
     files,
     shell,
-  ]);
-  state.root = root;
+  );
   const backdrop = el("div", { className: "rail-backdrop" });
   const handle: RailHandle = {
     root,
@@ -2052,6 +2297,8 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     state,
     setOpen(open: boolean) {
       root.classList.toggle("is-open", open);
+      if (!open) root.classList.remove("is-expanded", "is-preview-full");
+      syncRailToggles(root);
       backdrop.classList.toggle("is-open", open);
       if (open) void refreshRail(state);
       handle.onChange?.(open);
@@ -2115,6 +2362,17 @@ let currentRail: RailHandle | null = null;
 function dismissRail(): void {
   const rail = currentRail;
   if (!rail || !rail.root.classList.contains("is-open")) return;
+  // Escape unwinds fullscreen first: reader, then the whole rail, and only then closes it.
+  if (rail.root.classList.contains("is-preview-full")) {
+    rail.root.classList.remove("is-preview-full");
+    syncRailToggles(rail.root);
+    return;
+  }
+  if (rail.root.classList.contains("is-expanded")) {
+    rail.root.classList.remove("is-expanded");
+    syncRailToggles(rail.root);
+    return;
+  }
   rail.setOpen(false);
   writeRailOpen(false);
 }
@@ -2249,6 +2507,57 @@ async function openFile(state: RailState, path: string): Promise<void> {
   paintFiles(state);
 }
 
+/** In the rail header: the whole rail takes the viewport, tabs and all. */
+function railExpandButton(state: RailState): HTMLButtonElement {
+  return classToggleButton(
+    state.root,
+    "is-expanded",
+    "全屏侧栏",
+    "退出全屏侧栏",
+  );
+}
+
+/** In the file preview header: only the reader goes fullscreen, no rail chrome. */
+function previewFullButton(state: RailState): HTMLButtonElement {
+  return classToggleButton(state.root, "is-preview-full", "全屏查看文件", "退出全屏查看");
+}
+
+const toggleTargets = new WeakMap<HTMLButtonElement, HTMLElement>();
+
+function classToggleButton(
+  target: HTMLElement,
+  className: string,
+  title: string,
+  activeTitle: string,
+): HTMLButtonElement {
+  const node = button("", () => {
+    target.classList.toggle(className);
+    syncToggle(node);
+  }, "icon-btn rail-icon-btn rail-toggle-btn");
+  toggleTargets.set(node, target);
+  node.dataset["toggle"] = className;
+  node.dataset["title"] = title;
+  node.dataset["activeTitle"] = activeTitle;
+  syncToggle(node);
+  return node;
+}
+
+/** Esc and tab switches change the rail classes outside the button; repaint from the class. */
+function syncToggle(node: HTMLButtonElement): void {
+  const rail = toggleTargets.get(node) ?? node.closest(".rail");
+  const className = node.dataset["toggle"];
+  if (!rail || !className) return;
+  const active = rail.classList.contains(className);
+  node.replaceChildren(icon(active ? "collapse" : "expand", "icon"));
+  node.title = (active ? node.dataset["activeTitle"] : node.dataset["title"]) ?? "";
+  node.setAttribute("aria-label", node.title);
+  node.setAttribute("aria-pressed", String(active));
+}
+
+function syncRailToggles(root: HTMLElement): void {
+  for (const node of root.querySelectorAll<HTMLButtonElement>(".rail-toggle-btn")) syncToggle(node);
+}
+
 function paintFiles(state: RailState, placeholder?: string): void {
   const files = state.files;
   const pane = state.panes.files;
@@ -2342,6 +2651,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     const files = state.files;
     if (!files) return;
     files.preview = null;
+    state.root.classList.remove("is-preview-full");
     paintFiles(state);
   }, "icon-btn rail-icon-btn");
   back.append(icon("back"));
@@ -2350,6 +2660,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     el("div", { className: "rail-filebar" }, [
       back,
       el("span", { className: "rail-filebar-name", text: file.name, attrs: { title: file.path } }),
+      previewFullButton(state),
     ]),
   );
   if (file.dataBase64) {

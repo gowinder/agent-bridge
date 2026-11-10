@@ -1,4 +1,13 @@
-import { existsSync, readdirSync, readFileSync, statSync, createReadStream } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  openSync,
+  readSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -57,6 +66,12 @@ interface BusyState {
   lastStart: number;
   lastEnd: number;
   sawStart: boolean;
+}
+
+/** How far into a rollout the busy markers have been read, so appends are followed. */
+interface BusyTail {
+  offset: number;
+  state: BusyState;
 }
 
 interface CachedMessages {
@@ -149,10 +164,69 @@ function isAbortEntry(entry: RawLine): boolean {
 
 const BUSY_MAX_AGE_MS = 30 * 60_000;
 
+/** Rollout tail scanned for the latest task markers when listing sessions. */
+const BUSY_TAIL_BYTES = 512 * 1024;
+/** A seed walks back this far when the newest tail chunk holds no task marker. */
+const BUSY_TAIL_MAX_BACK_BYTES = 32 * 1024 * 1024;
+/** A single poll replays at most this many appended bytes before re-seeding. */
+const BUSY_FOLLOW_MAX_BYTES = 8 * 1024 * 1024;
+/** A task marker record is tiny; a trailing partial larger than this is tool output, not one. */
+const BUSY_PARTIAL_SCAN_BYTES = 64 * 1024;
+
 function rolloutBusy(busy: BusyState | undefined): boolean {
   if (!busy || !busy.sawStart) return false;
   if (busy.lastStart <= busy.lastEnd) return false;
   return Date.now() - busy.lastStart < BUSY_MAX_AGE_MS;
+}
+
+function readChunkBuffer(path: string, start: number, length: number): Buffer {
+  let fd: number | undefined;
+  try {
+    const buffer = Buffer.alloc(length);
+    fd = openSync(path, "r");
+    readSync(fd, buffer, 0, length, start);
+    return buffer;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function readChunkText(path: string, start: number, length: number): string {
+  return readChunkBuffer(path, start, length).toString("utf8");
+}
+
+/**
+ * Where the next follow should start: after the last complete record, so a record still being
+ * written is read once from its start instead of losing the part already skipped.
+ */
+function completeOffset(path: string, size: number): number {
+  if (size === 0) return 0;
+  const window = Math.min(size, BUSY_PARTIAL_SCAN_BYTES);
+  const start = size - window;
+  let buffer: Buffer;
+  try {
+    buffer = readChunkBuffer(path, start, window);
+  } catch {
+    return size;
+  }
+  const newline = buffer.lastIndexOf(0x0a);
+  if (newline === -1) return start === 0 ? 0 : size;
+  return start + newline + 1;
+}
+
+function scanBusyLines(text: string, state: BusyState): void {
+  for (const line of text.split("\n")) {
+    if (!line.includes("task_started") && !line.includes("task_complete") && !line.includes("turn_aborted")) {
+      continue;
+    }
+    let entry: RawLine;
+    try {
+      entry = JSON.parse(line) as RawLine;
+    } catch {
+      continue;
+    }
+    trackRolloutBusy(state, entry);
+  }
 }
 
 const CATALOG_PATH = join(SQLITE_DIR, "codex.db");
@@ -405,6 +479,7 @@ export class CodexAdapter implements SessionAdapter {
   private messageCache = new Map<string, CachedMessages>();
   private rolloutCache = new Map<string, { path: string; compressed: boolean }>();
   private settingsCache = new Map<string, { mtimeMs: number; size: number; settings: ThreadSettings | null }>();
+  private busyTail = new Map<string, BusyTail>();
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
@@ -450,19 +525,111 @@ export class CodexAdapter implements SessionAdapter {
 
   sessions(): SessionSummary[] {
     const ipc = existsSync(IPC_SOCKET);
-    return this.threads().map((thread) => ({
-      sessionId: `${this.key}:${thread.id}`,
-      appId: this.key,
-      projectId: this.projectIdFor(thread.cwd),
-      kind: "codex-thread",
-      title: (thread.title || "未命名线程").slice(0, 120),
-      createdAt: thread.created_at_ms ?? 0,
-      updatedAt: thread.updated_at_ms ?? 0,
-      archived: (thread.archived ?? 0) !== 0,
-      live: false,
-      canSend: ipc,
-      sendBlockedReason: ipc ? undefined : "Codex 桌面未运行（未找到本地 IPC 通道）",
-    }));
+    const now = Date.now();
+    return this.threads().map((thread) => {
+      // Only threads touched recently can be mid-turn; older rollouts are not worth the read.
+      const recent = now - (thread.updated_at_ms ?? 0) < BUSY_MAX_AGE_MS;
+      return {
+        sessionId: `${this.key}:${thread.id}`,
+        appId: this.key,
+        projectId: this.projectIdFor(thread.cwd),
+        kind: "codex-thread",
+        title: (thread.title || "未命名线程").slice(0, 120),
+        createdAt: thread.created_at_ms ?? 0,
+        updatedAt: thread.updated_at_ms ?? 0,
+        archived: (thread.archived ?? 0) !== 0,
+        live: false,
+        ...(recent && this.threadBusy(thread) ? { busy: true } : {}),
+        canSend: ipc,
+        sendBlockedReason: ipc ? undefined : "Codex 桌面未运行（未找到本地 IPC 通道）",
+      };
+    });
+  }
+
+  /**
+   * The thread DB carries no run state, so the rollout supplies the latest task markers. The
+   * rollout is append-only: the first look seeds from the tail (walking back until a marker is
+   * found), then each poll reads only the appended bytes, so a long turn keeps its start marker.
+   */
+  private threadBusy(thread: ThreadRow): boolean {
+    const file = this.rolloutFor(thread);
+    if (!file || file.compressed) return false;
+    let size: number;
+    try {
+      size = statSync(file.path).size;
+    } catch {
+      return false;
+    }
+    let tail = this.busyTail.get(file.path);
+    if (!tail || size < tail.offset) {
+      tail = this.seedBusy(file.path, size);
+      this.busyTail.set(file.path, tail);
+    } else if (size > tail.offset) {
+      this.followBusy(file.path, size, tail);
+    }
+    return rolloutBusy(tail.state);
+  }
+
+  private seedBusy(path: string, size: number): BusyTail {
+    const state: BusyState = { lastStart: 0, lastEnd: 0, sawStart: false };
+    const floor = Math.max(0, size - BUSY_TAIL_MAX_BACK_BYTES);
+    let end = size;
+    // The chunk above's head: the tail of a record that began in the chunk read next. It is
+    // stitched onto that chunk's last partial line so a marker split by the boundary survives.
+    let pending = "";
+    while (end > floor) {
+      const start = Math.max(floor, end - BUSY_TAIL_BYTES);
+      let text: string;
+      try {
+        text = readChunkText(path, start, end - start);
+      } catch {
+        break;
+      }
+      let head = "";
+      if (start > 0) {
+        const newline = text.indexOf("\n");
+        head = newline === -1 ? text : text.slice(0, newline);
+        text = newline === -1 ? "" : text.slice(newline + 1);
+      }
+      if (pending) {
+        const newline = text.lastIndexOf("\n");
+        const tail = newline === -1 ? text : text.slice(newline + 1);
+        scanBusyLines(tail + pending, state);
+        text = newline === -1 ? "" : text.slice(0, newline);
+      }
+      scanBusyLines(text, state);
+      if (state.sawStart || state.lastEnd > 0) break;
+      pending = head;
+      end = start;
+    }
+    // A record still being written was skipped above; read it from its start once it is whole.
+    return { offset: completeOffset(path, size), state };
+  }
+
+  private followBusy(path: string, size: number, tail: BusyTail): void {
+    if (size - tail.offset > BUSY_FOLLOW_MAX_BYTES) {
+      // Too much new data to replay cheaply; re-seed from the newest markers instead.
+      const seeded = this.seedBusy(path, size);
+      tail.state = seeded.state;
+      tail.offset = seeded.offset;
+      return;
+    }
+    let fd: number | undefined;
+    try {
+      const length = size - tail.offset;
+      const buffer = Buffer.alloc(length);
+      fd = openSync(path, "r");
+      readSync(fd, buffer, 0, length, tail.offset);
+      // Stop at the last complete line: a record still being written is read next time.
+      const lastNewline = buffer.lastIndexOf(0x0a);
+      if (lastNewline === -1) return;
+      scanBusyLines(buffer.subarray(0, lastNewline).toString("utf8"), tail.state);
+      tail.offset += lastNewline + 1;
+    } catch {
+      // Keep the last known markers; the next poll retries.
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
   }
 
   session(sessionId: string): SessionSummary | null {

@@ -98,9 +98,21 @@ interface ExecRecord {
   timer: NodeJS.Timeout;
 }
 
+/** An exec still waiting on the adapter index; a closing channel cancels it before spawn. */
+interface PendingExec {
+  owner: string;
+  cancelled: boolean;
+}
+
 interface ExpiryState {
   timer: NodeJS.Timeout | null;
   for: number | null;
+}
+
+/** An exec still waiting on the adapter index; a closing channel cancels it before spawn. */
+interface PendingExec {
+  owner: string;
+  cancelled: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -109,7 +121,9 @@ function clamp(value: number, min: number, max: number): number {
 
 export class Devtools {
   private execs = new Map<string, ExecRecord>();
+  private pendingExecs = new Set<PendingExec>();
   private rootsCache: { at: number; roots: ScopedRoot[] } | null = null;
+  private rootsLoading: Promise<ScopedRoot[]> | null = null;
   private readonly expiry = new Map<Capability, ExpiryState>();
 
   constructor(
@@ -198,12 +212,29 @@ export class Devtools {
   async roots(root: string): Promise<FsRootsResult> {
     this.requireCapability("files");
     const scoped = await this.scope(root);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireCapability("files");
     return { enabled: true, roots: [{ name: scoped.name, path: scoped.path }] };
   }
 
+  /**
+   * The adapter index is async (dsh indexes its sessions lazily), so roots are
+   * loaded asynchronously and kept for 5 s. Concurrent callers share one load.
+   */
   private async allRoots(): Promise<ScopedRoot[]> {
     const cached = this.rootsCache;
     if (cached && Date.now() - cached.at < 5_000) return cached.roots;
+    if (this.rootsLoading) return this.rootsLoading;
+    const loading = this.loadRoots();
+    this.rootsLoading = loading;
+    try {
+      return await loading;
+    } finally {
+      this.rootsLoading = null;
+    }
+  }
+
+  private async loadRoots(): Promise<ScopedRoot[]> {
     const seen = new Set<string>();
     const roots: ScopedRoot[] = [];
     for (const project of (await this.adapters.projects()).projects) {
@@ -256,6 +287,8 @@ export class Devtools {
   async listDirs(root: string, path?: string): Promise<FsListResult> {
     this.requireCapability("files");
     const scoped = await this.scope(root);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireCapability("files");
     const real = path ? this.resolveInside(scoped, path) : scoped.real;
     let stats;
     try {
@@ -298,6 +331,8 @@ export class Devtools {
   async readFile(root: string, path: string): Promise<FsReadResult> {
     this.requireCapability("files");
     const scoped = await this.scope(root);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireCapability("files");
     const real = this.resolveInside(scoped, path);
     let stats;
     try {
@@ -357,8 +392,19 @@ export class Devtools {
     const text = command.trim();
     if (!text) throw new RpcError("invalid_params", "命令不能为空");
     if (text.length > 8_000) throw new RpcError("invalid_params", "命令过长");
-    const scoped = await this.scope(root);
-    const workdir = cwd ? this.resolveInside(scoped, cwd) : scoped.real;
+    // Registered before the root lookup: a channel closed while we wait must not spawn.
+    const pending: PendingExec = { owner, cancelled: false };
+    this.pendingExecs.add(pending);
+    let workdir: string;
+    try {
+      const scoped = await this.scope(root);
+      workdir = cwd ? this.resolveInside(scoped, cwd) : scoped.real;
+    } finally {
+      this.pendingExecs.delete(pending);
+    }
+    if (pending.cancelled) throw new RpcError("unsupported", "设备通道已断开");
+    // The switch can be turned off, or expire, while the adapter index is loading.
+    this.requireCapability("terminal");
     const timeout = clamp(Math.round(timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000, MAX_TIMEOUT_MS);
     const shell = process.env["SHELL"] && existsSync(process.env["SHELL"]) ? process.env["SHELL"] : "/bin/sh";
     const execId = randomUUID();
@@ -437,6 +483,9 @@ export class Devtools {
 
   /** Kills everything a closed device channel started. */
   disposeOwner(owner: string): void {
+    for (const pending of this.pendingExecs) {
+      if (pending.owner === owner) pending.cancelled = true;
+    }
     for (const [execId, record] of this.execs) {
       if (record.owner === owner) this.kill(execId, false);
     }
