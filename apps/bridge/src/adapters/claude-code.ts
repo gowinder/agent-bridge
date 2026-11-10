@@ -21,6 +21,7 @@ import type {
   MessageListResult,
   MessageRecord,
   MessageSendResult,
+  NextStepAction,
   ProjectInfo,
   RailRow,
   RailTask,
@@ -104,6 +105,45 @@ interface CachedMessages {
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/** 桌面端回合结束时的「下一步」盒子就是这一次工具调用。 */
+const WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up";
+
+/** 桌面端给应用动作按钮的默认文案；工具输入里可能只给了 action。 */
+const APP_ACTION_LABELS: Record<string, string> = {
+  commit: "提交",
+  create_pr: "创建 PR",
+  merge: "合并 PR",
+  fix_ci: "修复 CI",
+  address_comments: "处理评审意见",
+  resolve_conflicts: "解决冲突",
+  verify: "验证改动",
+  archive: "归档会话",
+};
+
+/** 把 wrap_up 的输入转成带按钮的消息块；没有可点的东西时不显示。 */
+function nextStepBlock(input: unknown): MessageBlock | null {
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  const ask = typeof raw["ask"] === "string" ? raw["ask"].trim() : "";
+  const actions: NextStepAction[] = [];
+  if (Array.isArray(raw["actions"])) {
+    for (const item of raw["actions"]) {
+      if (typeof item !== "object" || item === null) continue;
+      const entry = item as Record<string, unknown>;
+      const action = typeof entry["action"] === "string" ? entry["action"] : undefined;
+      const label = (typeof entry["label"] === "string" ? entry["label"] : "").trim()
+        || (action ? APP_ACTION_LABELS[action] : undefined);
+      if (!label) continue;
+      actions.push(action ? { action, label } : { label });
+    }
+  }
+  if (!ask && actions.length === 0) return null;
+  const block: MessageBlock = { type: "next-step", text: ask || "下一步" };
+  if (ask) block.ask = ask;
+  if (actions.length > 0) block.actions = actions;
+  return block;
 }
 
 /**
@@ -1052,6 +1092,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         if (clean) blocks.push({ type: "text", ...truncate(clean, MAX_BLOCK_CHARS) });
       } else if (block["type"] === "tool_use") {
         const name = asString(block["name"]) || "tool";
+        const nextStep = name === WRAP_UP_TOOL ? nextStepBlock(block["input"]) : null;
+        if (nextStep) {
+          blocks.push(nextStep);
+          continue;
+        }
         const input = block["input"] === undefined ? "" : JSON.stringify(block["input"]);
         blocks.push({ type: "tool", ...truncate(`调用 ${name} ${input}`.trim(), 300) });
       }

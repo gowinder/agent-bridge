@@ -14,10 +14,12 @@ import type {
   FsRootsResult,
   HostInfoResult,
   MessageAttachment,
+  MessageBlock,
   MessageListResult,
   MessageRecord,
   MessageSendResult,
   Method,
+  NextStepAction,
   ProjectInfo,
   ProjectListResult,
   RailRow,
@@ -3159,10 +3161,82 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     bubble.append(
       block.type === "tool"
         ? el("div", { className: "message-tool", text: block.truncated ? `${block.text}\n…（已截断）` : block.text })
-        : markdownBlock(block.text, block.truncated),
+        : block.type === "next-step"
+          ? nextStepBox(block, null)
+          : markdownBlock(block.text, block.truncated),
     );
   }
   return bubble;
+}
+
+/** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
+function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement {
+  const box = el("div", { className: "next-step" });
+  box.append(el("p", { className: "next-step-ask", text: block.ask ?? block.text }));
+  const actions = block.actions ?? [];
+  if (!state || actions.length === 0) return box;
+  const row = el("div", { className: "next-step-actions" });
+  for (const action of actions) {
+    const btn = el("button", {
+      className: "next-step-btn",
+      attrs: {
+        type: "button",
+        ...(action.action ? { title: "桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步" } : {}),
+      },
+      text: action.label,
+    });
+    btn.addEventListener("click", () => {
+      const buttons = [...row.querySelectorAll<HTMLButtonElement>("button")];
+      for (const item of buttons) item.disabled = true;
+      void sendNextStep(state, action, buttons);
+    });
+    row.append(btn);
+  }
+  box.append(row);
+  return box;
+}
+
+/** 回复型按钮就是一句话，原样发出；应用动作（合并、提交…）只能作为指令发过去。 */
+async function sendNextStep(
+  state: ChatState,
+  action: NextStepAction,
+  buttons: HTMLButtonElement[],
+): Promise<void> {
+  const text = action.action ? `点击了「${action.label}」，请执行这一步。` : action.label;
+  state.status.classList.remove("error");
+  state.status.textContent = "正在发送…";
+  try {
+    const result = await call<MessageSendResult>("message.send", {
+      sessionId: state.session.sessionId,
+      text,
+    }, 60_000);
+    if (!result.accepted) {
+      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.classList.add("error");
+      for (const item of buttons) item.disabled = false;
+      return;
+    }
+    state.queued.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      match: text,
+      display: text,
+      at: Date.now(),
+      held: !result.delivered && (result.detail ?? "").includes("排队"),
+    });
+    state.busy = true;
+    state.interrupted = false;
+    renderMessages(state);
+    state.status.textContent = result.delivered
+      ? "已投递到桌面会话"
+      : (result.detail ?? "已提交，等待桌面执行");
+    window.setTimeout(() => {
+      void refreshTail(state);
+    }, 800);
+  } catch (error) {
+    state.status.textContent = messageOf(error);
+    state.status.classList.add("error");
+    for (const item of buttons) item.disabled = false;
+  }
 }
 
 /** Renders transcript text as Markdown; truncation is annotated after the content. */
@@ -3189,9 +3263,14 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
   return share;
 }
 
-function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]): HTMLElement {
+function assistantTurn(
+  session: SessionSummary | null,
+  messages: MessageRecord[],
+  state: ChatState | null = null,
+): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: string[] = [];
+  const nextSteps: MessageBlock[] = [];
   let peer = false;
   let lastText: MessageRecord | undefined;
   for (const message of messages) {
@@ -3200,6 +3279,8 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     for (const block of message.blocks) {
       if (block.type === "text") {
         hasText = true;
+      } else if (block.type === "next-step") {
+        nextSteps.push(block);
       } else {
         steps.push(block.truncated ? `${block.text}\n…（已截断）` : block.text);
       }
@@ -3219,6 +3300,8 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     for (const block of message.blocks) {
       if (block.type === "text") {
         bubble.append(markdownBlock(block.text, block.truncated));
+      } else if (block.type === "next-step") {
+        continue;
       } else if (!folded) {
         bubble.append(processFold(steps));
         folded = true;
@@ -3226,6 +3309,9 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     }
   }
   if (!folded) bubble.append(processFold(steps));
+  // 只有最新一回合的盒子可以点；历史回合保留文字说明。
+  const latest = nextSteps[nextSteps.length - 1];
+  if (latest) bubble.append(nextStepBox(latest, state));
   return bubble;
 }
 
@@ -3281,9 +3367,12 @@ function renderMessages(state: ChatState): void {
     return;
   }
   let turn: MessageRecord[] = [];
+  const lastMessage = state.messages[state.messages.length - 1];
+  const canAct = state.session.canSend && !state.busy && !state.interrupted && state.queued.length === 0;
   const flush = (): void => {
     if (turn.length === 0) return;
-    list.append(assistantTurn(state.session, turn));
+    const isLastTurn = turn[turn.length - 1] === lastMessage;
+    list.append(assistantTurn(state.session, turn, isLastTurn && canAct ? state : null));
     turn = [];
   };
   for (const message of state.messages) {

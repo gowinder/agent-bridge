@@ -419,10 +419,22 @@ export interface SessionSummary {
 
 export type MessageRole = "user" | "assistant" | "system";
 
+/** One button the desktop client offered after a turn. */
+export interface NextStepAction {
+  /** Desktop host action id (`commit`, `merge`, …); absent for reply buttons. */
+  action?: string;
+  /** Button text; a client sends it as the user's message when it has no host API. */
+  label: string;
+}
+
 export interface MessageBlock {
-  type: "text" | "tool";
+  type: "text" | "tool" | "next-step";
   text: string;
   truncated?: boolean;
+  /** `next-step` only: the question the client drew above the buttons. */
+  ask?: string;
+  /** `next-step` only: the buttons the desktop client offered. */
+  actions?: NextStepAction[];
 }
 
 export interface MessageRecord {
