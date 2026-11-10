@@ -36,9 +36,9 @@ export interface SessionAdapter {
   /** Stable adapter key, also the sessionId prefix. */
   readonly key: string;
   app(): AppInfo;
-  projects(): ProjectInfo[];
-  sessions(): SessionSummary[];
-  session(sessionId: string): SessionSummary | null;
+  projects(): ProjectInfo[] | Promise<ProjectInfo[]>;
+  sessions(): SessionSummary[] | Promise<SessionSummary[]>;
+  session(sessionId: string): SessionSummary | null | Promise<SessionSummary | null>;
   messages(sessionId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
   messageText(sessionId: string, messageId: string): MessageText | null | Promise<MessageText | null>;
   /** Environment, context, connectors and background tasks of one session. */

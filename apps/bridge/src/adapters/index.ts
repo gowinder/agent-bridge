@@ -17,6 +17,7 @@ import type {
 import { AntigravityAdapter } from "./antigravity.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
 import { CodexAdapter } from "./codex.js";
+import { DshAdapter } from "./dsh.js";
 import { RpcError, type SessionAdapter } from "./types.js";
 
 const DEFAULT_SESSION_LIMIT = 200;
@@ -38,6 +39,7 @@ export class SessionAdapters {
     new ClaudeCodeAdapter(),
     new CodexAdapter(),
     new AntigravityAdapter(),
+    new DshAdapter(),
   ];
   private readonly transfers = new Map<string, PreparedTransfer>();
 
@@ -59,16 +61,16 @@ export class SessionAdapters {
     return { apps: this.adapters.map((adapter) => adapter.app()) };
   }
 
-  projects(appId?: string): ProjectListResult {
+  async projects(appId?: string): Promise<ProjectListResult> {
     const projects: ProjectInfo[] = [];
     for (const adapter of this.adapters) {
       if (appId && adapter.key !== appId) continue;
-      projects.push(...adapter.projects());
+      projects.push(...(await adapter.projects()));
     }
     return { projects };
   }
 
-  sessions(params: SessionListParams): SessionListResult {
+  async sessions(params: SessionListParams): Promise<SessionListResult> {
     const limit = clamp(params.limit, DEFAULT_SESSION_LIMIT, MAX_SESSION_LIMIT);
     let completeness: SessionListResult["completeness"] = "complete";
     const notes: string[] = [];
@@ -82,7 +84,7 @@ export class SessionAdapters {
         notes.push(`${app.name}：${reason}`);
         continue;
       }
-      const sessions = adapter.sessions().filter((session) => {
+      const sessions = (await adapter.sessions()).filter((session) => {
         if (params.projectId && session.projectId !== params.projectId) return false;
         if (!params.includeArchived && session.archived) return false;
         return true;
@@ -105,23 +107,23 @@ export class SessionAdapters {
     return result;
   }
 
-  session(sessionId: string): SessionGetResult {
+  async session(sessionId: string): Promise<SessionGetResult> {
     const adapter = this.adapterFor(sessionId);
-    const session = adapter.session(sessionId);
+    const session = await adapter.session(sessionId);
     if (!session) throw new RpcError("not_found", "未知会话");
     return { session };
   }
 
   async messages(sessionId: string, params: { limit?: number; before?: string }): Promise<MessageListResult> {
     const adapter = this.adapterFor(sessionId);
-    if (!adapter.session(sessionId)) throw new RpcError("not_found", "未知会话");
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
     const limit = clamp(params.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
     return adapter.messages(sessionId, { limit, ...(params.before ? { before: params.before } : {}) });
   }
 
   async rail(sessionId: string): Promise<SessionRailResult> {
     const adapter = this.adapterFor(sessionId);
-    if (!adapter.session(sessionId)) throw new RpcError("not_found", "未知会话");
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
     return adapter.rail(sessionId);
   }
 
@@ -131,7 +133,7 @@ export class SessionAdapters {
     params: { limit?: number; before?: string },
   ): Promise<MessageListResult> {
     const adapter = this.adapterFor(sessionId);
-    if (!adapter.session(sessionId)) throw new RpcError("not_found", "未知会话");
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
     if (!adapter.taskMessages) throw new RpcError("unsupported", "该来源不提供子任务记录");
     const limit = clamp(params.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
     return adapter.taskMessages(sessionId, taskId, {
@@ -142,7 +144,7 @@ export class SessionAdapters {
 
   async send(sessionId: string, text: string): Promise<MessageSendResult> {
     const adapter = this.adapterFor(sessionId);
-    const session = adapter.session(sessionId);
+    const session = await adapter.session(sessionId);
     if (!session) throw new RpcError("not_found", "未知会话");
     if (!session.canSend) {
       throw new RpcError("adapter_unavailable", session.sendBlockedReason ?? "该会话当前不可发送");
@@ -156,10 +158,10 @@ export class SessionAdapters {
   ): Promise<TransferPrepareResult> {
     this.pruneTransfers();
     const sourceAdapter = this.adapterFor(params.sourceSessionId);
-    const source = sourceAdapter.session(params.sourceSessionId);
+    const source = await sourceAdapter.session(params.sourceSessionId);
     if (!source) throw new RpcError("not_found", "来源会话不存在");
     const targetAdapter = this.adapterFor(params.targetSessionId);
-    const target = targetAdapter.session(params.targetSessionId);
+    const target = await targetAdapter.session(params.targetSessionId);
     if (!target) throw new RpcError("not_found", "目标会话不存在");
     const message = await sourceAdapter.messageText(params.sourceSessionId, params.messageId);
     if (!message) throw new RpcError("not_found", "找不到该消息，或该消息没有可转发的文本");
@@ -217,7 +219,8 @@ export class SessionAdapters {
     }
     // Consume before sending so a double click cannot submit twice.
     this.transfers.delete(transferId);
-    const target = this.adapterFor(prepared.targetSessionId).session(prepared.targetSessionId);
+    const targetAdapter = this.adapterFor(prepared.targetSessionId);
+    const target = await targetAdapter.session(prepared.targetSessionId);
     if (!target) throw new RpcError("not_found", "目标会话已不存在");
     if (!target.canSend) {
       throw new RpcError(

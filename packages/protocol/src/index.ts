@@ -248,8 +248,8 @@ export interface AdapterCapabilities {
 
 export interface AppInfo {
   appId: string;
-  provider: "anthropic" | "openai" | "google";
-  kind: "claude-code" | "codex" | "antigravity";
+  provider: "anthropic" | "openai" | "google" | "deepseek";
+  kind: "claude-code" | "codex" | "antigravity" | "dsh";
   name: string;
   version?: string;
   mode: AdapterMode;
