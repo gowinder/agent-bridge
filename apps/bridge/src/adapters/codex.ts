@@ -170,6 +170,8 @@ const BUSY_TAIL_BYTES = 512 * 1024;
 const BUSY_TAIL_MAX_BACK_BYTES = 32 * 1024 * 1024;
 /** A single poll replays at most this many appended bytes before re-seeding. */
 const BUSY_FOLLOW_MAX_BYTES = 8 * 1024 * 1024;
+/** A task marker record is tiny; a trailing partial larger than this is tool output, not one. */
+const BUSY_PARTIAL_SCAN_BYTES = 64 * 1024;
 
 function rolloutBusy(busy: BusyState | undefined): boolean {
   if (!busy || !busy.sawStart) return false;
@@ -177,16 +179,39 @@ function rolloutBusy(busy: BusyState | undefined): boolean {
   return Date.now() - busy.lastStart < BUSY_MAX_AGE_MS;
 }
 
-function readChunkText(path: string, start: number, length: number): string {
+function readChunkBuffer(path: string, start: number, length: number): Buffer {
   let fd: number | undefined;
   try {
     const buffer = Buffer.alloc(length);
     fd = openSync(path, "r");
     readSync(fd, buffer, 0, length, start);
-    return buffer.toString("utf8");
+    return buffer;
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+function readChunkText(path: string, start: number, length: number): string {
+  return readChunkBuffer(path, start, length).toString("utf8");
+}
+
+/**
+ * Where the next follow should start: after the last complete record, so a record still being
+ * written is read once from its start instead of losing the part already skipped.
+ */
+function completeOffset(path: string, size: number): number {
+  if (size === 0) return 0;
+  const window = Math.min(size, BUSY_PARTIAL_SCAN_BYTES);
+  const start = size - window;
+  let buffer: Buffer;
+  try {
+    buffer = readChunkBuffer(path, start, window);
+  } catch {
+    return size;
+  }
+  const newline = buffer.lastIndexOf(0x0a);
+  if (newline === -1) return start === 0 ? 0 : size;
+  return start + newline + 1;
 }
 
 function scanBusyLines(text: string, state: BusyState): void {
@@ -577,7 +602,8 @@ export class CodexAdapter implements SessionAdapter {
       pending = head;
       end = start;
     }
-    return { offset: size, state };
+    // A record still being written was skipped above; read it from its start once it is whole.
+    return { offset: completeOffset(path, size), state };
   }
 
   private followBusy(path: string, size: number, tail: BusyTail): void {
