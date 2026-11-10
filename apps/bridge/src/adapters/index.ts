@@ -15,6 +15,7 @@ import type {
   TransferPrepareResult,
 } from "@agent-bridge/protocol";
 import { AntigravityAdapter } from "./antigravity.js";
+import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
 import { CodexAdapter } from "./codex.js";
 import { DshAdapter } from "./dsh.js";
@@ -39,6 +40,7 @@ export class SessionAdapters {
     new ClaudeCodeAdapter(),
     new CodexAdapter(),
     new AntigravityAdapter(),
+    new AntigravityDesktopAdapter(),
     new DshAdapter(),
   ];
   private readonly transfers = new Map<string, PreparedTransfer>();

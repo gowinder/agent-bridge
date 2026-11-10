@@ -723,14 +723,14 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
 function shortAgentName(app: AppInfo): string {
   if (app.kind === "claude-code") return "Claude";
   if (app.kind === "codex") return "ChatGPT";
-  if (app.kind === "antigravity") return "Antigravity";
+  if (app.kind === "antigravity" || app.kind === "antigravity-desktop") return "Antigravity";
   if (app.kind === "dsh") return "DeepSeek";
   return app.name.split(/[·\s]/)[0] ?? app.name;
 }
 
 function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
   if (kind === "codex") return "CX";
-  if (kind === "antigravity") return "AG";
+  if (kind === "antigravity" || kind === "antigravity-desktop") return "AG";
   if (kind === "dsh") return "DS";
   return "CC";
 }
