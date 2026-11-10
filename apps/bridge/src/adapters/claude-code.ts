@@ -36,6 +36,10 @@ const SESSION_ROOTS = [
   join(SUPPORT_DIR, "Claude", "claude-code-sessions"),
 ];
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
+// 桌面端每个打开的会话进程都会写 <pid>.json（pid → sessionId / hostSessionId / socket）。
+const LIVE_SESSIONS_DIR = join(homedir(), ".claude", "sessions");
+/** ps 的启动时间与元数据里的 startedAt 允许的误差，超出即视为 pid 被复用。 */
+const PID_REUSE_TOLERANCE_MS = 120_000;
 const MAX_BLOCK_CHARS = 4_000;
 
 interface DesktopSession {
@@ -679,20 +683,23 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const now = Date.now();
     if (this.processCache && now - this.processCache.at < 2_000) return this.processCache;
     const bySession = new Map<string, number>();
+    const starts = new Map<number, number>();
     let error: string | null = null;
     try {
       // execFileSync via promisify would be async; use a synchronous spawn to keep the
       // adapter interface synchronous for listing.
-      const output = execFileSync("/bin/ps", ["-axo", "pid=,command="], {
+      const output = execFileSync("/bin/ps", ["-axo", "pid=,lstart=,command="], {
         encoding: "utf8",
         maxBuffer: 16 * 1024 * 1024,
         timeout: 5_000,
       });
       for (const line of output.split("\n")) {
-        const match = /^\s*(\d+)\s+(.*)$/.exec(line);
+        const match = /^\s*(\d+)\s+(\S+\s+\S+\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.*)$/.exec(line);
         if (!match) continue;
         const pid = Number(match[1]);
-        const command = match[2] ?? "";
+        const startedAt = Date.parse(match[2] ?? "");
+        if (Number.isFinite(startedAt)) starts.set(pid, startedAt);
+        const command = match[3] ?? "";
         if (!command.includes("claude")) continue;
         const resumed =
           /--resume(?:=|\s+)([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(
@@ -711,8 +718,42 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         ? "无法枚举本机进程（ps 被拒绝），不能定位运行中的会话"
         : `无法枚举本机进程：${message}`;
     }
+    this.mergeDesktopSessions(bySession, starts);
     this.processCache = { at: now, bySession, error };
     return this.processCache;
+  }
+
+  /**
+   * 桌面新建对话时命令里不带 --resume，argv 无法定位会话；用 ~/.claude/sessions/<pid>.json
+   * 补上 sessionId / hostSessionId。用进程启动时间排除 pid 复用，避免把消息发给别的会话。
+   */
+  private mergeDesktopSessions(bySession: Map<string, number>, starts: Map<number, number>): void {
+    let names: string[];
+    try {
+      names = readdirSync(LIVE_SESSIONS_DIR);
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(readFileSync(join(LIVE_SESSIONS_DIR, name), "utf8")) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const pid = asNumber(raw["pid"]);
+      if (!pid) continue;
+      const actual = starts.get(pid);
+      if (actual === undefined) continue;
+      const startedAt = asNumber(raw["startedAt"]);
+      if (startedAt && Math.abs(actual - startedAt) > PID_REUSE_TOLERANCE_MS) continue;
+      const hasSocket = this.socketFor(pid) !== null;
+      for (const id of [asString(raw["sessionId"]), asString(raw["hostSessionId"])]) {
+        if (!id) continue;
+        if (!bySession.has(id) || hasSocket) bySession.set(id, pid);
+      }
+    }
   }
 
   private livePid(record: DesktopSession, bySession: Map<string, number>): number | undefined {
@@ -725,11 +766,12 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   ): { pid: number; id: string } | undefined {
     // The desktop rotates cliSessionId when a conversation is compacted, rewound
     // or resumed; the open tab keeps running under an id recorded in
-    // priorCliSessionIds, so match any of them.
-    for (const id of [record.cliSessionId, ...record.priorCliSessionIds]) {
+    // priorCliSessionIds, so match any of them. hostSessionId（local_…）由
+    // ~/.claude/sessions/<pid>.json 直接给出，新建对话时也能匹配。
+    for (const id of [record.cliSessionId, record.localId, ...record.priorCliSessionIds]) {
       if (!id) continue;
       const pid = bySession.get(id);
-      if (pid !== undefined) return { pid, id };
+      if (pid !== undefined) return { pid, id: record.cliSessionId || id };
     }
     return undefined;
   }
