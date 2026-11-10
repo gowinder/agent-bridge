@@ -33,6 +33,16 @@ struct Snapshot: Decodable {
     let error: String?
 }
 
+struct BridgeInfo: Decodable {
+    let initialized: Bool
+    let relayUrl: String?
+    let roomId: String?
+    let webUrl: String?
+    let hostName: String?
+    let stateDir: String
+    let version: String
+}
+
 enum AdminError: LocalizedError {
     case notConfigured(String)
     case http(Int, String)
@@ -66,7 +76,7 @@ final class AdminClient {
     private func token() throws -> String {
         let path = Self.stateDir.appendingPathComponent("admin-token")
         guard let text = try? String(contentsOf: path, encoding: .utf8) else {
-            throw AdminError.notConfigured("找不到管理令牌：\(path.path)。先在终端运行一次 agent-bridge serve。")
+            throw AdminError.notConfigured("Bridge 还没启动过，找不到管理令牌（\(path.path)）")
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
@@ -125,6 +135,114 @@ final class AdminClient {
     }
 }
 
+/// Runs the bridge CLI for the two things the admin API cannot answer: whether
+/// this state directory is initialized at all, and `init` itself.
+enum BridgeCLI {
+    struct Result {
+        let code: Int32
+        let output: String
+        let error: String
+    }
+
+    static func nodePath() -> String? {
+        if let explicit = ProcessInfo.processInfo.environment["AGENT_BRIDGE_NODE"],
+           FileManager.default.isExecutableFile(atPath: explicit) {
+            return explicit
+        }
+        for candidate in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"] {
+            if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
+        }
+        let nvm = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".nvm/versions/node")
+        if let versions = try? FileManager.default.contentsOfDirectory(atPath: nvm.path).sorted(by: >) {
+            for version in versions {
+                let path = nvm.appendingPathComponent("\(version)/bin/node").path
+                if FileManager.default.isExecutableFile(atPath: path) { return path }
+            }
+        }
+        // GUI apps get a minimal PATH; ask the login shell where node lives.
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        shell.arguments = ["-lc", "command -v node"]
+        let pipe = Pipe()
+        shell.standardOutput = pipe
+        shell.standardError = FileHandle.nullDevice
+        try? shell.run()
+        shell.waitUntilExit()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        let path = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return path.isEmpty || !FileManager.default.isExecutableFile(atPath: path) ? nil : path
+    }
+
+    /// env override, else the checkout recorded in Info.plist at build time.
+    static func scriptPath() -> String? {
+        if let bin = ProcessInfo.processInfo.environment["AGENT_BRIDGE_BIN"], !bin.isEmpty,
+           FileManager.default.fileExists(atPath: bin) {
+            return bin
+        }
+        guard let repo = Bundle.main.object(forInfoDictionaryKey: "AgentBridgeRepo") as? String else {
+            return nil
+        }
+        let path = (repo as NSString).appendingPathComponent("apps/bridge/dist/main.js")
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    static func run(_ args: [String], timeout: TimeInterval = 20) -> Result? {
+        guard let node = nodePath(), let script = scriptPath() else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: node)
+        process.arguments = [script] + args
+        var environment = ProcessInfo.processInfo.environment
+        environment["AGENT_BRIDGE_HOME"] = AdminClient.stateDir.path
+        process.environment = environment
+        let out = Pipe()
+        let err = Pipe()
+        process.standardOutput = out
+        process.standardError = err
+
+        do {
+            try process.run()
+        } catch {
+            return Result(code: -1, output: "", error: error.localizedDescription)
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline {
+            usleep(50_000)
+        }
+        if process.isRunning {
+            process.terminate()
+            return Result(code: -2, output: "", error: "命令超时")
+        }
+        let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        let error = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return Result(code: process.terminationStatus, output: output, error: error)
+    }
+
+    /// True when something already listens on the local admin port, even if it
+    /// does not accept this state directory's token.
+    static func adminPortBusy(_ port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port).bigEndian)
+        addr.sin_addr.s_addr = inet_addr("127.0.0.1")
+        let result = withUnsafePointer(to: &addr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        return result == 0
+    }
+
+    static func info() -> BridgeInfo? {
+        guard let result = run(["info"], timeout: 8), result.code == 0 else { return nil }
+        let line = result.output.split(separator: "\n").last.map(String.init) ?? result.output
+        guard let data = line.data(using: .utf8) else { return nil }
+        return try? JSONDecoder().decode(BridgeInfo.self, from: data)
+    }
+}
+
 func relativeTime(_ millis: Double?) -> String {
     guard let millis, millis > 0 else { return "从未连接" }
     let seconds = max(0, Date().timeIntervalSince1970 - millis / 1000)
@@ -139,9 +257,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private var snapshot: Snapshot?
+    private var bridge: BridgeInfo?
     private var reachable = false
     private var lastError: String?
     private var bridgeProcess: Process?
+    private var bridgeStartedAt: Date?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -170,7 +290,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.toolTip = online > 0 ? "\(online) 个客户端已连接" : "Agent Bridge · 就绪"
         } else {
             button.title = ""
-            button.toolTip = "Agent Bridge 未运行"
+            button.toolTip = bridge?.initialized == true ? "Agent Bridge 未运行" : "Agent Bridge 尚未初始化"
         }
     }
 
@@ -181,7 +301,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             lastError = nil
         } catch {
             reachable = false
-            lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            if BridgeCLI.adminPortBusy(AdminClient.port) {
+                lastError = "管理端口 \(AdminClient.port) 被另一份 Bridge 占用"
+            } else {
+                lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                if let fresh = BridgeCLI.info() { bridge = fresh }
+            }
         }
         paint()
     }
@@ -192,20 +317,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.removeAllItems()
 
         if !reachable {
-            menu.addItem(disabled("Bridge 未运行"))
-            if let lastError { menu.addItem(disabled(lastError)) }
-            let start = NSMenuItem(title: "启动 Bridge", action: #selector(startBridge), keyEquivalent: "")
-            start.target = self
-            start.isEnabled = bridgeScript() != nil
-            menu.addItem(start)
+            let initialized = bridge?.initialized == true
+            menu.addItem(disabled(initialized ? "Bridge 未运行" : "Bridge 尚未初始化"))
+            if let stateDir = bridge?.stateDir {
+                menu.addItem(disabled("状态目录：\(stateDir)"))
+            } else if !initialized {
+                menu.addItem(disabled("状态目录：\(AdminClient.stateDir.path)"))
+            }
+            if let lastError, initialized { menu.addItem(disabled(lastError)) }
             menu.addItem(.separator())
+            if initialized {
+                let start = NSMenuItem(title: "启动 Bridge", action: #selector(startBridge), keyEquivalent: "")
+                start.target = self
+                start.isEnabled = BridgeCLI.nodePath() != nil && BridgeCLI.scriptPath() != nil
+                menu.addItem(start)
+                menu.addItem(item("打开日志", #selector(openLog), ""))
+            } else {
+                menu.addItem(item("初始化 Bridge…", #selector(initBridge), ""))
+            }
+            menu.addItem(.separator())
+            menu.addItem(item("刷新", #selector(refreshNow), "r"))
             menu.addItem(item("退出", #selector(quit), "q"))
             return
         }
 
         guard let snapshot else { return }
-        let header = disabled("\(snapshot.hostName) · 中继\(snapshot.relayOnline ? "在线" : "离线")")
-        menu.addItem(header)
+        menu.addItem(disabled("\(snapshot.hostName) · 中继\(snapshot.relayOnline ? "在线" : "离线")"))
         if let error = snapshot.error {
             menu.addItem(disabled("设备列表读取失败：\(error)"))
         }
@@ -257,6 +394,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if bridgeProcess?.isRunning == true {
             menu.addItem(item("停止 Bridge", #selector(stopBridge), ""))
         }
+        menu.addItem(item("打开日志", #selector(openLog), ""))
         menu.addItem(item("退出", #selector(quit), "q"))
     }
 
@@ -329,58 +467,138 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSWorkspace.shared.open(url)
     }
 
+    @objc private func openLog() {
+        let log = AdminClient.stateDir.appendingPathComponent("bridge.log")
+        if FileManager.default.fileExists(atPath: log.path) {
+            NSWorkspace.shared.open(log)
+        } else {
+            alert("还没有日志", "Bridge 启动后日志会写到：\(log.path)")
+        }
+    }
+
     @objc private func quit() {
         NSApp.terminate(nil)
     }
 
-    // MARK: - Bridge process
+    // MARK: - Init / Bridge process
 
-    /// The bridge script this app should spawn: env override, else the copy next
-    /// to the app bundle recorded at build time.
-    private func bridgeScript() -> String? {
-        if let bin = ProcessInfo.processInfo.environment["AGENT_BRIDGE_BIN"], !bin.isEmpty,
-           FileManager.default.fileExists(atPath: bin) {
-            return bin
+    @objc private func initBridge() {
+        let defaults = UserDefaults.standard
+        let relay = bridge?.relayUrl
+            ?? defaults.string(forKey: "relayUrl")
+            ?? "https://agent-bridge-preview.gowinder.workers.dev"
+
+        let dialog = NSAlert()
+        dialog.messageText = "初始化 Agent Bridge"
+        dialog.informativeText = "填写中继地址和该中继的管理令牌（ADMIN_TOKEN）。会在本机创建房间和密钥。"
+        dialog.addButton(withTitle: "初始化")
+        dialog.addButton(withTitle: "取消")
+
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 172))
+        func field(_ row: Int, _ label: String, _ value: String) -> NSTextField {
+            let y = 112 - row * 56
+            let caption = NSTextField(labelWithString: label)
+            caption.font = .systemFont(ofSize: 11)
+            caption.textColor = .secondaryLabelColor
+            caption.frame = NSRect(x: 0, y: y + 24, width: 360, height: 14)
+            let input = NSTextField(frame: NSRect(x: 0, y: y, width: 360, height: 22))
+            input.stringValue = value
+            form.addSubview(caption)
+            form.addSubview(input)
+            return input
         }
-        guard let repo = Bundle.main.object(forInfoDictionaryKey: "AgentBridgeRepo") as? String else {
-            return nil
+        let relayField = field(0, "中继地址", relay)
+        let tokenField = field(1, "管理令牌 ADMIN_TOKEN", defaults.string(forKey: "adminToken") ?? "")
+        let nameField = field(2, "本机名称", Host.current().localizedName ?? "Mac")
+        tokenField.placeholderString = "wrangler secret 里设置的 ADMIN_TOKEN"
+        dialog.accessoryView = form
+
+        NSApp.activate(ignoringOtherApps: true)
+        guard dialog.runModal() == .alertFirstButtonReturn else { return }
+
+        let relayValue = relayField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tokenValue = tokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nameValue = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !relayValue.isEmpty, !tokenValue.isEmpty else {
+            alert("信息不完整", "中继地址和管理令牌都必须填写。")
+            return
         }
-        let path = (repo as NSString).appendingPathComponent("apps/bridge/dist/main.js")
-        return FileManager.default.fileExists(atPath: path) ? path : nil
+        defaults.set(relayValue, forKey: "relayUrl")
+        defaults.set(tokenValue, forKey: "adminToken")
+
+        var args = ["init", "--relay", relayValue, "--admin-token", tokenValue]
+        if !nameValue.isEmpty { args += ["--name", nameValue] }
+        guard let result = BridgeCLI.run(args, timeout: 30) else {
+            alert("无法运行 Bridge", "找不到 node 或 apps/bridge/dist/main.js。")
+            return
+        }
+        guard result.code == 0 else {
+            alert("初始化失败", (result.error.isEmpty ? result.output : result.error).trimmingCharacters(in: .whitespacesAndNewlines))
+            return
+        }
+        bridge = BridgeCLI.info()
+        startBridge()
     }
 
     @objc private func startBridge() {
-        guard let script = bridgeScript() else {
+        if BridgeCLI.adminPortBusy(AdminClient.port) {
+            alert(
+                "已有 Bridge 在运行",
+                "127.0.0.1:\(AdminClient.port) 已被占用，通常是另一份状态目录的 Bridge（例如终端里用 AGENT_BRIDGE_HOME 启动的那个）。先停掉它，或设置 AGENT_BRIDGE_ADMIN_PORT 区分。"
+            )
+            Task { await refresh() }
+            return
+        }
+        guard let node = BridgeCLI.nodePath() else {
+            alert("找不到 node", "设置环境变量 AGENT_BRIDGE_NODE 指向 node 可执行文件。")
+            return
+        }
+        guard let script = BridgeCLI.scriptPath() else {
             alert("找不到 Bridge", "设置环境变量 AGENT_BRIDGE_BIN 指向 apps/bridge/dist/main.js。")
             return
         }
+        let stateDir = AdminClient.stateDir
+        try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["node", script, "serve"]
+        process.executableURL = URL(fileURLWithPath: node)
+        process.arguments = [script, "serve"]
         var environment = ProcessInfo.processInfo.environment
-        let logPath = AdminClient.stateDir.appendingPathComponent("bridge.log")
-        environment["AGENT_BRIDGE_HOME"] = AdminClient.stateDir.path
+        environment["AGENT_BRIDGE_HOME"] = stateDir.path
         process.environment = environment
+
+        let logPath = stateDir.appendingPathComponent("bridge.log")
+        if !FileManager.default.fileExists(atPath: logPath.path) {
+            FileManager.default.createFile(atPath: logPath.path, contents: nil)
+        }
         if let handle = try? FileHandle(forWritingTo: logPath) {
             handle.seekToEndOfFile()
             process.standardOutput = handle
             process.standardError = handle
-        } else {
-            FileManager.default.createFile(atPath: logPath.path, contents: nil)
-            if let handle = try? FileHandle(forWritingTo: logPath) {
-                process.standardOutput = handle
-                process.standardError = handle
-            }
         }
         do {
             try process.run()
-            bridgeProcess = process
-            Task {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
-                await refresh()
-            }
         } catch {
             alert("启动失败", error.localizedDescription)
+            return
+        }
+        bridgeProcess = process
+        bridgeStartedAt = Date()
+        // A serve process that dies right away means it refused to start; surface why.
+        DispatchQueue.global().async { [weak self] in
+            process.waitUntilExit()
+            let exitedFast = Date().timeIntervalSince(self?.bridgeStartedAt ?? .distantPast) < 5
+            guard exitedFast, process.terminationStatus != 0 else { return }
+            let tail = (try? String(contentsOf: logPath, encoding: .utf8))?
+                .split(separator: "\n").suffix(6).joined(separator: "\n") ?? ""
+            DispatchQueue.main.async {
+                self?.bridgeProcess = nil
+                self?.alert("Bridge 启动失败", tail.isEmpty ? "进程已退出（代码 \(process.terminationStatus)）" : tail)
+            }
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            await refresh()
         }
     }
 
@@ -397,7 +615,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func alert(_ title: String, _ message: String) {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = message
+        alert.informativeText = message.isEmpty ? "（没有更多信息）" : message
         alert.alertStyle = .informational
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
@@ -418,6 +636,13 @@ if CommandLine.arguments.contains("--dump") {
             exit(0)
         } catch {
             print("fail \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
+            print("node=\(BridgeCLI.nodePath() ?? "(未找到)")")
+            print("script=\(BridgeCLI.scriptPath() ?? "(未找到)")")
+            if let info = BridgeCLI.info() {
+                print("initialized=\(info.initialized) stateDir=\(info.stateDir)")
+            } else {
+                print("initialized=unknown（info 无法运行）")
+            }
             exit(1)
         }
     }

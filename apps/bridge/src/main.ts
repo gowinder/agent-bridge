@@ -42,6 +42,7 @@ function usage(): void {
   agent-bridge devices
   agent-bridge revoke <deviceId>
   agent-bridge status
+  agent-bridge info
 
 状态目录: ${defaultStateDir()} (可用 AGENT_BRIDGE_HOME 覆盖)`);
 }
@@ -192,6 +193,28 @@ async function commandRevoke(args: string[]): Promise<void> {
     await api.revokeDevice(deviceId);
     store.revokeDevice(deviceId);
     console.log(`已撤销 ${deviceId}`);
+  } finally {
+    store.close();
+  }
+}
+
+/** Prints one JSON line describing the local state; never throws when uninitialized. */
+async function commandInfo(): Promise<void> {
+  const store = new Store();
+  try {
+    const relayUrl = store.meta("relay_url");
+    const roomId = store.meta("room_id");
+    console.log(
+      JSON.stringify({
+        initialized: Boolean(relayUrl && roomId && store.meta("bridge_token")),
+        relayUrl,
+        roomId,
+        webUrl: store.meta("web_url") ?? relayUrl,
+        hostName: store.hostName(),
+        stateDir: store.dir,
+        version: VERSION,
+      }),
+    );
   } finally {
     store.close();
   }
@@ -499,6 +522,9 @@ async function main(): Promise<void> {
       return;
     case "status":
       await commandStatus();
+      return;
+    case "info":
+      await commandInfo();
       return;
     case "--version":
     case "version":
