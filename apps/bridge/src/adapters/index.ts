@@ -14,6 +14,7 @@ import type {
   TransferCommitResult,
   TransferPrepareResult,
 } from "@agent-bridge/protocol";
+import { AntigravityAdapter } from "./antigravity.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
 import { CodexAdapter } from "./codex.js";
 import { RpcError, type SessionAdapter } from "./types.js";
@@ -33,7 +34,11 @@ interface PreparedTransfer {
 }
 
 export class SessionAdapters {
-  private readonly adapters: SessionAdapter[] = [new ClaudeCodeAdapter(), new CodexAdapter()];
+  private readonly adapters: SessionAdapter[] = [
+    new ClaudeCodeAdapter(),
+    new CodexAdapter(),
+    new AntigravityAdapter(),
+  ];
   private readonly transfers = new Map<string, PreparedTransfer>();
 
   hostAdapters(): Array<{ id: string; status: "ready" | "unavailable" | "needs_permission"; label: string; detail?: string }> {
