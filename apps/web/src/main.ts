@@ -1938,7 +1938,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     ]),
   );
 
-  const rail = createRail(summary.sessionId, summary.appId, project?.cwd);
+  // 工作树会话的项目是原仓库，但远程工具要落在它真正工作的目录。
+  const rail = createRail(summary.sessionId, summary.appId, summary.cwd ?? project?.cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
   const main = el("main", { className: `main chat${rail.root.classList.contains("is-open") ? " has-rail" : ""}` }, [
