@@ -281,8 +281,21 @@ export class Devtools {
       : (await this.allRoots()).find(
         (item) => item.real === want && item.projectIds.has(session.projectId),
       );
-    if (!match) throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
-    return match;
+    if (match) return match;
+    // 工作树会话归在原项目里，但它自己在 .claude/worktrees/<name> 下工作：
+    // 只放行这个会话自己的 cwd，别的路径仍按项目范围拒绝。
+    if (want !== null && session.cwd) {
+      let own: string | null = null;
+      try {
+        own = realpathSync(resolve(session.cwd));
+      } catch {
+        own = null;
+      }
+      if (own === want) {
+        return { name: basename(want), path: want, real: want, projectIds: new Set([session.projectId]) };
+      }
+    }
+    throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
   }
 
   /** Resolves a client path and refuses anything outside the scoped project root. */

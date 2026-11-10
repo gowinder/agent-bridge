@@ -300,6 +300,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         live,
         ...(busy ? { busy: true } : {}),
         canSend,
+        ...(session.cwd ? { cwd: session.cwd } : {}),
         sendBlockedReason: canSend
           ? undefined
           : scan.error ??

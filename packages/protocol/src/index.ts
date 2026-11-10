@@ -409,6 +409,12 @@ export interface SessionSummary {
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;
+  /**
+   * The directory the session actually works in. A worktree session keeps the
+   * original repository as its project but runs in `.claude/worktrees/<name>`;
+   * remote tools (file browsing, commands) must start here, not at the project.
+   */
+  cwd?: string;
 }
 
 export type MessageRole = "user" | "assistant" | "system";
