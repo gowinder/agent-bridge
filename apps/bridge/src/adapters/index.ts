@@ -135,14 +135,14 @@ export class SessionAdapters {
     });
   }
 
-  async send(sessionId: string, text: string): Promise<MessageSendResult> {
+  async send(sessionId: string, text: string, origin?: string): Promise<MessageSendResult> {
     const adapter = this.adapterFor(sessionId);
     const session = adapter.session(sessionId);
     if (!session) throw new RpcError("not_found", "未知会话");
     if (!session.canSend) {
       throw new RpcError("adapter_unavailable", session.sendBlockedReason ?? "该会话当前不可发送");
     }
-    return adapter.send(sessionId, text);
+    return adapter.send(sessionId, text, origin);
   }
 
   async prepareTransfer(
