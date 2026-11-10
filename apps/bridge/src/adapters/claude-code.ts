@@ -50,6 +50,8 @@ interface DesktopSession {
   cliSessionId: string;
   priorCliSessionIds: string[];
   cwd: string;
+  /** 会话所属项目目录；工作树里的会话归到原项目，而不是单独成一个项目。 */
+  projectCwd: string;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -255,15 +257,15 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   projects(): ProjectInfo[] {
     const map = new Map<string, ProjectInfo>();
     for (const session of this.records()) {
-      const projectId = this.projectIdFor(session.cwd);
+      const projectId = this.projectIdFor(session.projectCwd);
       const entry = map.get(projectId);
       if (entry) entry.sessionCount += 1;
       else {
         map.set(projectId, {
           projectId,
           appId: this.key,
-          name: session.cwd ? basename(session.cwd) : "未分组会话",
-          cwd: session.cwd || undefined,
+          name: session.projectCwd ? basename(session.projectCwd) : "未分组会话",
+          cwd: session.projectCwd || undefined,
           sessionCount: 1,
         });
       }
@@ -289,7 +291,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       out.push({
         sessionId,
         appId: this.key,
-        projectId: this.projectIdFor(session.cwd),
+        projectId: this.projectIdFor(session.projectCwd),
         kind: "code",
         title: (session.title || "未命名会话").slice(0, 120),
         createdAt: session.createdAt,
@@ -638,6 +640,16 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return task;
   }
 
+  /**
+   * 桌面端为工作树会话写了 originCwd；没有这个字段的旧记录按路径推断，
+   * 否则每个工作树都会变成一个独立项目，会话在原项目里就找不到了。
+   */
+  private projectCwdOf(cwd: string, originCwd: string): string {
+    if (originCwd) return originCwd;
+    const at = cwd.indexOf("/.claude/worktrees/");
+    return at > 0 ? cwd.slice(0, at) : cwd;
+  }
+
   private projectIdFor(cwd: string): string {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
@@ -682,6 +694,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       const localId = asString(raw["sessionId"]) || basename(path).replace(/\.json$/, "");
       const createdAt = asNumber(raw["createdAt"]);
+      const cwd = asString(raw["cwd"]);
       return {
         localId,
         cliSessionId: asString(raw["cliSessionId"]),
@@ -690,7 +703,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
               .filter((item): item is string => typeof item === "string" && item !== "")
               .slice(-20)
           : [],
-        cwd: asString(raw["cwd"]),
+        cwd,
+        projectCwd: this.projectCwdOf(cwd, asString(raw["originCwd"])),
         title: asString(raw["title"]),
         createdAt,
         updatedAt:
