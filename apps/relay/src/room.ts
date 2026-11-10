@@ -156,6 +156,12 @@ export class Room {
     if (now - this.lastTouchAt < TOUCH_INTERVAL_MS) return;
     this.lastTouchAt = now;
     await this.ctx.storage.put("last_seen", now);
+    // 还有没完成 hello 的 socket 时，闹钟是在做握手兜底；往后推就等于把兜底关掉。
+    const pending = this.ctx.getWebSockets().some((ws) => {
+      const attachment = ws.deserializeAttachment() as (Attachment & { deadline?: number }) | null;
+      return attachment?.pending === true;
+    });
+    if (pending) return;
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm < now + IDLE_ROOM_MS - TOUCH_INTERVAL_MS) {
       await this.ctx.storage.setAlarm(now + IDLE_ROOM_MS);
@@ -254,20 +260,37 @@ export class Room {
     }
 
     if (path === "/devices" && request.method === "POST") {
-      const body = (await request.json()) as {
+      const body = (await request.json().catch(() => ({}))) as {
         deviceId?: string;
         name?: string;
         publicKey?: string;
         ttlSeconds?: number | null;
       };
-      if (!body.deviceId || !body.name || !body.publicKey) {
+      if (
+        typeof body.deviceId !== "string" ||
+        typeof body.name !== "string" ||
+        typeof body.publicKey !== "string" ||
+        !body.deviceId ||
+        !body.name ||
+        !body.publicKey
+      ) {
         return errorResponse("bad_request", "missing fields", 400);
       }
       if (!/^[a-z0-9-]{8,64}$/.test(body.deviceId)) {
         return errorResponse("bad_request", "bad deviceId", 400);
       }
+      if (body.name.length > 64) {
+        return errorResponse("bad_request", "device name too long", 400);
+      }
+      if (!/^[0-9a-f]{64}$/.test(body.publicKey)) {
+        return errorResponse("bad_request", "bad publicKey", 400);
+      }
       let expiresAt: number | null = null;
       if (body.ttlSeconds != null) {
+        // NaN 会让 Math.trunc 之后的比较全部为 false，设备就成了永不过期。
+        if (!Number.isFinite(body.ttlSeconds)) {
+          return errorResponse("bad_request", "bad ttlSeconds", 400);
+        }
         const ttl = Math.min(Math.max(Math.trunc(body.ttlSeconds), 60), MAX_DEVICE_TTL_SECONDS);
         expiresAt = Date.now() + ttl * 1000;
       }

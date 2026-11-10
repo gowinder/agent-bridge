@@ -2455,7 +2455,10 @@ async function loadFileRoots(state: RailState): Promise<void> {
   paintFiles(state, "正在读取项目目录…");
   try {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
-    const result = await call<FsRootsResult>("fs.roots", { root: state.projectRoot });
+    const result = await call<FsRootsResult>("fs.roots", {
+      sessionId: state.sessionId,
+      root: state.projectRoot,
+    });
     files.roots = result.roots;
     files.error = result.roots.length === 0 ? "没有可浏览的项目目录" : null;
   } catch (error) {
@@ -2479,7 +2482,11 @@ async function listFiles(state: RailState, path: string): Promise<void> {
   paintFiles(state, "正在读取…");
   try {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
-    const result = await call<FsListResult>("fs.list", { root: state.projectRoot, path });
+    const result = await call<FsListResult>("fs.list", {
+      sessionId: state.sessionId,
+      root: state.projectRoot,
+      path,
+    });
     files.path = result.path;
     files.parent = result.parent;
     files.entries = result.entries;
@@ -2498,7 +2505,11 @@ async function openFile(state: RailState, path: string): Promise<void> {
   paintFiles(state, "正在读取文件…");
   try {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
-    files.preview = await call<FsReadResult>("fs.read", { root: state.projectRoot, path });
+    files.preview = await call<FsReadResult>("fs.read", {
+      sessionId: state.sessionId,
+      root: state.projectRoot,
+      path,
+    });
     files.error = null;
   } catch (error) {
     files.error = messageOf(error);
@@ -2837,7 +2848,7 @@ async function runShell(state: RailState): Promise<void> {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
     const result = await call<ShellExecResult>(
       "shell.exec",
-      { root: state.projectRoot, command, cwd: shell.cwd },
+      { sessionId: state.sessionId, root: state.projectRoot, command, cwd: shell.cwd },
       20_000,
     );
     const run: ShellRun = {
