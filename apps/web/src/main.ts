@@ -729,7 +729,16 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
 function shortAgentName(app: AppInfo): string {
   if (app.kind === "claude-code") return "Claude";
   if (app.kind === "codex") return "ChatGPT";
+  if (app.kind === "antigravity" || app.kind === "antigravity-desktop") return "Antigravity";
+  if (app.kind === "dsh") return "DeepSeek";
   return app.name.split(/[·\s]/)[0] ?? app.name;
+}
+
+function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
+  if (kind === "codex" || kind === "codex-thread") return "CX";
+  if (kind === "antigravity" || kind === "antigravity-desktop") return "AG";
+  if (kind === "dsh") return "DS";
+  return "CC";
 }
 
 const RECENT_SESSIONS_KEY = "ab.recentSessions";
@@ -1113,7 +1122,7 @@ function renderClients(): void {
     const projects = data.projects.filter((project) => project.appId === item.appId);
     const sessions = data.sessions.filter((session) => session.appId === item.appId);
     const row = el("button", { className: `row client-row${item.status === "ready" ? "" : " muted-row"}`, attrs: { type: "button" } }, [
-      el("span", { className: "mark", text: item.provider === "anthropic" ? "CC" : "CX" }),
+      el("span", { className: "mark", text: agentMark(item.kind) }),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title", text: item.name }),
         el("span", {
@@ -1207,7 +1216,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         { className: `mark ${busy ? "busy" : session.live ? "live" : ""}` },
         busy
           ? [el("span", { className: "spinner mark-spinner" })]
-          : [document.createTextNode(session.kind === "codex-thread" ? "CX" : "CC")],
+          : [document.createTextNode(agentMark(session.kind))],
       ),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title", text: session.title }),
