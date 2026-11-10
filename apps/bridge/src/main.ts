@@ -42,7 +42,7 @@ function usage(): void {
   agent-bridge init --relay <url> [--web <url>] [--name <name>]
   agent-bridge invite [--ttl 300]
   agent-bridge serve
-  agent-bridge devices [ttl <manual|1h|24h|7d|30d>]
+  agent-bridge devices [ttl <manual|1h|24h|7d|30d>]   (默认 30d)
   agent-bridge revoke <deviceId>
   agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]
   agent-bridge status
