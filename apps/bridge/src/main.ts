@@ -112,7 +112,16 @@ async function commandInit(args: string[]): Promise<void> {
     if (!health.ok) throw new Error(`中继不可用：HTTP ${health.status}`);
 
     const roomId = randomUUID();
-    const room = await createRoom(relayUrl, adminToken, roomId);
+    const room = await createRoom(relayUrl, adminToken, roomId).catch((error: unknown) => {
+      if (!(error instanceof RelayError)) throw error;
+      const reason =
+        error.status === 401
+          ? "管理令牌不正确"
+          : error.status === 503
+            ? "中继未配置 ADMIN_TOKEN"
+            : error.code;
+      throw new Error(`中继拒绝创建房间（HTTP ${error.status}，${reason}）`);
+    });
     const noise = await loadNoiseNode();
     const identity = noise.generateKeyPair();
 
