@@ -508,7 +508,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return input
         }
         let relayField = field(0, "中继地址", relay)
-        let tokenField = field(1, "管理令牌 ADMIN_TOKEN", defaults.string(forKey: "adminToken") ?? "")
+        let tokenField = field(1, "管理令牌 ADMIN_TOKEN", "")
         let nameField = field(2, "本机名称", Host.current().localizedName ?? "Mac")
         tokenField.placeholderString = "wrangler secret 里设置的 ADMIN_TOKEN"
         dialog.accessoryView = form
@@ -524,7 +524,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         defaults.set(relayValue, forKey: "relayUrl")
-        defaults.set(tokenValue, forKey: "adminToken")
 
         var args = ["init", "--relay", relayValue, "--admin-token", tokenValue]
         if !nameValue.isEmpty { args += ["--name", nameValue] }
