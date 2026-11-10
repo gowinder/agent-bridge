@@ -90,6 +90,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 8a5.2 5.2 0 1 0 1.6-3.7"/><path d="M2.6 2.6v2.9h2.9"/><path d="M8 5.4V8l1.9 1.1"/></svg>',
   stop:
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><rect x="5.8" y="5.8" width="4.4" height="4.4" rx="1" fill="currentColor" stroke="none"/></svg>',
+  check:
+    '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 8.4l2.8 2.8 6-6.2"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -1861,32 +1863,37 @@ function spinner(): HTMLElement {
   return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
 }
 
-/** Marks the last assistant turn with its state: still running, or stopped by the user. */
+/** Marks the last assistant turn with its state: running, stopped, or finished. */
 function markTurnState(list: HTMLElement, state: ChatState): void {
-  if (!state.busy && !state.interrupted) return;
   const bubbles = list.querySelectorAll<HTMLElement>("article.message.assistant");
   const last = bubbles[bubbles.length - 1];
-  const summary = last?.querySelector<HTMLElement>(".turn-steps-summary");
-  const badge = state.busy
-    ? [spinner(), el("span", { className: "thinking-label", text: "进行中" })]
-    : [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "已中断" })];
+  const tone = state.busy ? "busy" : state.interrupted ? "stopped" : "done";
+  const badge = (): HTMLElement[] =>
+    tone === "busy"
+      ? [spinner(), el("span", { className: "thinking-label", text: "进行中" })]
+      : tone === "stopped"
+        ? [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "已中断" })]
+        : [icon("check", "icon turn-done"), el("span", { className: "thinking-label done-label", text: "已完成" })];
+  if (!last) {
+    if (tone === "done") return;
+    const row = el("div", { className: "thinking-row" });
+    row.append(
+      ...(tone === "busy"
+        ? [spinner(), el("span", { className: "thinking-label", text: "思考中…" })]
+        : [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "该回合已被中断" })]),
+    );
+    list.append(row);
+    return;
+  }
+  const summary = last.querySelector<HTMLElement>(".turn-steps-summary");
   if (summary) {
-    summary.append(...badge);
-    last?.classList.add(state.busy ? "is-busy" : "is-stopped");
-    return;
-  }
-  const row = el("div", { className: "thinking-row" });
-  if (state.busy) {
-    row.append(spinner(), el("span", { className: "thinking-label", text: "思考中…" }));
+    summary.append(...badge());
   } else {
-    row.append(icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "该回合已被中断" }));
-  }
-  if (last) {
+    const row = el("div", { className: "thinking-row" });
+    row.append(...badge());
     last.append(row);
-    last.classList.add(state.busy ? "is-busy" : "is-stopped");
-    return;
   }
-  list.append(row);
+  last.classList.add(`is-${tone}`);
 }
 
 function renderMessages(state: ChatState): void {

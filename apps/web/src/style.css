@@ -1181,7 +1181,16 @@ a.crumb:hover {
   color: var(--muted);
 }
 
-.stopped-label {
+.turn-done {
+  display: inline-flex;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
+}
+
+.stopped-label,
+.done-label {
   color: var(--muted);
 }
 
