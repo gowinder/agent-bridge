@@ -73,8 +73,14 @@ const WS_LIMIT_PER_MIN = 40;
 /** 同一 IP 每分钟能调用的房间 REST 接口。 */
 const API_LIMIT_PER_MIN = 120;
 
-function tooMany(retryAfter: number, origin: string | undefined): Response {
-  const response = fail("rate_limited", "too many requests", 429, origin);
+function tooMany(retryAfter: number, request: Request, env: Env): Response {
+  // 429 同样只能回带白名单里的 Origin，不能把请求头原样反射回去。
+  const response = fail(
+    "rate_limited",
+    "too many requests",
+    429,
+    allowedOrigin(request, env) ?? undefined,
+  );
   response.headers.set("retry-after", String(Math.max(retryAfter, 1)));
   return response;
 }
@@ -119,7 +125,7 @@ export default {
         return fail("unauthorized", "origin not allowed", 403);
       }
       const wsLimit = rateLimit(`ws:${clientIp(request)}`, WS_LIMIT_PER_MIN, 60_000);
-      if (!wsLimit.ok) return tooMany(wsLimit.retryAfter, request.headers.get("origin") ?? undefined);
+      if (!wsLimit.ok) return tooMany(wsLimit.retryAfter, request, env);
       const roomId = url.searchParams.get("room") ?? "";
       if (!ROOM_ID.test(roomId)) return fail("bad_request", "bad room", 400);
       const target = new URL(request.url);
@@ -136,7 +142,7 @@ export default {
     const rest = roomMatch[2]!;
 
     const apiLimit = rateLimit(`api:${clientIp(request)}`, API_LIMIT_PER_MIN, 60_000);
-    if (!apiLimit.ok) return tooMany(apiLimit.retryAfter, request.headers.get("origin") ?? undefined);
+    if (!apiLimit.ok) return tooMany(apiLimit.retryAfter, request, env);
 
     if (rest === "/invites" && request.method === "POST") {
       const response = await forward(env, roomId, request, "/invites");
