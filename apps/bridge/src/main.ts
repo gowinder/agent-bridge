@@ -321,6 +321,10 @@ async function commandServe(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   log(`Bridge ${VERSION} 启动，房间 ${config.roomId}`);
+  for (const app of adapters.apps().apps) {
+    if (app.capabilities.send || app.status === "unavailable") continue;
+    log(`发送不可用（${app.name}）：${app.capabilities.sendDetail ?? app.capabilities.reason ?? "原因未知"}`);
+  }
   let backoff = 1_000;
   while (!stopping) {
     relay = new RelayClient(config.relayUrl, config.roomId, config.bridgeToken, handlers);
