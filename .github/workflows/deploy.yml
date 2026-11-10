@@ -3,20 +3,70 @@ name: Deploy
 on:
   push:
     branches: [develop, main]
+    tags: ["v*"]
   workflow_dispatch:
-
-concurrency:
-  group: deploy-${{ github.ref_name }}
-  cancel-in-progress: true
+    inputs:
+      force:
+        description: 忽略版本号检查，强制部署
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.detect.outputs.changed }}
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, so the pre-push tip can always be inspected.
+          fetch-depth: 0
+
+      - id: detect
+        name: 检查版本号是否变化
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').version ?? ''")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          # Compare against the tip before this push: a multi-commit push can carry
+          # the bump in an earlier commit, where HEAD^ already has the new version.
+          before="${{ github.event.before }}"
+          base=""
+          if [ -n "$before" ] && ! echo "$before" | grep -qE '^0+$' && git cat-file -e "$before^{commit}" 2>/dev/null; then
+            base="$before"
+          elif git rev-parse --verify --quiet "HEAD^" >/dev/null; then
+            base="HEAD^"
+          fi
+          changed=false
+          if [ "${{ inputs.force }}" = "true" ]; then
+            changed=true
+          elif [ -z "$version" ]; then
+            changed=false
+          elif [ -z "$base" ]; then
+            # No history to compare against; a present version counts as a change.
+            changed=true
+          else
+            git show "$base:package.json" > "$RUNNER_TEMP/previous-package.json" 2>/dev/null || echo '{}' > "$RUNNER_TEMP/previous-package.json"
+            previous=$(node -p "require('$RUNNER_TEMP/previous-package.json').version ?? ''")
+            if [ "$previous" != "$version" ]; then changed=true; fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "版本号：$version（对比 $base），变化：$changed"
+
   preview:
-    if: github.ref_name == 'develop'
+    needs: version
+    if: github.ref == 'refs/heads/develop' && needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     environment: preview
+    # Only runs that actually deploy join this group, so a version-neutral push
+    # cannot cancel a pending release; releases queue instead of cancelling.
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -44,9 +94,14 @@ jobs:
           command: deploy --env preview
 
   production:
-    if: github.ref_name == 'main'
+    needs: version
+    # Tags deploy unconditionally; main only deploys when the version moves.
+    if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && needs.version.outputs.changed == 'true')
     runs-on: ubuntu-latest
     environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
