@@ -45,7 +45,8 @@ export interface SessionAdapter {
   rail(sessionId: string): SessionRailResult | Promise<SessionRailResult>;
   /** Messages written by one background task (subagent); absent when the app keeps none. */
   taskMessages?(sessionId: string, taskId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
-  send(sessionId: string, text: string): Promise<MessageSendResult>;
+  /** `origin` 是发起人的标识（例如配对设备名），用于让目标会话区分消息从哪个客户端来。 */
+  send(sessionId: string, text: string, origin?: string): Promise<MessageSendResult>;
 }
 
 export function truncate(text: string, max: number): { text: string; truncated?: boolean } {

@@ -104,6 +104,15 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * 信封里的发送者名。所有设备共用同一个进程和同一个名字时，接收方无法分辨消息来自
+ * 哪个客户端；带上配对设备名即可区分，同时避免设备名里的引号破坏信封结构。
+ */
+function senderLabel(origin: string | undefined): string {
+  const name = (origin ?? "").replace(/["<>]/g, "").replace(/\s+/g, " ").trim().slice(0, 40);
+  return name ? `Agent Bridge · ${name}` : "Agent Bridge";
+}
+
 function asNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
@@ -215,6 +224,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   private transcriptPathCache = new Map<string, { path: string | null; checkedAt: number }>();
   private messageCache = new Map<string, CachedMessages>();
   private sendQueue: Promise<unknown> = Promise.resolve();
+  /** 注入回执通道；接收端要求 from 里的 socket 名等于发送进程 pid，所以全进程只绑一个。 */
+  private receiptServer: Server | null = null;
+  private receiptSink: ((chunk: string) => void) | null = null;
 
   app(): AppInfo {
     const hasRoot = this.roots().length > 0;
@@ -584,7 +596,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return null;
   }
 
-  async send(sessionId: string, text: string): Promise<MessageSendResult> {
+  async send(sessionId: string, text: string, origin?: string): Promise<MessageSendResult> {
     const runSend = async (): Promise<MessageSendResult> => {
       const record = this.record(sessionId);
       if (!record) throw new RpcError("not_found", "未知会话");
@@ -612,7 +624,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const target = this.socketFor(match.pid);
       if (!target) throw new RpcError("adapter_unavailable", "该会话进程没有可用的消息通道");
       const mode = record.permissionMode === "bypassPermissions" ? "bypass" : "default";
-      const result = await this.injectUds(target, text, mode);
+      const result = await this.injectUds(target, text, mode, origin);
       if (result.delivered) return result;
       // The CLI does not always answer with a receipt; the transcript is the
       // authoritative confirmation that the message reached the session.
@@ -1080,24 +1092,63 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return false;
   }
 
-  private injectUds(target: string, text: string, mode: string): Promise<MessageSendResult> {
+  /**
+   * 接收端（CLI 2.1.319）用 LOCAL_PEERPID 校验发送进程，要求信封里的 socket 名等于发送
+   * 进程 pid，所以地址只能是 `<pid>.sock`，不能每封换名字。发送由 sendQueue 串行化，
+   * 同一时刻只有一封在途，因此全进程绑一个常驻回执通道，把收到的行交给当前在途的那封；
+   * 不再按次创建/删除监听，也不会出现「收件地址短暂不存在」的窗口期。
+   */
+  private receiptChannel(): Promise<void> {
+    if (this.receiptServer) return Promise.resolve();
+    const own = join(SOCKET_DIR, `${process.pid}.sock`);
+    return new Promise<void>((resolve, reject) => {
+      if (existsSync(own)) {
+        try {
+          unlinkSync(own);
+        } catch {
+          // ignore
+        }
+      }
+      const server = createServer((connection) => {
+        connection.setEncoding("utf8");
+        connection.on("data", (chunk: string) => this.receiptSink?.(chunk));
+        connection.on("error", () => undefined);
+      });
+      server.once("error", reject);
+      server.listen(own, () => {
+        server.off("error", reject);
+        server.on("error", () => undefined);
+        try {
+          chmodSync(own, 0o600);
+        } catch {
+          // best effort
+        }
+        this.receiptServer = server;
+        // 监听常驻，退出时再清理，免得 /tmp/cc-socks 里留下无主 socket。
+        process.once("exit", () => {
+          try {
+            if (existsSync(own)) unlinkSync(own);
+          } catch {
+            // ignore
+          }
+        });
+        resolve();
+      });
+    });
+  }
+
+  private injectUds(target: string, text: string, mode: string, origin?: string): Promise<MessageSendResult> {
     const own = join(SOCKET_DIR, `${process.pid}.sock`);
     return new Promise<MessageSendResult>((resolve, reject) => {
       let settled = false;
       const receipts: string[] = [];
       let client: Socket | null = null;
-      let server: Server | null = null;
       const finish = (result: MessageSendResult | Error): void => {
         if (settled) return;
         settled = true;
+        this.receiptSink = null;
         try {
           client?.destroy();
-        } catch {
-          // ignore
-        }
-        server?.close();
-        try {
-          if (existsSync(own)) unlinkSync(own);
         } catch {
           // ignore
         }
@@ -1125,57 +1176,44 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         });
       };
 
-      if (existsSync(own)) {
-        try {
-          unlinkSync(own);
-        } catch {
-          // ignore
-        }
-      }
-      server = createServer((connection) => {
-        connection.setEncoding("utf8");
-        connection.on("data", (chunk: string) => {
-          enqueueReceipt(chunk);
-          settleFromReceipts();
-        });
-        connection.on("error", () => undefined);
-      });
-      server.on("error", (error) => finish(error));
-      server.listen(own, () => {
-        try {
-          chmodSync(own, 0o600);
-        } catch {
-          // best effort
-        }
-        client = createConnection(target);
-        client.setEncoding("utf8");
-        client.on("connect", () => {
-          const envelope = `<cross-session-message from="uds:${own}" from-name="Agent Bridge" from-mode="${mode}">\n${text}\n</cross-session-message>`;
-          const frame = {
-            msg_id: randomUUID(),
-            type: "user",
-            message: { role: "user", content: envelope },
-            priority: "next",
-            from: `uds:${own}`,
+      this.receiptChannel().then(
+        () => {
+          if (settled) return;
+          this.receiptSink = (chunk: string) => {
+            enqueueReceipt(chunk);
+            settleFromReceipts();
           };
-          client?.write(`${JSON.stringify(frame)}\n`);
-        });
-        client.on("data", (chunk: string) => {
-          enqueueReceipt(chunk);
-          settleFromReceipts();
-        });
-        client.on("error", (error) => finish(error));
-        client.setTimeout(3_000, () => {
-          finish({
-            accepted: true,
-            delivered: false,
-            detail:
-              receipts.length > 0
-                ? `未收到投递确认：${receipts.join(" ").slice(0, 200)}`
-                : "已写入本地通道，但未收到投递确认",
+          client = createConnection(target);
+          client.setEncoding("utf8");
+          client.on("connect", () => {
+            const envelope = `<cross-session-message from="uds:${own}" from-name="${senderLabel(origin)}" from-mode="${mode}">\n${text}\n</cross-session-message>`;
+            const frame = {
+              msg_id: randomUUID(),
+              type: "user",
+              message: { role: "user", content: envelope },
+              priority: "next",
+              from: `uds:${own}`,
+            };
+            client?.write(`${JSON.stringify(frame)}\n`);
           });
-        });
-      });
+          client.on("data", (chunk: string) => {
+            enqueueReceipt(chunk);
+            settleFromReceipts();
+          });
+          client.on("error", (error) => finish(error));
+          client.setTimeout(3_000, () => {
+            finish({
+              accepted: true,
+              delivered: false,
+              detail:
+                receipts.length > 0
+                  ? `未收到投递确认：${receipts.join(" ").slice(0, 200)}`
+                  : "已写入本地通道，但未收到投递确认",
+            });
+          });
+        },
+        (error: unknown) => finish(error instanceof Error ? error : new Error(String(error))),
+      );
       setTimeout(() => {
         finish({
           accepted: true,

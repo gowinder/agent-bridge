@@ -369,7 +369,7 @@ export class DeviceSession implements ChannelSession {
         if (!text.trim() && attachments.length === 0) throw new RpcError("invalid_params", "消息不能为空");
         const composed = composeMessage(text.trim(), attachments);
         if (composed.length > 32_000) throw new RpcError("invalid_params", "消息过长");
-        return this.options.adapters.send(sessionId, composed);
+        return this.options.adapters.send(sessionId, composed, this.options.device.name);
       }
       case "file.upload.begin": {
         const sessionId = stringParam(params, "sessionId");
@@ -436,22 +436,30 @@ export class DeviceSession implements ChannelSession {
         this.options.store.revokeDevice(deviceId);
         return { ok: true };
       }
-      case "fs.roots":
-        return { enabled: this.options.devtools.status().enabled, roots: await this.options.devtools.roots() };
+      case "fs.roots": {
+        const root = stringParam(params, "root");
+        if (!root) throw new RpcError("invalid_params", "root required");
+        return this.options.devtools.roots(root);
+      }
       case "fs.list": {
-        const path = stringParam(params, "path");
-        if (!path) throw new RpcError("invalid_params", "path required");
-        return this.options.devtools.listDirs(path);
+        const root = stringParam(params, "root");
+        if (!root) throw new RpcError("invalid_params", "root required");
+        return this.options.devtools.listDirs(root, stringParam(params, "path"));
       }
       case "fs.read": {
+        const root = stringParam(params, "root");
+        if (!root) throw new RpcError("invalid_params", "root required");
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
-        return this.options.devtools.readFile(path);
+        return this.options.devtools.readFile(root, path);
       }
       case "shell.exec": {
+        const root = stringParam(params, "root");
+        if (!root) throw new RpcError("invalid_params", "root required");
         const command = stringParam(params, "command") ?? "";
         return this.options.devtools.exec(
           this.options.channel,
+          root,
           command,
           stringParam(params, "cwd"),
           numberParam(params, "timeoutMs"),

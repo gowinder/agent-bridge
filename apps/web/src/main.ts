@@ -1973,6 +1973,9 @@ interface RailState {
   loading: boolean;
   signature: string;
   devtools: DevtoolsStatus | undefined;
+  /** Project directory of this chat; every file and command call is confined to it. */
+  projectRoot: string | undefined;
+  tabBar: HTMLElement;
   tab: RailTab;
   panes: Record<RailTab, HTMLElement>;
   tabs: HTMLButtonElement[];
@@ -2003,6 +2006,8 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     loading: false,
     signature: "",
     devtools: connected?.info.devtools,
+    projectRoot: projectCwd,
+    tabBar: el("div"),
     tab: "overview",
     panes,
     tabs: [],
@@ -2014,6 +2019,7 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     attrs: { type: "button", "aria-label": "关闭侧栏", title: "关闭侧栏" },
   }, [icon("close")]);
   const tabBar = el("div", { className: "rail-tabs", attrs: { role: "tablist" } });
+  state.tabBar = tabBar;
   const labels: Array<[RailTab, string]> = [
     ["overview", "概览"],
     ["files", "文件"],
@@ -2027,7 +2033,7 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     state.tabs.push(node);
     tabBar.append(node);
   }
-  if (state.devtools?.enabled) tabBar.dataset["hint"] = "远程工具已开启";
+  paintRailHint(state);
   const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } }, [
     el("div", { className: "rail-head" }, [
       el("span", { className: "rail-title", text: "会话侧栏" }),
@@ -2060,7 +2066,6 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
   };
   close.addEventListener("click", dismiss);
   backdrop.addEventListener("click", dismiss);
-  if (projectCwd) root.dataset["cwd"] = projectCwd;
   currentRail = handle;
   return handle;
 }
@@ -2075,7 +2080,33 @@ function selectRailTab(state: RailState, tab: RailTab): void {
   }
   if (tab === "overview") void refreshRail(state);
   if (tab === "files") void openFilesPane(state);
-  if (tab === "shell") openShellPane(state);
+  if (tab === "shell") void openShellPane(state);
+}
+
+/** The rail only learns the switch state at connect time, so panes re-ask before they open. */
+async function refreshDevtools(state: RailState): Promise<void> {
+  try {
+    const info = await call<HostInfoResult>("host.info");
+    state.devtools = info.devtools;
+  } catch {
+    return;
+  }
+  paintRailHint(state);
+}
+
+function paintRailHint(state: RailState): void {
+  const files = state.devtools?.files.enabled === true;
+  const terminal = state.devtools?.terminal.enabled === true;
+  const hint =
+    files && terminal
+      ? "文件浏览与命令执行已开启"
+      : files
+        ? "文件浏览已开启"
+        : terminal
+          ? "命令执行已开启"
+          : undefined;
+  if (hint) state.tabBar.dataset["hint"] = hint;
+  else delete state.tabBar.dataset["hint"];
 }
 
 /** The rail of the chat on screen; one document key listener serves every render. */
@@ -2126,6 +2157,21 @@ function paintRail(state: RailState, result: SessionRailResult): void {
 // ---- rail: files ----
 
 async function openFilesPane(state: RailState): Promise<void> {
+  await refreshDevtools(state);
+  if (!state.devtools?.files.enabled) {
+    state.files = null;
+    state.panes.files.replaceChildren(
+      el("p", { className: "rail-empty", text: "文件浏览未开启，请在 Mac 菜单栏的「远程工具」中打开。" }),
+    );
+    return;
+  }
+  if (!state.projectRoot) {
+    state.files = null;
+    state.panes.files.replaceChildren(
+      el("p", { className: "rail-empty", text: "这个会话没有项目目录，无法浏览文件。" }),
+    );
+    return;
+  }
   if (state.files) {
     if (state.files.roots.length === 0 && !state.files.loading) await loadFileRoots(state);
     return;
@@ -2150,7 +2196,8 @@ async function loadFileRoots(state: RailState): Promise<void> {
   files.loading = true;
   paintFiles(state, "正在读取项目目录…");
   try {
-    const result = await call<FsRootsResult>("fs.roots");
+    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    const result = await call<FsRootsResult>("fs.roots", { root: state.projectRoot });
     files.roots = result.roots;
     files.error = result.roots.length === 0 ? "没有可浏览的项目目录" : null;
   } catch (error) {
@@ -2173,7 +2220,8 @@ async function listFiles(state: RailState, path: string): Promise<void> {
   files.preview = null;
   paintFiles(state, "正在读取…");
   try {
-    const result = await call<FsListResult>("fs.list", { path });
+    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    const result = await call<FsListResult>("fs.list", { root: state.projectRoot, path });
     files.path = result.path;
     files.parent = result.parent;
     files.entries = result.entries;
@@ -2191,7 +2239,8 @@ async function openFile(state: RailState, path: string): Promise<void> {
   files.loading = true;
   paintFiles(state, "正在读取文件…");
   try {
-    files.preview = await call<FsReadResult>("fs.read", { path });
+    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    files.preview = await call<FsReadResult>("fs.read", { root: state.projectRoot, path });
     files.error = null;
   } catch (error) {
     files.error = messageOf(error);
@@ -2328,12 +2377,27 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
 
 // ---- rail: single-command shell ----
 
-function openShellPane(state: RailState): void {
+async function openShellPane(state: RailState): Promise<void> {
+  await refreshDevtools(state);
+  const pane = state.panes.shell;
+  if (!state.devtools?.terminal.enabled) {
+    state.shell = null;
+    pane.replaceChildren(
+      el("p", { className: "rail-empty", text: "命令执行未开启，请在 Mac 菜单栏的「远程工具」中打开。" }),
+    );
+    return;
+  }
+  if (!state.projectRoot) {
+    state.shell = null;
+    pane.replaceChildren(
+      el("p", { className: "rail-empty", text: "这个会话没有项目目录，无法执行命令。" }),
+    );
+    return;
+  }
   if (state.shell) {
     state.shell.input.focus();
     return;
   }
-  const pane = state.panes.shell;
   pane.replaceChildren();
   const output = el("pre", { className: "shell-output" });
   const cwdLine = el("p", { className: "shell-cwd" });
@@ -2362,7 +2426,7 @@ function openShellPane(state: RailState): void {
       input.value = shell.history[shell.historyIndex] ?? "";
     }
   });
-  const cwd = state.root.dataset["cwd"];
+  const cwd = state.projectRoot;
   pane.append(
     el("p", { className: "rail-empty shell-hint", text: "在项目目录里执行单条命令，输出实时返回。远程工具关闭后立刻不可用。" }),
     cwdLine,
@@ -2459,7 +2523,12 @@ async function runShell(state: RailState): Promise<void> {
   shell.output.textContent = capShellText(`${shell.output.textContent ?? ""}$ ${command}\n`);
   shell.output.scrollTop = shell.output.scrollHeight;
   try {
-    const result = await call<ShellExecResult>("shell.exec", { command, cwd: shell.cwd }, 20_000);
+    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    const result = await call<ShellExecResult>(
+      "shell.exec",
+      { root: state.projectRoot, command, cwd: shell.cwd },
+      20_000,
+    );
     const run: ShellRun = {
       sessionId: state.sessionId,
       command,
