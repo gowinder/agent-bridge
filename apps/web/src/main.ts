@@ -341,15 +341,17 @@ function observeSessions(sessions: SessionSummary[]): void {
     const busy = session.busy === true;
     const was = busySeen.get(session.sessionId);
     busySeen.set(session.sessionId, busy);
-    if (was !== true || busy) continue;
     const viewing =
       route.level === "chat" &&
       route.sessionId === session.sessionId &&
       document.visibilityState === "visible";
     if (viewing) {
+      // A background completion can land while this chat stays open without re-rendering,
+      // so clear the badge here instead of only on the busy edge below.
       markRead(session.sessionId);
       continue;
     }
+    if (was !== true || busy) continue;
     markUnread(session.sessionId, Date.now());
     notifyCompletion(session);
   }
@@ -393,9 +395,18 @@ let watchTimer: number | null = null;
 function startSessionWatch(): void {
   if (watchTimer !== null) return;
   watchTimer = window.setInterval(() => void watchSessions(), 10_000);
+  document.addEventListener("visibilitychange", onWatchVisible);
+}
+
+/** Background tabs throttle the timer, so returning to the tab refreshes at once. */
+function onWatchVisible(): void {
+  if (document.visibilityState !== "visible") return;
+  watchedAt = 0;
+  void watchSessions();
 }
 
 function stopSessionWatch(): void {
+  document.removeEventListener("visibilitychange", onWatchVisible);
   if (watchTimer !== null) {
     clearInterval(watchTimer);
     watchTimer = null;

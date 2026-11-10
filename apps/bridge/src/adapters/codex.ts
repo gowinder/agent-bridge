@@ -177,17 +177,13 @@ function rolloutBusy(busy: BusyState | undefined): boolean {
   return Date.now() - busy.lastStart < BUSY_MAX_AGE_MS;
 }
 
-/** Reads `length` bytes at `start`; a record cut at the start is dropped. */
-function readTailText(path: string, start: number, length: number): string {
+function readChunkText(path: string, start: number, length: number): string {
   let fd: number | undefined;
   try {
     const buffer = Buffer.alloc(length);
     fd = openSync(path, "r");
     readSync(fd, buffer, 0, length, start);
-    if (start === 0) return buffer.toString("utf8");
-    const text = buffer.toString("utf8");
-    const newline = text.indexOf("\n");
-    return newline === -1 ? "" : text.slice(newline + 1);
+    return buffer.toString("utf8");
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -553,14 +549,32 @@ export class CodexAdapter implements SessionAdapter {
     const state: BusyState = { lastStart: 0, lastEnd: 0, sawStart: false };
     const floor = Math.max(0, size - BUSY_TAIL_MAX_BACK_BYTES);
     let end = size;
+    // The chunk above's head: the tail of a record that began in the chunk read next. It is
+    // stitched onto that chunk's last partial line so a marker split by the boundary survives.
+    let pending = "";
     while (end > floor) {
       const start = Math.max(floor, end - BUSY_TAIL_BYTES);
+      let text: string;
       try {
-        scanBusyLines(readTailText(path, start, end - start), state);
+        text = readChunkText(path, start, end - start);
       } catch {
         break;
       }
+      let head = "";
+      if (start > 0) {
+        const newline = text.indexOf("\n");
+        head = newline === -1 ? text : text.slice(0, newline);
+        text = newline === -1 ? "" : text.slice(newline + 1);
+      }
+      if (pending) {
+        const newline = text.lastIndexOf("\n");
+        const tail = newline === -1 ? text : text.slice(newline + 1);
+        scanBusyLines(tail + pending, state);
+        text = newline === -1 ? "" : text.slice(0, newline);
+      }
+      scanBusyLines(text, state);
       if (state.sawStart || state.lastEnd > 0) break;
+      pending = head;
       end = start;
     }
     return { offset: size, state };
