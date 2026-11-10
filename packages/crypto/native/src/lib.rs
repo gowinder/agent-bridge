@@ -3,6 +3,7 @@ use std::collections::HashMap;
 
 use snow::{Builder, HandshakeState, TransportState};
 
+#[link(wasm_import_module = "env")]
 extern "C" {
     fn host_random(ptr: *mut u8, len: usize);
 }
