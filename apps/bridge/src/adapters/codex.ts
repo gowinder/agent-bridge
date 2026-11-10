@@ -1,4 +1,13 @@
-import { existsSync, readdirSync, readFileSync, statSync, createReadStream } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  openSync,
+  readSync,
+  readdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -148,6 +157,9 @@ function isAbortEntry(entry: RawLine): boolean {
 }
 
 const BUSY_MAX_AGE_MS = 30 * 60_000;
+
+/** Rollout tail scanned for the latest task markers when listing sessions. */
+const BUSY_TAIL_BYTES = 512 * 1024;
 
 function rolloutBusy(busy: BusyState | undefined): boolean {
   if (!busy || !busy.sawStart) return false;
@@ -405,6 +417,7 @@ export class CodexAdapter implements SessionAdapter {
   private messageCache = new Map<string, CachedMessages>();
   private rolloutCache = new Map<string, { path: string; compressed: boolean }>();
   private settingsCache = new Map<string, { mtimeMs: number; size: number; settings: ThreadSettings | null }>();
+  private busyTail = new Map<string, { size: number; mtimeMs: number; busy: boolean }>();
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
@@ -450,19 +463,76 @@ export class CodexAdapter implements SessionAdapter {
 
   sessions(): SessionSummary[] {
     const ipc = existsSync(IPC_SOCKET);
-    return this.threads().map((thread) => ({
-      sessionId: `${this.key}:${thread.id}`,
-      appId: this.key,
-      projectId: this.projectIdFor(thread.cwd),
-      kind: "codex-thread",
-      title: (thread.title || "未命名线程").slice(0, 120),
-      createdAt: thread.created_at_ms ?? 0,
-      updatedAt: thread.updated_at_ms ?? 0,
-      archived: (thread.archived ?? 0) !== 0,
-      live: false,
-      canSend: ipc,
-      sendBlockedReason: ipc ? undefined : "Codex 桌面未运行（未找到本地 IPC 通道）",
-    }));
+    const now = Date.now();
+    return this.threads().map((thread) => {
+      // Only threads touched recently can be mid-turn; older rollouts are not worth the read.
+      const recent = now - (thread.updated_at_ms ?? 0) < BUSY_MAX_AGE_MS;
+      return {
+        sessionId: `${this.key}:${thread.id}`,
+        appId: this.key,
+        projectId: this.projectIdFor(thread.cwd),
+        kind: "codex-thread",
+        title: (thread.title || "未命名线程").slice(0, 120),
+        createdAt: thread.created_at_ms ?? 0,
+        updatedAt: thread.updated_at_ms ?? 0,
+        archived: (thread.archived ?? 0) !== 0,
+        live: false,
+        ...(recent && this.threadBusy(thread) ? { busy: true } : {}),
+        canSend: ipc,
+        sendBlockedReason: ipc ? undefined : "Codex 桌面未运行（未找到本地 IPC 通道）",
+      };
+    });
+  }
+
+  /** The thread DB carries no run state, so the rollout tail supplies the latest task markers. */
+  private threadBusy(thread: ThreadRow): boolean {
+    const file = this.rolloutFor(thread);
+    if (!file) return false;
+    let stat;
+    try {
+      stat = statSync(file.path);
+    } catch {
+      return false;
+    }
+    const cached = this.busyTail.get(file.path);
+    if (cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs) return cached.busy;
+    let busy = false;
+    if (!file.compressed && stat.size > 0) {
+      let fd: number | undefined;
+      try {
+        const start = Math.max(0, stat.size - BUSY_TAIL_BYTES);
+        const length = stat.size - start;
+        const buffer = Buffer.alloc(length);
+        fd = openSync(file.path, "r");
+        readSync(fd, buffer, 0, length, start);
+        let text = buffer.toString("utf8");
+        if (start > 0) {
+          // The first line is cut mid-record; drop it.
+          const newline = text.indexOf("\n");
+          text = newline === -1 ? "" : text.slice(newline + 1);
+        }
+        const state: BusyState = { lastStart: 0, lastEnd: 0, sawStart: false };
+        for (const line of text.split("\n")) {
+          if (!line.includes("task_started") && !line.includes("task_complete") && !line.includes("turn_aborted")) {
+            continue;
+          }
+          let entry: RawLine;
+          try {
+            entry = JSON.parse(line) as RawLine;
+          } catch {
+            continue;
+          }
+          trackRolloutBusy(state, entry);
+        }
+        busy = rolloutBusy(state);
+      } catch {
+        busy = false;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+      }
+    }
+    this.busyTail.set(file.path, { size: stat.size, mtimeMs: stat.mtimeMs, busy });
+    return busy;
   }
 
   session(sessionId: string): SessionSummary | null {

@@ -358,7 +358,7 @@ function observeSessions(sessions: SessionSummary[]): void {
 async function watchSessions(): Promise<void> {
   if (!active || !snapshot) return;
   const now = Date.now();
-  if (now - watchedAt < 10_000) return;
+  if (now - watchedAt < 8_000) return;
   watchedAt = now;
   const apps = snapshot.apps;
   try {
@@ -373,6 +373,21 @@ async function watchSessions(): Promise<void> {
     observeSessions(sessions);
   } catch {
     // The connection layer already reports disconnects; the next tick retries.
+  }
+}
+
+let watchTimer: number | null = null;
+
+/** Every page watches completions, including while the tab is hidden or showing another route. */
+function startSessionWatch(): void {
+  if (watchTimer !== null) return;
+  watchTimer = window.setInterval(() => void watchSessions(), 10_000);
+}
+
+function stopSessionWatch(): void {
+  if (watchTimer !== null) {
+    clearInterval(watchTimer);
+    watchTimer = null;
   }
 }
 
@@ -438,6 +453,7 @@ function stopActive(): void {
     retryTimer = null;
   }
   stopPolling();
+  stopSessionWatch();
   active?.stop();
   active = null;
   connected = null;
@@ -677,6 +693,7 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
     history.replaceState(null, "", `${location.pathname}${location.search}#/clients`);
   }
   await renderRoute(soft);
+  startSessionWatch();
   progressDone();
   setReconnecting(null);
   void opened.connection.closed().then((info) => {
@@ -1197,6 +1214,9 @@ async function toggleNotifications(): Promise<void> {
     window.alert("通知已被浏览器禁止。请在浏览器的站点设置中允许通知，然后刷新页面。");
     return;
   }
+  // Read the switch before the prompt: a granted permission alone already makes
+  // notificationsOn() true, so negating it afterwards would save "0" and turn them off.
+  const wasOn = notificationsOn();
   if (Notification.permission !== "granted") {
     let result: NotificationPermission = "denied";
     try {
@@ -1206,7 +1226,7 @@ async function toggleNotifications(): Promise<void> {
     }
     if (result !== "granted") return;
   }
-  const next = !notificationsOn();
+  const next = !wasOn;
   try {
     localStorage.setItem(NOTIFY_KEY, next ? "1" : "0");
   } catch {
@@ -1926,8 +1946,6 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     stopPolling();
     pollTimer = window.setInterval(() => {
       if (token !== renderToken) return;
-      // Runs while the tab is hidden too: that is exactly when a completion notice matters.
-      void watchSessions();
       if (document.visibilityState !== "visible" || state.loading) return;
       void refreshTail(state);
     }, 5_000);

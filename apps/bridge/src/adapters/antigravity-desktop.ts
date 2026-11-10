@@ -449,6 +449,7 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
       updatedAt: summary?.updatedAt || Math.round(entry.mtimeMs),
       archived: false,
       live: summary?.running === true,
+      ...(summary?.running === true ? { busy: true } : {}),
       canSend: false,
       sendBlockedReason: "Antigravity 桌面版暂不支持从 Bridge 发送消息，请在 Antigravity 中继续对话",
     };
