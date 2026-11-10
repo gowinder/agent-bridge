@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
@@ -40,6 +40,9 @@ const PROJECTS_DIR = join(homedir(), ".claude", "projects");
 const LIVE_SESSIONS_DIR = join(homedir(), ".claude", "sessions");
 /** ps 的启动时间与元数据里的 startedAt 允许的误差，超出即视为 pid 被复用。 */
 const PID_REUSE_TOLERANCE_MS = 120_000;
+/** 请求桌面打开会话后，等待它的 CLI 进程与消息通道就绪的上限。 */
+const WAKE_WAIT_MS = 30_000;
+const WAKE_POLL_MS = 400;
 const MAX_BLOCK_CHARS = 4_000;
 
 interface DesktopSession {
@@ -198,17 +201,23 @@ function listSessionFiles(root: string): string[] {
 }
 
 const metaCache = new Map<string, { mtimeMs: number; session: DesktopSession | null }>();
-let rootCache: { root: string; checkedAt: number } | null = null;
+let rootsCache: { roots: string[]; checkedAt: number } | null = null;
 
 export class ClaudeCodeAdapter implements SessionAdapter {
   readonly key = "claude-code";
-  private processCache: { at: number; bySession: Map<string, number>; error: string | null } | null = null;
+  private processCache: {
+    at: number;
+    bySession: Map<string, number>;
+    /** session/host id → the CLI reports it is running a turn. */
+    busy: Set<string>;
+    error: string | null;
+  } | null = null;
   private transcriptPathCache = new Map<string, { path: string | null; checkedAt: number }>();
   private messageCache = new Map<string, CachedMessages>();
   private sendQueue: Promise<unknown> = Promise.resolve();
 
   app(): AppInfo {
-    const root = this.activeRoot();
+    const hasRoot = this.roots().length > 0;
     const processError = this.scanProcesses().error;
     return {
       appId: this.key,
@@ -216,17 +225,17 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       kind: "claude-code",
       name: "Claude Desktop · Code",
       mode: "local-store",
-      status: root ? "ready" : "unavailable",
+      status: hasRoot ? "ready" : "unavailable",
       capabilities: {
-        enumerate: root ? "partial" : "unavailable",
-        read: root ? "partial" : "unavailable",
-        send: root !== null && processError === null,
+        enumerate: hasRoot ? "partial" : "unavailable",
+        read: hasRoot ? "partial" : "unavailable",
+        send: hasRoot && processError === null,
         sendDetail: processError
           ? `${processError}；请在终端中直接启动 Bridge，不要在受限沙箱里运行，否则无法判断哪些会话正在桌面中运行。`
-          : "发送走运行中会话进程的本地 UDS 通道；仅对已在桌面打开的 Code 会话生效，回复需从 transcript 刷新。",
+          : "发送走运行中会话进程的本地 UDS 通道；会话未运行时先请求桌面用深链打开它，等进程就绪后再投递。",
         create: false,
         createDetail: "桌面 Code 会话由 Claude Desktop 创建，Bridge 只能读取并驱动已存在的会话。",
-        reason: root ? undefined : "未找到 Claude Desktop 的会话元数据目录",
+        reason: hasRoot ? undefined : "未找到 Claude Desktop 的会话元数据目录",
       },
     };
   }
@@ -258,7 +267,13 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const sessionId = `${this.key}:${session.localId}`;
       const pid = this.livePid(session, bySession);
       const live = pid !== undefined;
-      const canSend = live && this.socketFor(pid) !== null;
+      const busy =
+        scan.busy.has(session.localId) ||
+        (session.cliSessionId !== "" && scan.busy.has(session.cliSessionId));
+      // 未运行的会话可以让桌面用深链打开（会现场拉起 CLI 进程），
+      // 所以只按「能否唤醒」判断可发送，不再要求进程已经在跑。
+      const canWake = !session.archived && session.cliSessionId !== "" && scan.error === null;
+      const canSend = live ? this.socketFor(pid) !== null : canWake;
       out.push({
         sessionId,
         appId: this.key,
@@ -269,13 +284,18 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         updatedAt: session.updatedAt,
         archived: session.archived,
         live,
+        ...(busy ? { busy: true } : {}),
         canSend,
         sendBlockedReason: canSend
           ? undefined
           : scan.error ??
             (live
               ? "该会话进程没有可用的本地消息通道"
-              : "该会话未在桌面中打开；先在桌面打开后才能发送"),
+              : session.archived
+                ? "会话已归档；先在桌面取消归档后再发送"
+                : session.cliSessionId
+                  ? "桌面上没有可用的会话进程，暂时无法唤醒"
+                  : "该会话没有关联 CLI transcript，无法在桌面恢复"),
       });
     }
     return out.sort((a, b) => b.updatedAt - a.updatedAt);
@@ -573,9 +593,21 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       }
       const scan = this.scanProcesses();
       if (scan.error) throw new RpcError("adapter_unavailable", scan.error);
-      const match = this.liveMatch(record, scan.bySession);
+      let match = this.liveMatch(record, scan.bySession);
       if (!match) {
-        throw new RpcError("adapter_unavailable", "该会话未在桌面中打开；先在桌面打开后再发送");
+        if (record.archived) {
+          throw new RpcError("adapter_unavailable", "会话已归档；先在桌面取消归档后再发送");
+        }
+        if (!record.cliSessionId) {
+          throw new RpcError("adapter_unavailable", "该会话没有关联 CLI transcript，无法在桌面恢复");
+        }
+        match = await this.wakeDesktopSession(record);
+        if (!match) {
+          throw new RpcError(
+            "adapter_unavailable",
+            "已请求 Claude 桌面打开该会话，但会话进程仍未就绪；请确认桌面正在运行后重试",
+          );
+        }
       }
       const target = this.socketFor(match.pid);
       if (!target) throw new RpcError("adapter_unavailable", "该会话进程没有可用的消息通道");
@@ -598,46 +630,39 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
 
-  private activeRoot(): string | null {
+  private roots(): string[] {
     const now = Date.now();
-    if (rootCache && now - rootCache.checkedAt < 30_000) return rootCache.root || null;
-    let best: { root: string; newest: number } | null = null;
-    for (const root of SESSION_ROOTS) {
-      let newest = 0;
-      for (const file of listSessionFiles(root)) {
-        try {
-          newest = Math.max(newest, statSync(file).mtimeMs);
-        } catch {
-          // file vanished
-        }
-      }
-      if (newest > 0 && (!best || newest > best.newest)) best = { root, newest };
-    }
-    rootCache = { root: best?.root ?? "", checkedAt: now };
-    return best?.root ?? null;
+    if (rootsCache && now - rootsCache.checkedAt < 30_000) return rootsCache.roots;
+    const roots = SESSION_ROOTS.filter((root) => listSessionFiles(root).length > 0);
+    rootsCache = { roots, checkedAt: now };
+    return roots;
   }
 
   private records(): DesktopSession[] {
-    const root = this.activeRoot();
-    if (!root) return [];
-    const out: DesktopSession[] = [];
-    for (const file of listSessionFiles(root)) {
-      let mtimeMs = 0;
-      try {
-        mtimeMs = statSync(file).mtimeMs;
-      } catch {
-        continue;
+    // 桌面有几个数据目录（Claude / Claude-3p）会同时写入，只读其中一个会漏掉会话。
+    const byId = new Map<string, DesktopSession>();
+    for (const root of this.roots()) {
+      for (const file of listSessionFiles(root)) {
+        let mtimeMs = 0;
+        try {
+          mtimeMs = statSync(file).mtimeMs;
+        } catch {
+          continue;
+        }
+        const cached = metaCache.get(file);
+        let session: DesktopSession | null;
+        if (cached && cached.mtimeMs === mtimeMs) {
+          session = cached.session;
+        } else {
+          session = this.parseMeta(file);
+          metaCache.set(file, { mtimeMs, session });
+        }
+        if (!session) continue;
+        const existing = byId.get(session.localId);
+        if (!existing || session.updatedAt > existing.updatedAt) byId.set(session.localId, session);
       }
-      const cached = metaCache.get(file);
-      if (cached && cached.mtimeMs === mtimeMs) {
-        if (cached.session) out.push(cached.session);
-        continue;
-      }
-      const session = this.parseMeta(file);
-      metaCache.set(file, { mtimeMs, session });
-      if (session) out.push(session);
     }
-    return out;
+    return [...byId.values()];
   }
 
   private parseMeta(path: string): DesktopSession | null {
@@ -679,11 +704,16 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return this.records().find((item) => item.localId === localId) ?? null;
   }
 
-  private scanProcesses(): { bySession: Map<string, number>; error: string | null } {
+  private scanProcesses(maxAgeMs = 2_000): {
+    bySession: Map<string, number>;
+    busy: Set<string>;
+    error: string | null;
+  } {
     const now = Date.now();
-    if (this.processCache && now - this.processCache.at < 2_000) return this.processCache;
+    if (this.processCache && now - this.processCache.at < maxAgeMs) return this.processCache;
     const bySession = new Map<string, number>();
     const starts = new Map<number, number>();
+    const busy = new Set<string>();
     let error: string | null = null;
     try {
       // execFileSync via promisify would be async; use a synchronous spawn to keep the
@@ -718,8 +748,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         ? "无法枚举本机进程（ps 被拒绝），不能定位运行中的会话"
         : `无法枚举本机进程：${message}`;
     }
-    this.mergeDesktopSessions(bySession, starts);
-    this.processCache = { at: now, bySession, error };
+    this.mergeDesktopSessions(bySession, starts, busy);
+    this.processCache = { at: now, bySession, busy, error };
     return this.processCache;
   }
 
@@ -727,7 +757,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
    * 桌面新建对话时命令里不带 --resume，argv 无法定位会话；用 ~/.claude/sessions/<pid>.json
    * 补上 sessionId / hostSessionId。用进程启动时间排除 pid 复用，避免把消息发给别的会话。
    */
-  private mergeDesktopSessions(bySession: Map<string, number>, starts: Map<number, number>): void {
+  private mergeDesktopSessions(
+    bySession: Map<string, number>,
+    starts: Map<number, number>,
+    busy: Set<string>,
+  ): void {
     let names: string[];
     try {
       names = readdirSync(LIVE_SESSIONS_DIR);
@@ -749,6 +783,12 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const startedAt = asNumber(raw["startedAt"]);
       if (startedAt && Math.abs(actual - startedAt) > PID_REUSE_TOLERANCE_MS) continue;
       const hasSocket = this.socketFor(pid) !== null;
+      // <pid>.json 里的 status 由 CLI 自己维护（idle / busy），比解析 transcript 便宜且实时。
+      if (raw["status"] === "busy") {
+        for (const id of [asString(raw["sessionId"]), asString(raw["hostSessionId"])]) {
+          if (id) busy.add(id);
+        }
+      }
       for (const id of [asString(raw["sessionId"]), asString(raw["hostSessionId"])]) {
         if (!id) continue;
         if (!bySession.has(id) || hasSocket) bySession.set(id, pid);
@@ -758,6 +798,31 @@ export class ClaudeCodeAdapter implements SessionAdapter {
 
   private livePid(record: DesktopSession, bySession: Map<string, number>): number | undefined {
     return this.liveMatch(record, bySession)?.pid;
+  }
+
+  /**
+   * 让桌面用官方深链打开这个会话，桌面会按需拉起它的 CLI 进程；
+   * 等待进程与 UDS 通道都出现后再返回，超时则返回 undefined。
+   */
+  private async wakeDesktopSession(
+    record: DesktopSession,
+  ): Promise<{ pid: number; id: string } | undefined> {
+    this.openDesktopSession(record.localId);
+    const deadline = Date.now() + WAKE_WAIT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, WAKE_POLL_MS));
+      const match = this.liveMatch(record, this.scanProcesses(0).bySession);
+      if (match && this.socketFor(match.pid)) return match;
+    }
+    return undefined;
+  }
+
+  private openDesktopSession(localId: string): void {
+    const url = `claude://code/continue?session=${encodeURIComponent(localId)}`;
+    const command = process.platform === "darwin" ? "open" : process.platform === "win32" ? "cmd" : "xdg-open";
+    const args =
+      process.platform === "win32" ? ["/c", "start", "", url] : [url];
+    execFile(command, args, { timeout: 10_000 }, () => undefined);
   }
 
   private liveMatch(

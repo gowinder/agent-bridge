@@ -39,6 +39,7 @@ const RELAY_ERRORS: Record<string, string> = {
   channel_in_use: "连接通道已被占用，请稍后重试。",
   invalid_credential: "凭据无效，请重新配对。",
   not_found: "找不到该房间，请重新配对。",
+  rate_limited: "请求太频繁，稍等片刻再试。",
 };
 
 function messageOf(error: unknown): string {
@@ -666,16 +667,21 @@ function writeComposerCollapsed(collapsed: boolean): void {
 }
 
 async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot && !force) return snapshot;
-  const [apps, projects, sessions] = await Promise.all([
-    call<AppListResult>("app.list"),
+  const apps = await call<AppListResult>("app.list");
+  // 按客户端分别取会话：共用一个 500 条上限时，会话多的客户端会把另一个客户端的
+  // 工程挤掉，表现为「新建的会话刷新不出来」。
+  const [projects, ...sessionPages] = await Promise.all([
     call<ProjectListResult>("project.list"),
-    call<SessionListResult>("session.list", { limit: 500 }),
+    ...apps.apps.map((app) =>
+      call<SessionListResult>("session.list", { appId: app.appId, limit: 500 }),
+    ),
   ]);
+  const notes = sessionPages.flatMap((page) => (page.note ? [page.note] : []));
   snapshot = {
     apps: apps.apps,
     projects: projects.projects,
-    sessions: sessions.sessions,
-    ...(sessions.note ? { note: sessions.note } : {}),
+    sessions: sessionPages.flatMap((page) => page.sessions),
+    ...(notes.length > 0 ? { note: notes.join("；") } : {}),
   };
   return snapshot;
 }
@@ -851,6 +857,10 @@ function recentSessionsButton(): HTMLElement | null {
     for (const item of items.slice(0, 12)) {
       const app = snapshot?.apps.find((candidate) => candidate.appId === item.appId);
       const meta = [app ? shortAgentName(app) : item.appId, recentProjectName(item.projectId), recentTime(item.at)];
+      // 最近访问只存了标题等静态信息，执行状态要回到当前快照里查。
+      const running = snapshot?.sessions.some(
+        (session) => session.sessionId === item.sessionId && session.busy === true,
+      ) === true;
       const entry = button(
         "",
         () => {
@@ -866,7 +876,10 @@ function recentSessionsButton(): HTMLElement | null {
       );
       entry.setAttribute("role", "menuitem");
       entry.append(
-        el("span", { className: "recent-menu-name", text: item.title }),
+        el("span", { className: "recent-menu-name" }, [
+          ...(running ? [el("span", { className: "spinner recent-spinner" })] : []),
+          el("span", { className: "recent-menu-text", text: item.title }),
+        ]),
         el("span", { className: "recent-menu-meta", text: meta.join(" · ") }),
       );
       menu.append(entry);
@@ -1031,6 +1044,47 @@ async function renderRoute(soft = false): Promise<void> {
   else if (route.level === "devices") renderDevices();
   else if (route.taskId) await renderTask({ ...route, taskId: route.taskId }, token);
   else await renderChat(route, token);
+  if (route.level === "clients" || route.level === "projects" || route.level === "sessions") {
+    startSnapshotPolling(token);
+  }
+}
+
+/**
+ * 列表页只加载一次快照的话，桌面上新建的会话要整页重载才看得到；这里按固定间隔重新拉取，
+ * 内容有变化才重绘，避免打断正在看列表的人。
+ */
+function startSnapshotPolling(token: number): void {
+  stopPolling();
+  pollTimer = window.setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    void refreshSnapshot(token);
+  }, 5_000);
+}
+
+function snapshotSignature(): string {
+  if (!snapshot) return "";
+  return [
+    snapshot.apps.length,
+    snapshot.projects.length,
+    ...snapshot.sessions.map(
+      (session) =>
+        `${session.sessionId}:${session.updatedAt}:${session.live ? 1 : 0}:${session.busy ? 1 : 0}`,
+    ),
+  ].join("|");
+}
+
+async function refreshSnapshot(token: number): Promise<void> {
+  const before = snapshotSignature();
+  try {
+    await ensureSnapshot(true);
+  } catch {
+    return;
+  }
+  // 拉取期间可能已经打开会话或切到别的页：那次渲染有自己的 renderToken，
+  // 这里再 renderRoute() 会把正在编辑的输入区整个重建掉。
+  if (token !== renderToken) return;
+  if (snapshotSignature() === before) return;
+  void renderRoute();
 }
 
 function viewHead(eyebrow: string, title: string, meta: string, extra?: HTMLElement): HTMLElement {
@@ -1146,16 +1200,30 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(el("li", {}, [emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。")]));
   }
   for (const session of sessions) {
+    const busy = session.busy === true;
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
-      el("span", { className: `mark ${session.live ? "live" : ""}`, text: session.kind === "codex-thread" ? "CX" : "CC" }),
+      el(
+        "span",
+        { className: `mark ${busy ? "busy" : session.live ? "live" : ""}` },
+        busy
+          ? [el("span", { className: "spinner mark-spinner" })]
+          : [document.createTextNode(session.kind === "codex-thread" ? "CX" : "CC")],
+      ),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title", text: session.title }),
         el("span", {
           className: "meta",
-          text: `${timeLabel(session.updatedAt)} · ${session.canSend ? (session.live ? "桌面运行中，可发送" : sendStateLabel(session)) : (session.sendBlockedReason ?? "只读")}`,
+          text: busy
+            ? `${timeLabel(session.updatedAt)} · 正在执行`
+            : `${timeLabel(session.updatedAt)} · ${session.canSend ? (session.live ? "桌面运行中，可发送" : sendStateLabel(session)) : (session.sendBlockedReason ?? "只读")}`,
         }),
       ]),
-      el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
+      busy
+        ? el("span", { className: "pill busy" }, [
+            el("span", { className: "spinner" }),
+            document.createTextNode("执行中"),
+          ])
+        : el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
       icon("chevron", "icon chev"),
     ]);
     row.addEventListener("click", () =>
@@ -1185,6 +1253,14 @@ function renderSessions(route: Route & { level: "sessions" }): void {
               }),
             ]
           : []),
+        button(
+          "刷新",
+          () => {
+            snapshot = null;
+            void renderRoute();
+          },
+          "btn ghost small",
+        ),
       ]),
       ...(data.note ? [el("p", { className: "hint", text: data.note })] : []),
       list,
@@ -1257,7 +1333,7 @@ function statusLabel(status: AppInfo["status"]): string {
 function sendStateLabel(session: SessionSummary): string {
   if (session.live) return "桌面运行中";
   if (!session.canSend) return "只读";
-  return session.kind === "codex-thread" ? "需桌面打开" : "可发送";
+  return "可发送";
 }
 
 function timeLabel(timestamp: number): string {
@@ -1374,7 +1450,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const submit = (): void => {
     if (sendButton.disabled) return;
-    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState);
+    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
   };
   const sendButton = button("发送", submit, "btn primary");
   sendButton.disabled = !canSend;
@@ -1589,7 +1665,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     el("div", { className: "view-head-main" }, [
       el("p", { className: "eyebrow", text: `${data.apps.find((item) => item.appId === route.appId)?.name ?? "客户端"} · ${project?.name ?? "工程"}` }),
       el("h1", { className: "display chat-title", text: summary.title }),
-      el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
+      el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
     ]),
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
@@ -2326,6 +2402,7 @@ async function sendMessage(
   pending: PendingAttachment[],
   renderAttachments: () => void,
   updateSendState: () => void,
+  onSent: () => void,
 ): Promise<void> {
   if (pending.some((item) => item.status === "uploading")) {
     status.textContent = "附件还在上传，请稍候";
@@ -2338,13 +2415,13 @@ async function sendMessage(
   if (!text && attachments.length === 0) return;
   sendButton.disabled = true;
   status.classList.remove("error");
-  status.textContent = "正在发送…";
+  status.textContent = state.session.live ? "正在发送…" : "正在请求桌面打开该会话…";
   try {
     const result = await call<MessageSendResult>("message.send", {
       sessionId: state.session.sessionId,
       text,
       ...(attachments.length > 0 ? { attachments } : {}),
-    });
+    }, 60_000);
     input.value = "";
     saveDraft(state.session.sessionId, "");
     pending.length = 0;
@@ -2368,6 +2445,8 @@ async function sendMessage(
       : result.accepted
         ? (result.detail ?? "已提交，等待桌面执行")
         : (result.detail ?? "未确认投递");
+    // 发送落地后收起输入区，把空间让给对话；需要时点「写消息…」再展开。
+    if (result.accepted) onSent();
     window.setTimeout(() => {
       void refreshTail(state).then((page) => {
         if (page?.nextBefore) loadOlder.disabled = false;

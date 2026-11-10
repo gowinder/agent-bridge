@@ -252,7 +252,16 @@ func relativeTime(_ millis: Double?) -> String {
     return "\(Int(seconds / 86_400)) 天前"
 }
 
+// AppKit 的 UI 只能在主线程碰：`Task { }` 在 await 之后会跑到协作后台线程上，
+// 之前在后台线程 new NSAlert 会直接抛 NSException（NSWindow 非主线程初始化）→ SIGABRT。
+// 整类标 @MainActor，让所有 Task 继承主 actor 隔离。
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    // 顶层代码创建 delegate 时不在主 actor 上下文里，初始化本身不碰 UI，所以放行。
+    nonisolated override init() {
+        super.init()
+    }
+
     private let client = AdminClient()
     private var statusItem: NSStatusItem!
     private var timer: Timer?
@@ -579,17 +588,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         bridgeProcess = process
-        bridgeStartedAt = Date()
+        let startedAt = Date()
+        bridgeStartedAt = startedAt
         // A serve process that dies right away means it refused to start; surface why.
         DispatchQueue.global().async { [weak self] in
             process.waitUntilExit()
-            let exitedFast = Date().timeIntervalSince(self?.bridgeStartedAt ?? .distantPast) < 5
+            let exitedFast = Date().timeIntervalSince(startedAt) < 5
             guard exitedFast, process.terminationStatus != 0 else { return }
             let tail = (try? String(contentsOf: logPath, encoding: .utf8))?
                 .split(separator: "\n").suffix(6).joined(separator: "\n") ?? ""
-            DispatchQueue.main.async {
+            let code = process.terminationStatus
+            Task { @MainActor in
                 self?.bridgeProcess = nil
-                self?.alert("Bridge 启动失败", tail.isEmpty ? "进程已退出（代码 \(process.terminationStatus)）" : tail)
+                self?.alert("Bridge 启动失败", tail.isEmpty ? "进程已退出（代码 \(code)）" : tail)
             }
         }
         Task {

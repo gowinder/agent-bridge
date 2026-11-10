@@ -277,6 +277,8 @@ export interface SessionSummary {
   archived: boolean;
   /** Desktop currently holds a live process / open view for this session. */
   live: boolean;
+  /** The session process is actively running a turn right now. */
+  busy?: boolean;
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;

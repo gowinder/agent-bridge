@@ -1,5 +1,6 @@
 import type { DeviceListResponse, InviteResponse } from "@agent-bridge/protocol";
 import type { Env } from "./env.js";
+import { clientIp, rateLimit } from "./rate-limit.js";
 import { Room } from "./room.js";
 
 export { Room };
@@ -67,6 +68,16 @@ function withCors(response: Response, request: Request, env: Env): Response {
 }
 
 const ROOM_ID = /^[a-z0-9-]{8,64}$/;
+/** 同一 IP 每分钟能发起的 WebSocket 连接（含浏览器重连与 bridge 重连）。 */
+const WS_LIMIT_PER_MIN = 40;
+/** 同一 IP 每分钟能调用的房间 REST 接口。 */
+const API_LIMIT_PER_MIN = 120;
+
+function tooMany(retryAfter: number, origin: string | undefined): Response {
+  const response = fail("rate_limited", "too many requests", 429, origin);
+  response.headers.set("retry-after", String(Math.max(retryAfter, 1)));
+  return response;
+}
 
 async function forward(
   env: Env,
@@ -107,6 +118,8 @@ export default {
       if (request.headers.get("origin") !== null && allowedOrigin(request, env) === null) {
         return fail("unauthorized", "origin not allowed", 403);
       }
+      const wsLimit = rateLimit(`ws:${clientIp(request)}`, WS_LIMIT_PER_MIN, 60_000);
+      if (!wsLimit.ok) return tooMany(wsLimit.retryAfter, request.headers.get("origin") ?? undefined);
       const roomId = url.searchParams.get("room") ?? "";
       if (!ROOM_ID.test(roomId)) return fail("bad_request", "bad room", 400);
       const target = new URL(request.url);
@@ -121,6 +134,9 @@ export default {
     if (!roomMatch) return fail("not_found", "unknown route", 404);
     const roomId = roomMatch[1]!;
     const rest = roomMatch[2]!;
+
+    const apiLimit = rateLimit(`api:${clientIp(request)}`, API_LIMIT_PER_MIN, 60_000);
+    if (!apiLimit.ok) return tooMany(apiLimit.retryAfter, request.headers.get("origin") ?? undefined);
 
     if (rest === "/invites" && request.method === "POST") {
       const response = await forward(env, roomId, request, "/invites");
