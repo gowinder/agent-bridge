@@ -38,7 +38,12 @@ const TOUCH_INTERVAL_MS = 60_000;
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
   });
 }
 
@@ -227,11 +232,17 @@ export class Room {
       if (!body.tokenHash || !/^[0-9a-f]{64}$/.test(body.tokenHash)) {
         return errorResponse("bad_request", "bad tokenHash", 400);
       }
+      if (body.ttlSeconds !== undefined && (!Number.isFinite(body.ttlSeconds) || body.ttlSeconds <= 0)) {
+        return errorResponse("bad_request", "bad ttlSeconds", 400);
+      }
       const ttl = Math.min(
         Math.max(Math.trunc(body.ttlSeconds ?? INVITE_TTL_SECONDS), 30),
         MAX_INVITE_TTL_SECONDS,
       );
       const now = Date.now();
+      // Rows are never read again once expired; sweep them here so a room that keeps
+      // minting invites does not grow storage without bound.
+      this.ctx.storage.sql.exec("DELETE FROM invites WHERE expires_at <= ?", now);
       this.ctx.storage.sql.exec(
         "INSERT INTO invites (id, hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
         body.inviteId,

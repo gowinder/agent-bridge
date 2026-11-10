@@ -54,18 +54,22 @@ unsafe fn slice<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
     }
 }
 
-fn params(id: u32) -> snow::params::NoiseParams {
-    match id {
-        0 => "Noise_XXpsk3_25519_ChaChaPoly_SHA256".parse().unwrap(),
-        1 => "Noise_IK_25519_ChaChaPoly_SHA256".parse().unwrap(),
-        _ => "Noise_NN_25519_ChaChaPoly_SHA256".parse().unwrap(),
-    }
+/// Pattern ids are part of the ABI. An unknown id must fail instead of silently
+/// falling back to another pattern, which would change the handshake's guarantees.
+fn params(id: u32) -> Option<snow::params::NoiseParams> {
+    let name = match id {
+        0 => "Noise_XXpsk3_25519_ChaChaPoly_SHA256",
+        1 => "Noise_IK_25519_ChaChaPoly_SHA256",
+        _ => return None,
+    };
+    name.parse().ok()
 }
 
 /// Generate a static X25519 keypair. Returns private(32) then public(32) at out_priv/out_pub.
 #[no_mangle]
 pub extern "C" fn gen_keypair(out_priv: *mut u8, out_pub: *mut u8) -> i32 {
-    match Builder::new(params(1)).generate_keypair() {
+    let Some(p) = params(1) else { return -1 };
+    match Builder::new(p).generate_keypair() {
         Ok(kp) => {
             unsafe {
                 std::ptr::copy_nonoverlapping(kp.private.as_ptr(), out_priv, 32);
@@ -95,6 +99,7 @@ where
 }
 
 /// Create a handshake. local_priv may be null for a fresh keypair (XX).
+/// Callers must pass exactly 32 bytes for each key; the ABI has no key lengths.
 #[no_mangle]
 pub extern "C" fn hs_new(
     pattern: u32,
@@ -105,25 +110,23 @@ pub extern "C" fn hs_new(
     prologue: *const u8,
     prologue_len: usize,
 ) -> i32 {
-    let result = std::panic::catch_unwind(|| {
-        let mut b = Builder::new(params(pattern));
-        if pattern == 0 && !psk.is_null() {
-            b = b.psk(3, unsafe { slice(psk, 32) });
-        }
-        if !local_priv.is_null() {
-            b = b.local_private_key(unsafe { slice(local_priv, 32) });
-        }
-        if !remote_pub.is_null() {
-            b = b.remote_public_key(unsafe { slice(remote_pub, 32) });
-        }
-        if !prologue.is_null() {
-            b = b.prologue(unsafe { slice(prologue, prologue_len) });
-        }
-        let hs = if initiator != 0 { b.build_initiator() } else { b.build_responder() };
-        hs.map_err(|_| ())
-    });
-    match result {
-        Ok(Ok(hs)) => {
+    let Some(p) = params(pattern) else { return -1 };
+    let mut b = Builder::new(p);
+    if pattern == 0 && !psk.is_null() {
+        b = b.psk(3, unsafe { slice(psk, 32) });
+    }
+    if !local_priv.is_null() {
+        b = b.local_private_key(unsafe { slice(local_priv, 32) });
+    }
+    if !remote_pub.is_null() {
+        b = b.remote_public_key(unsafe { slice(remote_pub, 32) });
+    }
+    if !prologue.is_null() {
+        b = b.prologue(unsafe { slice(prologue, prologue_len) });
+    }
+    let hs = if initiator != 0 { b.build_initiator() } else { b.build_responder() };
+    match hs {
+        Ok(hs) => {
             let id = NEXT.with(|n| {
                 let mut n = n.borrow_mut();
                 let id = *n;
@@ -133,7 +136,7 @@ pub extern "C" fn hs_new(
             REG.with(|r| r.borrow_mut().insert(id, Conn::Hs(hs)));
             id as i32
         }
-        _ => -1,
+        Err(_) => -1,
     }
 }
 

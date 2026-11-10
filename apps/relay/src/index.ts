@@ -9,6 +9,8 @@ function json(data: unknown, status = 200, origin?: string): Response {
   const headers = new Headers({
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
   });
   if (origin) {
     headers.set("access-control-allow-origin", origin);
