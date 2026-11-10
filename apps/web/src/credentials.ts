@@ -276,10 +276,13 @@ if (typeof window !== "undefined") {
  * slate, which costs a fresh pairing. Metadata goes too, otherwise a device row would
  * point at secrets nobody can read.
  */
-export function resetCredentials(): void {
-  localStorage.removeItem(STORAGE_KEY);
-  localStorage.removeItem(LEGACY_KEY);
-  lock();
+export function resetCredentials(): Promise<void> {
+  // 与写入共用同一把锁：在途的保存先落盘，重置随后删除，不会反过来复活旧凭据。
+  return withVaultLock(async () => {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_KEY);
+    lock();
+  });
 }
 
 /** Web Locks 让同源的多个标签页排队写存储，避免读-改-写互相覆盖。 */

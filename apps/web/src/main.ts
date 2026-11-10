@@ -743,7 +743,7 @@ async function ensureVault(): Promise<void> {
     // 密码不可找回，唯一出路是清空本机凭据后重新配对，所以给一个显式出口。
     forgot: async () => {
       if (!window.confirm("清除本机保存的所有设备凭据？之后需要重新配对。")) return false;
-      resetCredentials();
+      await resetCredentials();
       return true;
     },
   });
