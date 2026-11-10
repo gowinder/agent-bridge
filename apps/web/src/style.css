@@ -843,6 +843,25 @@ a.crumb:hover {
   color: var(--ok);
 }
 
+.mark.busy {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+}
+
+.mark .mark-spinner {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  border-top-color: var(--accent);
+}
+
+.pill.busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+}
+
 .row:hover:not(:disabled) .mark {
   background: var(--accent-soft);
   color: var(--accent);

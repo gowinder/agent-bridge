@@ -29,6 +29,10 @@ const MAX_FRAME_BYTES = 64 * 1024;
 const HELLO_TIMEOUT_MS = 5_000;
 /** 认领房间所需的 bridge 凭据最小长度，避免用可猜的短串占号。 */
 const MIN_BRIDGE_TOKEN_CHARS = 16;
+/** 无人认领或长期没有 bridge 连入的房间，保留这么久后清空存储。 */
+const IDLE_ROOM_MS = 30 * 24 * 3600 * 1000;
+/** last_seen 的落盘节流：每个房间最多每分钟写一次。 */
+const TOUCH_INTERVAL_MS = 60_000;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -87,52 +91,87 @@ function bearer(request: Request): string | null {
 export class Room {
   protected readonly ctx: DurableObjectState;
   protected readonly env: Env;
-  private readonly sql: SqlStorage;
+  private schemaReady = false;
+  private lastTouchAt = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.ctx = ctx;
     this.env = env;
-    this.sql = ctx.storage.sql;
     ctx.setWebSocketAutoResponse(
       new WebSocketRequestResponsePair(RELAY_PING, RELAY_PONG),
     );
-    ctx.blockConcurrencyWhile(async () => {
-      this.sql.exec(`CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)`);
-      this.sql.exec(
-        `CREATE TABLE IF NOT EXISTS invites (
-           id TEXT PRIMARY KEY,
-           hash TEXT NOT NULL,
-           created_at INTEGER NOT NULL,
-           expires_at INTEGER NOT NULL,
-           used_at INTEGER
-         )`,
-      );
-      this.sql.exec(
-        `CREATE TABLE IF NOT EXISTS devices (
-           id TEXT PRIMARY KEY,
-           name TEXT NOT NULL,
-           public_key TEXT NOT NULL,
-           token_hash TEXT NOT NULL,
-           created_at INTEGER NOT NULL,
-           expires_at INTEGER,
-           revoked_at INTEGER,
-           last_seen_at INTEGER
-         )`,
-      );
-    });
+    // 架构表不能放在构造函数里：任何人拿一个房间号连上来都会实例化这个 DO，
+    // 那样等于让陌生人给存储计费。等到房间真的被认领、要写邀请/设备时再建表。
   }
 
-  private meta(key: string): string | null {
-    const row = this.sql.exec("SELECT value FROM meta WHERE key = ?", key).toArray()[0];
-    return row ? String(row["value"]) : null;
-  }
-
-  private setMeta(key: string, value: string): void {
-    this.sql.exec(
-      "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      key,
-      value,
+  private ensureSchema(): void {
+    if (this.schemaReady) return;
+    const sql = this.ctx.storage.sql;
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS invites (
+         id TEXT PRIMARY KEY,
+         hash TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER NOT NULL,
+         used_at INTEGER
+       )`,
     );
+    sql.exec(
+      `CREATE TABLE IF NOT EXISTS devices (
+         id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         public_key TEXT NOT NULL,
+         token_hash TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         expires_at INTEGER,
+         revoked_at INTEGER,
+         last_seen_at INTEGER
+       )`,
+    );
+    this.schemaReady = true;
+  }
+
+  private async meta(key: string): Promise<string | null> {
+    const value = await this.ctx.storage.get<string>(key);
+    if (value) return value;
+    // 旧版本把认领信息存在 SQL 的 meta 表里；读不到 KV 时回退到旧表，避免升级后房间被当成未认领。
+    try {
+      const row = this.ctx.storage.sql
+        .exec("SELECT value FROM meta WHERE key = ?", key)
+        .toArray()[0];
+      return row ? String(row["value"]) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async setMeta(key: string, value: string): Promise<void> {
+    await this.ctx.storage.put(key, value);
+  }
+
+  /** 记录房间还在被使用，并把空闲回收的闹钟推到最近。 */
+  private async touch(): Promise<void> {
+    const now = Date.now();
+    if (now - this.lastTouchAt < TOUCH_INTERVAL_MS) return;
+    this.lastTouchAt = now;
+    await this.ctx.storage.put("last_seen", now);
+    const alarm = await this.ctx.storage.getAlarm();
+    if (alarm === null || alarm < now + IDLE_ROOM_MS - TOUCH_INTERVAL_MS) {
+      await this.ctx.storage.setAlarm(now + IDLE_ROOM_MS);
+    }
+  }
+
+  async alarm(): Promise<void> {
+    const lastSeen = (await this.ctx.storage.get<number>("last_seen")) ?? 0;
+    const sockets = this.ctx.getWebSockets().length;
+    if (sockets > 0 || Date.now() - lastSeen < IDLE_ROOM_MS) {
+      await this.ctx.storage.setAlarm(Math.max(lastSeen, Date.now()) + IDLE_ROOM_MS);
+      return;
+    }
+    // 没有连接也没有 bridge 用这份凭据登录过：整间清空，房间号回到可认领状态。
+    await this.ctx.storage.deleteAll();
+    this.schemaReady = false;
+    this.lastTouchAt = 0;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -146,6 +185,8 @@ export class Room {
     if (!(await this.authorizeBridge(request))) {
       return errorResponse("unauthorized", "bad bridge credential", 401);
     }
+    this.ensureSchema();
+    void this.touch();
 
     if (path === "/invites" && request.method === "POST") {
       const body = (await request.json().catch(() => ({}))) as { ttlSeconds?: number };
@@ -156,7 +197,7 @@ export class Room {
       const inviteToken = token();
       const inviteId = crypto.randomUUID();
       const now = Date.now();
-      this.sql.exec(
+      this.ctx.storage.sql.exec(
         "INSERT INTO invites (id, hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
         inviteId,
         await sha256Hex(inviteToken),
@@ -167,7 +208,7 @@ export class Room {
     }
 
     if (path === "/devices" && request.method === "GET") {
-      const rows = this.sql
+      const rows = this.ctx.storage.sql
         .exec(
           "SELECT id, name, created_at, expires_at, revoked_at, last_seen_at FROM devices ORDER BY created_at DESC",
         )
@@ -202,7 +243,7 @@ export class Room {
         expiresAt = Date.now() + ttl * 1000;
       }
       const reconnectToken = token();
-      this.sql.exec(
+      this.ctx.storage.sql.exec(
         `INSERT INTO devices (id, name, public_key, token_hash, created_at, expires_at)
          VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
@@ -224,11 +265,11 @@ export class Room {
     const deviceMatch = /^\/devices\/([a-z0-9-]{8,64})$/.exec(path);
     if (deviceMatch && request.method === "DELETE") {
       const deviceId = deviceMatch[1]!;
-      const existing = this.sql
+      const existing = this.ctx.storage.sql
         .exec("SELECT id FROM devices WHERE id = ?", deviceId)
         .toArray()[0];
       if (!existing) return errorResponse("not_found", "no such device", 404);
-      this.sql.exec("UPDATE devices SET revoked_at = ? WHERE id = ?", Date.now(), deviceId);
+      this.ctx.storage.sql.exec("UPDATE devices SET revoked_at = ? WHERE id = ?", Date.now(), deviceId);
       for (const ws of this.ctx.getWebSockets()) {
         const attachment = ws.deserializeAttachment() as Attachment | null;
         if (attachment?.role === "browser" && attachment.deviceId === deviceId) {
@@ -239,9 +280,9 @@ export class Room {
     }
 
     if (path === "/status" && request.method === "GET") {
-      const row = this.sql.exec("SELECT COUNT(*) AS n FROM devices WHERE revoked_at IS NULL").toArray()[0];
+      const row = this.ctx.storage.sql.exec("SELECT COUNT(*) AS n FROM devices WHERE revoked_at IS NULL").toArray()[0];
       return json({
-        roomId: this.meta("room_id") ?? "",
+        roomId: (await this.meta("room_id")) ?? "",
         bridgeOnline: this.bridgeSocket() !== null,
         deviceCount: Number(row?.["n"] ?? 0),
       });
@@ -252,7 +293,7 @@ export class Room {
 
   private async authorizeBridge(request: Request): Promise<boolean> {
     const presented = bearer(request);
-    const stored = this.meta("bridge_hash");
+    const stored = await this.meta("bridge_hash");
     if (!presented || !stored) return false;
     return constantTimeEqual(await sha256Hex(presented), stored);
   }
@@ -349,7 +390,7 @@ export class Room {
   }
 
   private async authenticate(ws: WebSocket, hello: RelayHello): Promise<void> {
-    const roomId = this.meta("room_id");
+    const roomId = await this.meta("room_id");
     // 房间在首个 bridge 连接时认领；未被认领的房间不接受浏览器连接。
     if (roomId ? hello.room !== roomId : hello.role !== "bridge") {
       this.fail(ws, "not_found", "unknown room");
@@ -366,11 +407,14 @@ export class Room {
         return;
       }
       const presented = await sha256Hex(hello.credential.token);
-      const stored = this.meta("bridge_hash");
+      const stored = await this.meta("bridge_hash");
       if (!stored) {
-        this.setMeta("room_id", hello.room);
-        this.setMeta("bridge_hash", presented);
-        this.setMeta("created_at", String(Date.now()));
+        this.ensureSchema();
+        await this.setMeta("room_id", hello.room);
+        await this.setMeta("bridge_hash", presented);
+        await this.setMeta("created_at", String(Date.now()));
+        this.lastTouchAt = 0;
+        await this.touch();
       } else if (!constantTimeEqual(presented, stored)) {
         this.fail(ws, "invalid_credential", "bad bridge token");
         return;
@@ -399,13 +443,14 @@ export class Room {
       return;
     }
 
+    this.ensureSchema();
     let mode: "pair" | "device";
     let deviceId: string | undefined;
     let inviteId: string | undefined;
 
     if (hello.credential.kind === "invite") {
       const hash = await sha256Hex(hello.credential.token);
-      const row = this.sql
+      const row = this.ctx.storage.sql
         .exec("SELECT id, expires_at, used_at FROM invites WHERE hash = ?", hash)
         .toArray()[0];
       if (!row) {
@@ -424,11 +469,11 @@ export class Room {
         this.fail(ws, "bridge_offline", "bridge is offline");
         return;
       }
-      this.sql.exec("UPDATE invites SET used_at = ? WHERE id = ?", Date.now(), String(row["id"]));
+      this.ctx.storage.sql.exec("UPDATE invites SET used_at = ? WHERE id = ?", Date.now(), String(row["id"]));
       mode = "pair";
       inviteId = String(row["id"]);
     } else if (hello.credential.kind === "device") {
-      const row = this.sql
+      const row = this.ctx.storage.sql
         .exec(
           "SELECT token_hash, expires_at, revoked_at, name FROM devices WHERE id = ?",
           hello.credential.deviceId,
@@ -454,7 +499,7 @@ export class Room {
         this.fail(ws, "bridge_offline", "bridge is offline");
         return;
       }
-      this.sql.exec("UPDATE devices SET last_seen_at = ? WHERE id = ?", Date.now(), hello.credential.deviceId);
+      this.ctx.storage.sql.exec("UPDATE devices SET last_seen_at = ? WHERE id = ?", Date.now(), hello.credential.deviceId);
       mode = "device";
       deviceId = hello.credential.deviceId;
     } else {
@@ -462,6 +507,7 @@ export class Room {
       return;
     }
 
+    void this.touch();
     const attachment: Attachment = { role: "browser", channel: hello.channel, mode, authedAt: Date.now() };
     if (deviceId) attachment.deviceId = deviceId;
     ws.serializeAttachment(attachment);
