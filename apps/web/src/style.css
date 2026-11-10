@@ -1241,6 +1241,14 @@ a.crumb:hover {
   gap: 8px;
 }
 
+/* Keep the primary action the same height as the icon buttons beside it. */
+.composer-row .btn.primary {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 14px;
+}
+
 .composer-input {
   flex: 1;
   min-width: 0;
@@ -1268,7 +1276,6 @@ a.crumb:hover {
 
 .attach-btn {
   flex: none;
-  margin-bottom: 5px;
 }
 
 .file-input {
@@ -1361,14 +1368,12 @@ a.crumb:hover {
 .composer-collapse {
   display: none;
   flex: none;
-  margin-bottom: 4px;
 }
 
 .composer-tool {
   flex: none;
   width: 32px;
   height: 32px;
-  margin-bottom: 5px;
   color: var(--muted);
 }
 
@@ -1385,7 +1390,6 @@ a.crumb:hover {
   flex: none;
   width: 32px;
   height: 32px;
-  margin-bottom: 5px;
   color: var(--muted);
   transition: color 180ms ease, background 180ms ease;
 }
@@ -1953,11 +1957,6 @@ a.crumb:hover {
 
   .composer-row .btn.primary {
     margin-left: auto;
-  }
-
-  .attach-btn,
-  .composer-collapse {
-    margin-bottom: 0;
   }
 
   .composer-collapse {
