@@ -24,6 +24,7 @@ import type {
 } from "@agent-bridge/protocol";
 import { expireLabel, listDevices, removeDevice, type StoredDevice } from "./credentials.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
+import { renderMarkdown } from "./markdown.js";
 import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
 import type { PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
@@ -2175,13 +2176,20 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
-      el("div", {
-        className: block.type === "tool" ? "message-tool" : "message-text",
-        text: block.truncated ? `${block.text}\n…（已截断）` : block.text,
-      }),
+      block.type === "tool"
+        ? el("div", { className: "message-tool", text: block.truncated ? `${block.text}\n…（已截断）` : block.text })
+        : markdownBlock(block.text, block.truncated),
     );
   }
   return bubble;
+}
+
+/** Renders transcript text as Markdown; truncation is annotated after the content. */
+function markdownBlock(text: string, truncated?: boolean): HTMLElement {
+  const node = el("div", { className: "message-text md" });
+  node.append(renderMarkdown(text));
+  if (truncated) node.append(el("p", { className: "md-note", text: "…（已截断）" }));
+  return node;
 }
 
 function shareButton(session: SessionSummary, message: MessageRecord): HTMLButtonElement {
@@ -2224,12 +2232,7 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
-        bubble.append(
-          el("div", {
-            className: "message-text",
-            text: block.truncated ? `${block.text}\n…（已截断）` : block.text,
-          }),
-        );
+        bubble.append(markdownBlock(block.text, block.truncated));
       } else if (!folded) {
         bubble.append(processFold(steps));
         folded = true;
