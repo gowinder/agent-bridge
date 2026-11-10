@@ -347,13 +347,8 @@ async function writeDevice(device: StoredDevice): Promise<void> {
   const { privateKey, reconnectToken, ...meta } = device;
   const store = readStore();
   if (!store || store.vault === null) {
-    // 调用方应该先 setupPassword；没有密码时只能落到老格式。
-    const legacy = readLegacy().filter(
-      (item) => !(item.relayUrl === device.relayUrl && item.roomId === device.roomId),
-    );
-    legacy.push(device);
-    localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
-    return;
+    // 口令可能刚被另一个标签页清掉（忘记密码）：绝不能退回明文存储。
+    throw new LockedError("本机凭据已被清除，请重新配对");
   }
   if (sessionKey === null || secrets === null) throw new LockedError();
   // 先按磁盘上的最新密文合并，再写回，避免覆盖别的标签页刚配对的设备。
