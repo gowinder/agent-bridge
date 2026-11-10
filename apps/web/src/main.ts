@@ -3185,8 +3185,9 @@ function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement 
       text: action.label,
     });
     btn.addEventListener("click", () => {
-      for (const item of row.querySelectorAll("button")) item.disabled = true;
-      void sendNextStep(state, action, btn);
+      const buttons = [...row.querySelectorAll<HTMLButtonElement>("button")];
+      for (const item of buttons) item.disabled = true;
+      void sendNextStep(state, action, buttons);
     });
     row.append(btn);
   }
@@ -3198,7 +3199,7 @@ function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement 
 async function sendNextStep(
   state: ChatState,
   action: NextStepAction,
-  button: HTMLButtonElement,
+  buttons: HTMLButtonElement[],
 ): Promise<void> {
   const text = action.action ? `点击了「${action.label}」，请执行这一步。` : action.label;
   state.status.classList.remove("error");
@@ -3211,7 +3212,7 @@ async function sendNextStep(
     if (!result.accepted) {
       state.status.textContent = result.detail ?? "未确认投递";
       state.status.classList.add("error");
-      button.disabled = false;
+      for (const item of buttons) item.disabled = false;
       return;
     }
     state.queued.push({
@@ -3233,7 +3234,7 @@ async function sendNextStep(
   } catch (error) {
     state.status.textContent = messageOf(error);
     state.status.classList.add("error");
-    button.disabled = false;
+    for (const item of buttons) item.disabled = false;
   }
 }
 
