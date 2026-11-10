@@ -65,6 +65,13 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
 function stringParam(params: Record<string, unknown>, name: string): string | undefined {
   const value = params[name];
   return typeof value === "string" ? value : undefined;
@@ -147,7 +154,7 @@ export class PairingSession implements ChannelSession {
       this.respond(errorResponse(request.id, "invalid_params", "invalid device name"));
       return;
     }
-    if (code !== this.expectedCode) {
+    if (!constantTimeEqual(code, this.expectedCode)) {
       this.respond(errorResponse(request.id, "invalid_params", "确认码不一致，配对已拒绝"));
       this.dispose();
       return;
@@ -411,6 +418,10 @@ export class DeviceSession implements ChannelSession {
       case "device.revoke": {
         const deviceId = params["deviceId"];
         if (typeof deviceId !== "string") throw new Error("deviceId required");
+        // A paired device may only revoke itself; other devices are managed from the Mac.
+        if (deviceId !== this.options.device.id) {
+          throw new RpcError("unauthorized", "只能撤销当前设备，请在 Mac 上撤销其他设备");
+        }
         const target = this.options.store.device(deviceId);
         if (!target) throw new Error("unknown device");
         await this.options.api.revokeDevice(deviceId);

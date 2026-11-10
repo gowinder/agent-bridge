@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@agent-bridge/crypto";
@@ -131,6 +131,34 @@ async function commandInit(args: string[]): Promise<void> {
   }
 }
 
+/** The token is minted here and never sent to the relay: only its hash leaves this process. */
+async function mintInvite(
+  api: RelayApi,
+  store: Store,
+  config: { webUrl: string; relayUrl: string; roomId: string },
+  ttlSeconds: number,
+): Promise<{ url: string; expiresAt: number }> {
+  const inviteToken = randomBytes(32).toString("base64url");
+  const inviteId = randomUUID();
+  const invite = await api.createInvite({
+    inviteId,
+    tokenHash: createHash("sha256").update(inviteToken).digest("hex"),
+    ttlSeconds,
+  });
+  store.saveInvite({
+    id: inviteId,
+    token: inviteToken,
+    createdAt: Date.now(),
+    expiresAt: invite.expiresAt,
+    usedAt: null,
+  });
+  store.clearExpiredInvites();
+  return {
+    url: inviteUrl(config.webUrl, config.relayUrl, config.roomId, inviteToken),
+    expiresAt: invite.expiresAt,
+  };
+}
+
 async function commandInvite(args: string[]): Promise<void> {
   const ttl = Number(flag(args, "ttl") ?? "300");
   if (!Number.isFinite(ttl) || ttl < 30 || ttl > 600) throw new Error("--ttl 必须在 30..600 秒之间");
@@ -138,18 +166,9 @@ async function commandInvite(args: string[]): Promise<void> {
   try {
     const config = requireConfig(store);
     const api = new RelayApi(config.relayUrl, config.roomId, config.bridgeToken);
-    const invite = await api.createInvite(ttl);
-    store.saveInvite({
-      id: invite.inviteId,
-      token: invite.inviteToken,
-      createdAt: Date.now(),
-      expiresAt: invite.expiresAt,
-      usedAt: null,
-    });
-    store.clearExpiredInvites();
-    const url = inviteUrl(config.webUrl, config.relayUrl, config.roomId, invite.inviteToken);
+    const invite = await mintInvite(api, store, config, ttl);
     console.log(`邀请有效期至 ${new Date(invite.expiresAt).toLocaleTimeString()}（一次性）`);
-    console.log(url);
+    console.log(invite.url);
     const status = await api.status().catch(() => null);
     if (status && !status.bridgeOnline) {
       console.log("注意：serve 当前未连接中继，浏览器将无法完成配对");
@@ -320,19 +339,7 @@ async function commandServe(): Promise<void> {
       return { closed: dropDevice(deviceId) };
     },
     async createInvite(ttlSeconds: number) {
-      const invite = await api.createInvite(ttlSeconds);
-      store.saveInvite({
-        id: invite.inviteId,
-        token: invite.inviteToken,
-        createdAt: Date.now(),
-        expiresAt: invite.expiresAt,
-        usedAt: null,
-      });
-      store.clearExpiredInvites();
-      return {
-        url: inviteUrl(config.webUrl, config.relayUrl, config.roomId, invite.inviteToken),
-        expiresAt: invite.expiresAt,
-      };
+      return mintInvite(api, store, config, ttlSeconds);
     },
   };
 
@@ -355,6 +362,11 @@ async function commandServe(): Promise<void> {
         if (!invite) {
           log(`配对失败：未知邀请 ${message.inviteId ?? "?"}`);
           relay?.closeChannel(message.channel, "unknown invite");
+          return;
+        }
+        if (invite.usedAt !== null || invite.expiresAt < Date.now()) {
+          log(`配对失败：邀请 ${invite.id} 已使用或已过期`);
+          relay?.closeChannel(message.channel, "invite expired");
           return;
         }
         log(`收到配对连接，邀请 ${invite.id}`);

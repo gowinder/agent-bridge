@@ -92,6 +92,19 @@ function authorized(request: IncomingMessage, token: string): boolean {
   return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
+/**
+ * Only the local menu bar app talks here: it sends no Origin and names a loopback
+ * Host. A browser page (or a DNS-rebinding name) is refused before the token check,
+ * so a stray page cannot drive the bridge even if it learns the token.
+ */
+function localRequest(request: IncomingMessage): boolean {
+  if (request.headers["origin"] !== undefined) return false;
+  const host = request.headers["host"];
+  if (typeof host !== "string") return false;
+  const hostname = host.startsWith("[") ? host.slice(0, host.indexOf("]") + 1) : host.split(":")[0];
+  return hostname === ADMIN_HOST || hostname === "localhost" || hostname === "[::1]";
+}
+
 async function readBody(request: IncomingMessage): Promise<Record<string, unknown>> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -113,6 +126,10 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
   const server = createServer((request, response) => {
     void (async () => {
       try {
+        if (!localRequest(request)) {
+          send(response, 403, { error: "forbidden" });
+          return;
+        }
         if (!authorized(request, token)) {
           send(response, 401, { error: "unauthorized" });
           return;

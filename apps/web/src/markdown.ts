@@ -2,6 +2,10 @@
 // text can never inject markup. Covers the subset used in chat output.
 
 const SAFE_SCHEME = /^(https?:|mailto:)/i;
+/** Hard caps so a crafted transcript cannot exhaust the JS stack. */
+const MAX_INLINE_DEPTH = 8;
+const MAX_BLOCK_DEPTH = 16;
+const MAX_LIST_DEPTH = 16;
 
 function safeHref(raw: string): string | null {
   const href = raw.trim().replace(/^<|>$/g, "");
@@ -32,7 +36,8 @@ function anchor(label: string, rawHref: string): HTMLElement {
 const INLINE =
   /(`[^`\n]+`)|(\*\*(?=\S)[\s\S]*?\S\*\*)|(__(?=\S)[\s\S]*?\S__)|(~~(?=\S)[\s\S]*?\S~~)|(\*(?=[^\s*])[^*\n]*[^\s*]\*)|(_(?=[^\s_])[^_\n]*[^\s_]_)|(\[[^\]\n]*\]\([^)\n]+\))|(<https?:\/\/[^>\s]+>)|(https?:\/\/[^\s<>()]+)/;
 
-export function inlineNodes(text: string): Node[] {
+export function inlineNodes(text: string, depth = 0): Node[] {
+  if (depth > MAX_INLINE_DEPTH) return [document.createTextNode(text)];
   const out: Node[] = [];
   let rest = text;
   while (rest) {
@@ -44,15 +49,15 @@ export function inlineNodes(text: string): Node[] {
       out.push(codeSpan(raw.slice(1, -1)));
     } else if (match[2] || match[3]) {
       const strong = document.createElement("strong");
-      strong.append(...inlineNodes(raw.slice(2, -2)));
+      strong.append(...inlineNodes(raw.slice(2, -2), depth + 1));
       out.push(strong);
     } else if (match[4]) {
       const del = document.createElement("del");
-      del.append(...inlineNodes(raw.slice(2, -2)));
+      del.append(...inlineNodes(raw.slice(2, -2), depth + 1));
       out.push(del);
     } else if (match[5] || match[6]) {
       const em = document.createElement("em");
-      em.append(...inlineNodes(raw.slice(1, -1)));
+      em.append(...inlineNodes(raw.slice(1, -1), depth + 1));
       out.push(em);
     } else if (match[7]) {
       const link = /^\[([^\]]*)\]\(([^)]+)\)$/.exec(raw);
@@ -86,7 +91,17 @@ interface ListItem {
 
 const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
 
-function buildList(items: ListItem[]): HTMLElement {
+function buildList(items: ListItem[], depth = 0): HTMLElement {
+  if (depth > MAX_LIST_DEPTH) {
+    // Fold deeper nesting into a flat, unformatted list instead of recursing.
+    const flat = document.createElement(items[0]?.ordered ? "ol" : "ul");
+    for (const item of items) {
+      const li = document.createElement("li");
+      li.textContent = item.text.join("\n");
+      flat.append(li);
+    }
+    return flat;
+  }
   const base = items[0]?.indent ?? 0;
   const root = document.createElement(items[0]?.ordered ? "ol" : "ul");
   let i = 0;
@@ -96,7 +111,7 @@ function buildList(items: ListItem[]): HTMLElement {
     if (item.indent > base) {
       // Orphan deeper item: fold it into the previous entry.
       const last = root.lastElementChild;
-      if (last) last.append(buildList(items.slice(i)));
+      if (last) last.append(buildList(items.slice(i), depth + 1));
       return root;
     }
     const li = document.createElement("li");
@@ -108,13 +123,13 @@ function buildList(items: ListItem[]): HTMLElement {
       if (next) sub.push(next);
       i += 1;
     }
-    if (sub.length > 0) li.append(buildList(sub));
+    if (sub.length > 0) li.append(buildList(sub, depth + 1));
     root.append(li);
   }
   return root;
 }
 
-function readList(lines: string[], start: number): { node: HTMLElement; next: number } | null {
+function readList(lines: string[], start: number, depth = 0): { node: HTMLElement; next: number } | null {
   const items: ListItem[] = [];
   let last: ListItem | null = null;
   let i = start;
@@ -143,7 +158,7 @@ function readList(lines: string[], start: number): { node: HTMLElement; next: nu
     break;
   }
   if (items.length === 0) return null;
-  return { node: buildList(items), next: i };
+  return { node: buildList(items, depth), next: i };
 }
 
 function splitRow(line: string): string[] {
@@ -217,7 +232,18 @@ function isBlockStart(lines: string[], index: number): boolean {
 }
 
 export function renderMarkdown(source: string): DocumentFragment {
+  return renderBlocks(source, 0);
+}
+
+function renderBlocks(source: string, depth: number): DocumentFragment {
   const fragment = document.createDocumentFragment();
+  if (depth > MAX_BLOCK_DEPTH) {
+    const p = document.createElement("p");
+    p.className = "md-p";
+    p.textContent = source;
+    fragment.append(p);
+    return fragment;
+  }
   const lines = source.replace(/\r\n?/g, "\n").split("\n");
   let i = 0;
   while (i < lines.length) {
@@ -275,7 +301,7 @@ export function renderMarkdown(source: string): DocumentFragment {
       }
       const quote = document.createElement("blockquote");
       quote.className = "md-quote";
-      quote.append(renderMarkdown(body.join("\n")));
+      quote.append(renderBlocks(body.join("\n"), depth + 1));
       fragment.append(quote);
       continue;
     }
