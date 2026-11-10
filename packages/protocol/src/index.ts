@@ -260,8 +260,13 @@ export interface FsRoot {
   path: string;
 }
 
-/** `root` is the project directory the chat belongs to; the bridge refuses anything else. */
+/**
+ * `root` is the project directory the chat belongs to; the bridge refuses anything else.
+ * `sessionId` is what ties the request to that chat: the bridge checks the session's
+ * project resolves to `root`, so a device cannot aim the browser at another project.
+ */
 export interface FsRootsParams {
+  sessionId: string;
   root: string;
 }
 
@@ -279,6 +284,8 @@ export interface FsEntry {
 }
 
 export interface FsListParams {
+  /** The chat whose project directory is being browsed. */
+  sessionId: string;
   /** Project directory of the chat; every read is confined to it. */
   root: string;
   path?: string;
@@ -292,6 +299,7 @@ export interface FsListResult {
 }
 
 export interface FsReadParams {
+  sessionId: string;
   root: string;
   path: string;
 }
@@ -310,6 +318,8 @@ export interface FsReadResult {
 }
 
 export interface ShellExecParams {
+  /** The chat whose project directory the command runs in. */
+  sessionId: string;
   /** Project directory of the chat; the command starts there unless `cwd` names a path inside it. */
   root: string;
   command: string;

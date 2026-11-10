@@ -42,7 +42,7 @@ function usage(): void {
   agent-bridge init --relay <url> [--web <url>] [--name <name>]
   agent-bridge invite [--ttl 300]
   agent-bridge serve
-  agent-bridge devices
+  agent-bridge devices [ttl <manual|1h|24h|7d|30d>]
   agent-bridge revoke <deviceId>
   agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]
   agent-bridge status
@@ -182,9 +182,26 @@ async function commandInvite(args: string[]): Promise<void> {
   }
 }
 
-async function commandDevices(): Promise<void> {
+async function commandDevices(args: string[]): Promise<void> {
   const store = new Store();
   try {
+    if (args[0] === "ttl") {
+      const option = args[1];
+      if (!option || !Object.hasOwn(DEVICE_TTL_OPTIONS, option)) {
+        throw new Error(
+          `用法：agent-bridge devices ttl <${Object.keys(DEVICE_TTL_OPTIONS).join("|")}>`,
+        );
+      }
+      // 配对时由 serve 现读这个值，写入后对下一次配对立即生效。
+      store.setMeta("device_ttl", option);
+      const ttl = DEVICE_TTL_OPTIONS[option] ?? null;
+      console.log(
+        ttl === null
+          ? "已设置：之后配对的新设备不会过期（manual）"
+          : `已设置：之后配对的新设备有效期 ${option}`,
+      );
+      return;
+    }
     const config = requireConfig(store);
     const api = new RelayApi(config.relayUrl, config.roomId, config.bridgeToken);
     const remote = await api.devices();
@@ -627,7 +644,7 @@ async function main(): Promise<void> {
       await commandServe();
       return;
     case "devices":
-      await commandDevices();
+      await commandDevices(args);
       return;
     case "revoke":
       await commandRevoke(args);

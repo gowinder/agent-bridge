@@ -5,6 +5,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeSync,
@@ -26,6 +27,8 @@ const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 interface PendingUpload {
   id: string;
+  /** 发起上传的设备通道；其他通道即使猜到 uploadId 也不能续传或完成。 */
+  owner: string;
   sessionId: string;
   name: string;
   mime: string;
@@ -45,15 +48,23 @@ function safeName(raw: string): string {
 
 export class UploadStore {
   private readonly root: string;
+  private readonly rootReal: string;
   private readonly pending = new Map<string, PendingUpload>();
   private lastSweep = 0;
 
   constructor(stateDir: string) {
     this.root = join(stateDir, "uploads");
     mkdirSync(this.root, { recursive: true, mode: 0o700 });
+    this.rootReal = realpathSync(this.root);
   }
 
-  begin(sessionId: string, name: string, mime: string, size: number): FileUploadBeginResult {
+  begin(
+    owner: string,
+    sessionId: string,
+    name: string,
+    mime: string,
+    size: number,
+  ): FileUploadBeginResult {
     this.prune();
     this.sweepFinished();
     if (!Number.isInteger(size) || size <= 0) throw new RpcError("invalid_params", "文件为空");
@@ -73,6 +84,7 @@ export class UploadStore {
     const fd = openSync(path, "w", 0o600);
     this.pending.set(id, {
       id,
+      owner,
       sessionId,
       name: safe,
       mime: mime || "application/octet-stream",
@@ -86,9 +98,14 @@ export class UploadStore {
     return { uploadId: id, chunkSize: UPLOAD_CHUNK_BYTES };
   }
 
-  chunk(uploadId: string, index: number, data: string): { uploadId: string; received: number } {
+  chunk(
+    owner: string,
+    uploadId: string,
+    index: number,
+    data: string,
+  ): { uploadId: string; received: number } {
     const upload = this.pending.get(uploadId);
-    if (!upload) throw new RpcError("not_found", "上传不存在或已过期");
+    if (!upload || upload.owner !== owner) throw new RpcError("not_found", "上传不存在或已过期");
     if (index !== upload.nextIndex) throw new RpcError("invalid_params", "分片顺序错误");
     const buffer = Buffer.from(data, "base64");
     if (upload.received + buffer.length > upload.size) {
@@ -100,9 +117,9 @@ export class UploadStore {
     return { uploadId, received: upload.received };
   }
 
-  finish(uploadId: string): FileUploadFinishResult {
+  finish(owner: string, uploadId: string): FileUploadFinishResult {
     const upload = this.pending.get(uploadId);
-    if (!upload) throw new RpcError("not_found", "上传不存在或已过期");
+    if (!upload || upload.owner !== owner) throw new RpcError("not_found", "上传不存在或已过期");
     closeSync(upload.fd);
     this.pending.delete(uploadId);
     if (upload.received !== upload.size) {
@@ -119,14 +136,23 @@ export class UploadStore {
     };
   }
 
-  /** Rejects any attachment path that did not come from an upload. */
+  /** Rejects any attachment path that did not come from an upload; symlinks are resolved first. */
   resolvePath(path: string): string {
     const absolute = resolve(path);
     if (!absolute.startsWith(this.root + sep)) {
       throw new RpcError("invalid_params", "附件路径不在上传目录内");
     }
     if (!existsSync(absolute)) throw new RpcError("not_found", "附件不存在，请重新上传");
-    return absolute;
+    let real: string;
+    try {
+      real = realpathSync(absolute);
+    } catch {
+      throw new RpcError("not_found", "附件不存在，请重新上传");
+    }
+    if (!real.startsWith(this.rootReal + sep)) {
+      throw new RpcError("invalid_params", "附件路径不在上传目录内");
+    }
+    return real;
   }
 
   private prune(now = Date.now()): void {

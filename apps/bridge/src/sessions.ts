@@ -378,7 +378,15 @@ export class DeviceSession implements ChannelSession {
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         if (!name) throw new RpcError("invalid_params", "name required");
         if (size === undefined) throw new RpcError("invalid_params", "size required");
-        this.options.adapters.session(sessionId);        return this.options.uploads.begin(sessionId, name, stringParam(params, "mime") ?? "", size);
+        // 会话不存在时这里会抛出 not_found；必须 await，否则 reject 无人接管会让进程退出。
+        await this.options.adapters.session(sessionId);
+        return this.options.uploads.begin(
+          this.options.channel,
+          sessionId,
+          name,
+          stringParam(params, "mime") ?? "",
+          size,
+        );
       }
       case "file.upload.chunk": {
         const uploadId = stringParam(params, "uploadId");
@@ -387,12 +395,12 @@ export class DeviceSession implements ChannelSession {
         if (!uploadId) throw new RpcError("invalid_params", "uploadId required");
         if (index === undefined) throw new RpcError("invalid_params", "index required");
         if (data === undefined) throw new RpcError("invalid_params", "data required");
-        return this.options.uploads.chunk(uploadId, index, data);
+        return this.options.uploads.chunk(this.options.channel, uploadId, index, data);
       }
       case "file.upload.finish": {
         const uploadId = stringParam(params, "uploadId");
         if (!uploadId) throw new RpcError("invalid_params", "uploadId required");
-        return this.options.uploads.finish(uploadId);
+        return this.options.uploads.finish(this.options.channel, uploadId);
       }
       case "transfer.prepare": {
         const sourceSessionId = stringParam(params, "sourceSessionId");
@@ -439,19 +447,23 @@ export class DeviceSession implements ChannelSession {
       case "fs.roots": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
-        return this.options.devtools.roots(root);
+        return this.options.devtools.roots(stringParam(params, "sessionId"), root);
       }
       case "fs.list": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
-        return this.options.devtools.listDirs(root, stringParam(params, "path"));
+        return this.options.devtools.listDirs(
+          stringParam(params, "sessionId"),
+          root,
+          stringParam(params, "path"),
+        );
       }
       case "fs.read": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
-        return this.options.devtools.readFile(root, path);
+        return this.options.devtools.readFile(stringParam(params, "sessionId"), root, path);
       }
       case "shell.exec": {
         const root = stringParam(params, "root");
@@ -459,6 +471,7 @@ export class DeviceSession implements ChannelSession {
         const command = stringParam(params, "command") ?? "";
         return this.options.devtools.exec(
           this.options.channel,
+          stringParam(params, "sessionId"),
           root,
           command,
           stringParam(params, "cwd"),
@@ -469,7 +482,7 @@ export class DeviceSession implements ChannelSession {
       case "shell.cancel": {
         const execId = stringParam(params, "execId");
         if (!execId) throw new RpcError("invalid_params", "execId required");
-        return this.options.devtools.cancel(execId);
+        return this.options.devtools.cancel(this.options.channel, execId);
       }
       default:
         throw new Error(`unsupported method: ${request.method}`);
