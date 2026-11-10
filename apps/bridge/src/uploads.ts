@@ -1,5 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, mkdirSync, openSync, rmSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import type { FileUploadBeginResult, FileUploadFinishResult } from "@agent-bridge/protocol";
 import { RpcError } from "./adapters/types.js";
@@ -8,7 +17,12 @@ import { RpcError } from "./adapters/types.js";
 export const UPLOAD_CHUNK_BYTES = 32 * 1024;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
 const MAX_PENDING_BYTES = 100 * 1024 * 1024;
+/** Bounds open file descriptors as well as queue memory. */
+const MAX_PENDING_UPLOADS = 16;
 const UPLOAD_TTL_MS = 30 * 60 * 1000;
+/** Finished uploads stay readable this long, then are swept. */
+const FINISHED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SWEEP_INTERVAL_MS = 60 * 60 * 1000;
 
 interface PendingUpload {
   id: string;
@@ -32,6 +46,7 @@ function safeName(raw: string): string {
 export class UploadStore {
   private readonly root: string;
   private readonly pending = new Map<string, PendingUpload>();
+  private lastSweep = 0;
 
   constructor(stateDir: string) {
     this.root = join(stateDir, "uploads");
@@ -40,8 +55,12 @@ export class UploadStore {
 
   begin(sessionId: string, name: string, mime: string, size: number): FileUploadBeginResult {
     this.prune();
+    this.sweepFinished();
     if (!Number.isInteger(size) || size <= 0) throw new RpcError("invalid_params", "文件为空");
     if (size > MAX_FILE_BYTES) throw new RpcError("invalid_params", "单个文件不能超过 25 MB");
+    if (this.pending.size >= MAX_PENDING_UPLOADS) {
+      throw new RpcError("rate_limited", "待完成的上传过多，请稍后再试");
+    }
     const inFlight = [...this.pending.values()].reduce((sum, item) => sum + item.size, 0);
     if (inFlight + size > MAX_PENDING_BYTES) {
       throw new RpcError("rate_limited", "待完成的上传过多，请稍后再试");
@@ -120,6 +139,29 @@ export class UploadStore {
         // best effort
       }
       this.pending.delete(id);
+    }
+  }
+
+  /** Deletes attachments that finished uploading long ago, so the upload dir cannot grow forever. */
+  private sweepFinished(now = Date.now()): void {
+    if (now - this.lastSweep < SWEEP_INTERVAL_MS) return;
+    this.lastSweep = now;
+    let entries: string[];
+    try {
+      entries = readdirSync(this.root);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (this.pending.has(entry)) continue;
+      const path = join(this.root, entry);
+      try {
+        if (now - statSync(path).mtimeMs > FINISHED_TTL_MS) {
+          rmSync(path, { recursive: true, force: true });
+        }
+      } catch {
+        // best effort
+      }
     }
   }
 }

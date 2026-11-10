@@ -26,14 +26,25 @@ export interface PairingChallenge {
   link: PairingLink;
 }
 
+/** The relay receives only this hash; the raw token stays in the URL fragment. */
+async function sha256Hex(value: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)),
+  );
+  let out = "";
+  for (const byte of digest) out += byte.toString(16).padStart(2, "0");
+  return out;
+}
+
 export async function startPairing(link: PairingLink): Promise<PairingChallenge> {
   const engine = await noise();
   const keys = engine.generateKeyPair();
   const channel = toHex(randomBytes(16));
+  const tokenHash = await sha256Hex(link.inviteToken);
   const { connection, ready } = RelayConnection.connect(
     link.relayUrl,
     link.roomId,
-    helloMessage(link.roomId, channel, { kind: "invite", token: link.inviteToken }),
+    helloMessage(link.roomId, channel, { kind: "invite", tokenHash }),
     () => {},
   );
   await ready;

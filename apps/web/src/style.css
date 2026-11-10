@@ -386,11 +386,23 @@ a.crumb:hover {
 }
 
 .recent-menu-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   max-width: 100%;
+  font-size: 13.5px;
+}
+
+.recent-menu-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13.5px;
+}
+
+.recent-spinner {
+  width: 10px;
+  height: 10px;
 }
 
 .recent-menu-meta {
@@ -841,6 +853,25 @@ a.crumb:hover {
 .mark.live {
   background: color-mix(in srgb, var(--ok) 16%, var(--surface-2));
   color: var(--ok);
+}
+
+.mark.busy {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface-2));
+}
+
+.mark .mark-spinner {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+  border-top-color: var(--accent);
+}
+
+.pill.busy {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
 }
 
 .row:hover:not(:disabled) .mark {

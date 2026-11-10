@@ -252,7 +252,16 @@ func relativeTime(_ millis: Double?) -> String {
     return "\(Int(seconds / 86_400)) 天前"
 }
 
+// AppKit 的 UI 只能在主线程碰：`Task { }` 在 await 之后会跑到协作后台线程上，
+// 之前在后台线程 new NSAlert 会直接抛 NSException（NSWindow 非主线程初始化）→ SIGABRT。
+// 整类标 @MainActor，让所有 Task 继承主 actor 隔离。
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+    // 顶层代码创建 delegate 时不在主 actor 上下文里，初始化本身不碰 UI，所以放行。
+    nonisolated override init() {
+        super.init()
+    }
+
     private let client = AdminClient()
     private var statusItem: NSStatusItem!
     private var timer: Timer?
@@ -490,13 +499,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let dialog = NSAlert()
         dialog.messageText = "初始化 Agent Bridge"
-        dialog.informativeText = "填写中继地址和该中继的管理令牌（ADMIN_TOKEN）。会在本机创建房间和密钥。"
+        dialog.informativeText = "选中继地址即可：房间号和凭据都在本机生成，中继只负责转发。"
         dialog.addButton(withTitle: "初始化")
         dialog.addButton(withTitle: "取消")
 
-        let form = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 172))
+        let form = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 116))
         func field(_ row: Int, _ label: String, _ value: String) -> NSTextField {
-            let y = 112 - row * 56
+            let y = 56 - row * 56
             let caption = NSTextField(labelWithString: label)
             caption.font = .systemFont(ofSize: 11)
             caption.textColor = .secondaryLabelColor
@@ -508,24 +517,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return input
         }
         let relayField = field(0, "中继地址", relay)
-        let tokenField = field(1, "管理令牌 ADMIN_TOKEN", "")
-        let nameField = field(2, "本机名称", Host.current().localizedName ?? "Mac")
-        tokenField.placeholderString = "wrangler secret 里设置的 ADMIN_TOKEN"
+        let nameField = field(1, "本机名称", Host.current().localizedName ?? "Mac")
         dialog.accessoryView = form
 
         NSApp.activate(ignoringOtherApps: true)
         guard dialog.runModal() == .alertFirstButtonReturn else { return }
 
         let relayValue = relayField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let tokenValue = tokenField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let nameValue = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !relayValue.isEmpty, !tokenValue.isEmpty else {
-            alert("信息不完整", "中继地址和管理令牌都必须填写。")
+        guard !relayValue.isEmpty else {
+            alert("信息不完整", "中继地址必须填写。")
             return
         }
         defaults.set(relayValue, forKey: "relayUrl")
 
-        var args = ["init", "--relay", relayValue, "--admin-token", tokenValue]
+        var args = ["init", "--relay", relayValue]
         if !nameValue.isEmpty { args += ["--name", nameValue] }
         guard let result = BridgeCLI.run(args, timeout: 30) else {
             alert("无法运行 Bridge", "找不到 node 或 apps/bridge/dist/main.js。")
@@ -582,17 +588,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         bridgeProcess = process
-        bridgeStartedAt = Date()
+        let startedAt = Date()
+        bridgeStartedAt = startedAt
         // A serve process that dies right away means it refused to start; surface why.
         DispatchQueue.global().async { [weak self] in
             process.waitUntilExit()
-            let exitedFast = Date().timeIntervalSince(self?.bridgeStartedAt ?? .distantPast) < 5
+            let exitedFast = Date().timeIntervalSince(startedAt) < 5
             guard exitedFast, process.terminationStatus != 0 else { return }
             let tail = (try? String(contentsOf: logPath, encoding: .utf8))?
                 .split(separator: "\n").suffix(6).joined(separator: "\n") ?? ""
-            DispatchQueue.main.async {
+            let code = process.terminationStatus
+            Task { @MainActor in
                 self?.bridgeProcess = nil
-                self?.alert("Bridge 启动失败", tail.isEmpty ? "进程已退出（代码 \(process.terminationStatus)）" : tail)
+                self?.alert("Bridge 启动失败", tail.isEmpty ? "进程已退出（代码 \(code)）" : tail)
             }
         }
         Task {

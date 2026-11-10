@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@agent-bridge/crypto";
@@ -13,7 +13,7 @@ import {
   type AdminActions,
   type AdminDevice,
 } from "./admin.js";
-import { createRoom,
+import {
   RelayApi,
   RelayClient,
   RelayError,
@@ -36,7 +36,7 @@ function usage(): void {
   console.log(`agent-bridge ${VERSION}
 
 用法:
-  agent-bridge init --relay <url> --admin-token <token> [--web <url>] [--name <name>]
+  agent-bridge init --relay <url> [--web <url>] [--name <name>]
   agent-bridge invite [--ttl 300]
   agent-bridge serve
   agent-bridge devices
@@ -97,10 +97,7 @@ function inviteUrl(webUrl: string, relayUrl: string, roomId: string, inviteToken
 
 async function commandInit(args: string[]): Promise<void> {
   const relayArg = flag(args, "relay");
-  const adminToken = flag(args, "admin-token") ?? process.env["AGENT_BRIDGE_ADMIN_TOKEN"];
-  if (!relayArg || !adminToken) {
-    throw new Error("init 需要 --relay 与 --admin-token（或 AGENT_BRIDGE_ADMIN_TOKEN）");
-  }
+  if (!relayArg) throw new Error("init 需要 --relay <url>");
   const relayUrl = normalizeUrl(relayArg);
   const webUrl = normalizeUrl(flag(args, "web") ?? relayUrl);
   const hostName = flag(args, "name") ?? hostname();
@@ -111,35 +108,55 @@ async function commandInit(args: string[]): Promise<void> {
     const health = await fetch(new URL("/v1/health", relayUrl));
     if (!health.ok) throw new Error(`中继不可用：HTTP ${health.status}`);
 
+    // 房间号与凭据都在本机生成：中继只转发，首个用这份凭据连上来的 bridge 认领该房间。
     const roomId = randomUUID();
-    const room = await createRoom(relayUrl, adminToken, roomId).catch((error: unknown) => {
-      if (!(error instanceof RelayError)) throw error;
-      const reason =
-        error.status === 401
-          ? "管理令牌不正确"
-          : error.status === 503
-            ? "中继未配置 ADMIN_TOKEN"
-            : error.code;
-      throw new Error(`中继拒绝创建房间（HTTP ${error.status}，${reason}）`);
-    });
+    const bridgeToken = randomBytes(32).toString("base64url");
     const noise = await loadNoiseNode();
     const identity = noise.generateKeyPair();
 
     store.setMeta("relay_url", relayUrl);
     store.setMeta("web_url", webUrl);
-    store.setMeta("room_id", room.roomId);
-    store.setMeta("bridge_token", room.bridgeToken);
+    store.setMeta("room_id", roomId);
+    store.setMeta("bridge_token", bridgeToken);
     store.setMeta("host_name", hostName);
     store.setMeta("identity_private", Buffer.from(identity.privateKey).toString("base64"));
     store.setMeta("identity_public", Buffer.from(identity.publicKey).toString("base64"));
     store.setMeta("bridge_version", VERSION);
 
-    console.log(`已初始化，房间 ${room.roomId}`);
+    console.log(`已初始化，房间 ${roomId}`);
     console.log(`公钥 ${toHex(identity.publicKey)}`);
     console.log("下一步：agent-bridge serve（保持常驻），再运行 agent-bridge invite 生成配对链接");
   } finally {
     store.close();
   }
+}
+
+/** The token is minted here and never sent to the relay: only its hash leaves this process. */
+async function mintInvite(
+  api: RelayApi,
+  store: Store,
+  config: { webUrl: string; relayUrl: string; roomId: string },
+  ttlSeconds: number,
+): Promise<{ url: string; expiresAt: number }> {
+  const inviteToken = randomBytes(32).toString("base64url");
+  const inviteId = randomUUID();
+  const invite = await api.createInvite({
+    inviteId,
+    tokenHash: createHash("sha256").update(inviteToken).digest("hex"),
+    ttlSeconds,
+  });
+  store.saveInvite({
+    id: inviteId,
+    token: inviteToken,
+    createdAt: Date.now(),
+    expiresAt: invite.expiresAt,
+    usedAt: null,
+  });
+  store.clearExpiredInvites();
+  return {
+    url: inviteUrl(config.webUrl, config.relayUrl, config.roomId, inviteToken),
+    expiresAt: invite.expiresAt,
+  };
 }
 
 async function commandInvite(args: string[]): Promise<void> {
@@ -149,18 +166,9 @@ async function commandInvite(args: string[]): Promise<void> {
   try {
     const config = requireConfig(store);
     const api = new RelayApi(config.relayUrl, config.roomId, config.bridgeToken);
-    const invite = await api.createInvite(ttl);
-    store.saveInvite({
-      id: invite.inviteId,
-      token: invite.inviteToken,
-      createdAt: Date.now(),
-      expiresAt: invite.expiresAt,
-      usedAt: null,
-    });
-    store.clearExpiredInvites();
-    const url = inviteUrl(config.webUrl, config.relayUrl, config.roomId, invite.inviteToken);
+    const invite = await mintInvite(api, store, config, ttl);
     console.log(`邀请有效期至 ${new Date(invite.expiresAt).toLocaleTimeString()}（一次性）`);
-    console.log(url);
+    console.log(invite.url);
     const status = await api.status().catch(() => null);
     if (status && !status.bridgeOnline) {
       console.log("注意：serve 当前未连接中继，浏览器将无法完成配对");
@@ -331,19 +339,7 @@ async function commandServe(): Promise<void> {
       return { closed: dropDevice(deviceId) };
     },
     async createInvite(ttlSeconds: number) {
-      const invite = await api.createInvite(ttlSeconds);
-      store.saveInvite({
-        id: invite.inviteId,
-        token: invite.inviteToken,
-        createdAt: Date.now(),
-        expiresAt: invite.expiresAt,
-        usedAt: null,
-      });
-      store.clearExpiredInvites();
-      return {
-        url: inviteUrl(config.webUrl, config.relayUrl, config.roomId, invite.inviteToken),
-        expiresAt: invite.expiresAt,
-      };
+      return mintInvite(api, store, config, ttlSeconds);
     },
   };
 
@@ -366,6 +362,11 @@ async function commandServe(): Promise<void> {
         if (!invite) {
           log(`配对失败：未知邀请 ${message.inviteId ?? "?"}`);
           relay?.closeChannel(message.channel, "unknown invite");
+          return;
+        }
+        if (invite.usedAt !== null || invite.expiresAt < Date.now()) {
+          log(`配对失败：邀请 ${invite.id} 已使用或已过期`);
+          relay?.closeChannel(message.channel, "invite expired");
           return;
         }
         log(`收到配对连接，邀请 ${invite.id}`);
@@ -497,7 +498,7 @@ async function commandServe(): Promise<void> {
       if (error instanceof RelayError) {
         log(`中继拒绝连接：${error.code} ${error.message}`);
         if (error.code === "invalid_credential" || error.code === "not_found") {
-          log("桥接凭据失效，需要重新初始化");
+          log("房间已被其他凭据占用（或状态目录来自另一份部署），需要重新初始化");
           break;
         }
       } else {
