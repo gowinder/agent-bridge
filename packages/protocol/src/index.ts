@@ -236,6 +236,10 @@ export interface AdapterCapabilities {
   send: boolean;
   /** Why sending is limited, even when it is available in some cases. */
   sendDetail?: string;
+  /** Whether the adapter can start a new conversation in a project. */
+  create: boolean;
+  /** Why creating a conversation is unavailable. */
+  createDetail?: string;
   /** Why an operation is unavailable. */
   reason?: string;
 }

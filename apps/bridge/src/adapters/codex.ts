@@ -364,6 +364,8 @@ export class CodexAdapter implements SessionAdapter {
         send: dbPath !== null && ipc,
         sendDetail:
           "仅能向 Codex 桌面当前打开的线程发送；原生 ChatGPT Chat/Work 不在该通道内，本适配器不提供。",
+        create: false,
+        createDetail: "Codex 桌面线程由 ChatGPT 应用创建，Bridge 只能读取并驱动已存在的线程。",
         reason: dbPath ? undefined : "未找到 Codex 线程数据库",
       },
     };

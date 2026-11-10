@@ -1818,6 +1818,11 @@ a.crumb:hover {
     display: none;
   }
 
+  /* The meta line already states the reason; the disabled entry would crowd the header. */
+  .create-btn {
+    display: none;
+  }
+
   .row {
     padding: 14px 6px;
     gap: 10px;

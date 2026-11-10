@@ -152,6 +152,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         send: root !== null && processError === null,
         sendDetail:
           "发送走运行中会话进程的本地 UDS 通道；仅对已在桌面打开的 Code 会话生效，回复需从 transcript 刷新。",
+        create: false,
+        createDetail: "桌面 Code 会话由 Claude Desktop 创建，Bridge 只能读取并驱动已存在的会话。",
         reason: root ? undefined : "未找到 Claude Desktop 的会话元数据目录",
       },
     };

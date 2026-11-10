@@ -1068,6 +1068,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const sessions = data.sessions
     .filter((session) => session.projectId === route.projectId)
     .sort((a, b) => b.updatedAt - a.updatedAt);
+  const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
 
   const list = el("ul", { className: "list" });
   if (sessions.length === 0) {
@@ -1099,8 +1100,20 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         el("div", { className: "view-head-main" }, [
           el("p", { className: "eyebrow", text: `${appInfo?.name ?? "客户端"}${project?.cwd ? ` · ${project.cwd}` : ""}` }),
           el("h1", { className: "display", text: project?.name ?? "会话" }),
-          el("p", { className: "meta", text: `${sessions.length} 个会话 · 最近更新在前` }),
+          el("p", {
+            className: "meta",
+            text: `${sessions.length} 个会话 · 最近更新在前${createDetail ? " · 无法新建对话" : ""}`,
+          }),
         ]),
+        ...(createDetail
+          ? [
+              el("button", {
+                className: "btn ghost small create-btn",
+                text: "新对话",
+                attrs: { type: "button", disabled: "", title: createDetail },
+              }),
+            ]
+          : []),
       ]),
       ...(data.note ? [el("p", { className: "hint", text: data.note })] : []),
       list,
