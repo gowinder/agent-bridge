@@ -105,6 +105,56 @@ function icon(name: keyof typeof ICONS, className = "icon"): HTMLElement {
   return span;
 }
 
+/** Matches dist/version.json; "dev" disables the update check under `vite dev`. */
+const APP_VERSION = __APP_VERSION__;
+const VERSION_POLL_MS = 60_000;
+
+function showUpdateBanner(version: string): void {
+  if (document.querySelector(".update-banner")) return;
+  const bar = el("div", { className: "update-banner", attrs: { role: "status" } });
+  bar.append(
+    el("span", { className: "update-text", text: "前端已更新，刷新后使用新版本" }),
+    button(
+      "刷新",
+      () => {
+        const url = new URL(location.href);
+        url.searchParams.set("v", version);
+        location.replace(url.toString());
+      },
+      "btn primary small",
+    ),
+  );
+  document.body.append(bar);
+}
+
+/** Prompts the user to reload when the deployed bundle is newer than the running one. */
+function watchForUpdates(): void {
+  if (APP_VERSION === "dev") return;
+  let pending = false;
+  const check = async (): Promise<void> => {
+    if (pending) return;
+    try {
+      const response = await fetch(`version.json?t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return;
+      const data: unknown = await response.json();
+      const version =
+        typeof data === "object" && data !== null
+          ? (data as Record<string, unknown>)["version"]
+          : undefined;
+      if (typeof version !== "string" || version === APP_VERSION) return;
+      pending = true;
+      showUpdateBanner(version);
+    } catch {
+      // Offline or no version.json; the next tick tries again.
+    }
+  };
+  void check();
+  window.setInterval(() => void check(), VERSION_POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") void check();
+  });
+}
+
 const root = document.querySelector<HTMLDivElement>("#app");
 if (!root) throw new Error("缺少 #app 容器");
 const app: HTMLDivElement = root;
@@ -1154,7 +1204,7 @@ function renderDevices(): void {
         el("div", { className: "view-head-main" }, [
           el("p", { className: "eyebrow", text: state.info.name }),
           el("h1", { className: "display", text: "已授权设备" }),
-          el("p", { className: "meta", text: `Bridge ${state.info.version} · ${state.info.platform} · 通道已加密（Noise IK）` }),
+          el("p", { className: "meta", text: `Bridge ${state.info.version} · 前端 ${APP_VERSION} · ${state.info.platform} · 通道已加密（Noise IK）` }),
         ]),
       ]),
       list,
@@ -2282,6 +2332,13 @@ function skeletonView(route: Route): HTMLElement {
     rows,
   ]);
 }
+
+const bootUrl = new URL(location.href);
+if (bootUrl.searchParams.has("v")) {
+  bootUrl.searchParams.delete("v");
+  history.replaceState(null, "", bootUrl.toString());
+}
+watchForUpdates();
 
 const initialLink = takeInviteLink();
 if (initialLink) {
