@@ -298,12 +298,18 @@ a.crumb:hover {
   mask-image: linear-gradient(90deg, transparent 0, #000 5%, #000 95%, transparent 100%);
 }
 
-.recents-track.is-scrolling {
+.recents-marquee {
+  display: inline-flex;
+  flex: none;
+  min-width: 0;
+}
+
+.recents-marquee.is-scrolling {
   animation: recents-marquee 24s linear infinite;
 }
 
-.recents-btn:hover .recents-track.is-scrolling,
-.recents-btn:focus-visible .recents-track.is-scrolling {
+.recents-btn:hover .recents-marquee.is-scrolling,
+.recents-btn:focus-visible .recents-marquee.is-scrolling {
   animation-play-state: paused;
 }
 
@@ -330,7 +336,7 @@ a.crumb:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .recents-track.is-scrolling {
+  .recents-marquee.is-scrolling {
     animation: none;
   }
 }
