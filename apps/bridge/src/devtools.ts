@@ -81,12 +81,19 @@ interface ExecRecord {
   timer: NodeJS.Timeout;
 }
 
+/** An exec still waiting on the adapter index; a closing channel cancels it before spawn. */
+interface PendingExec {
+  owner: string;
+  cancelled: boolean;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
 export class Devtools {
   private execs = new Map<string, ExecRecord>();
+  private pendingExecs = new Set<PendingExec>();
   private rootsCache: { at: number; roots: Array<FsRoot & { real: string }> } | null = null;
   private rootsLoading: Promise<Array<FsRoot & { real: string }>> | null = null;
   private expiryTimer: NodeJS.Timeout | null = null;
@@ -226,6 +233,8 @@ export class Devtools {
   async listDirs(path: string): Promise<FsListResult> {
     this.requireEnabled();
     const { real } = await this.resolveInside(path);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireEnabled();
     let stats;
     try {
       stats = statSync(real);
@@ -266,6 +275,8 @@ export class Devtools {
   async readFile(path: string): Promise<FsReadResult> {
     this.requireEnabled();
     const { real } = await this.resolveInside(path);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireEnabled();
     let stats;
     try {
       stats = statSync(real);
@@ -317,8 +328,19 @@ export class Devtools {
     const text = command.trim();
     if (!text) throw new RpcError("invalid_params", "命令不能为空");
     if (text.length > 8_000) throw new RpcError("invalid_params", "命令过长");
-    const roots = await this.allRoots();
-    const workdir = cwd ? (await this.resolveInside(cwd)).real : roots[0]?.real;
+    // Registered before the root lookup: a channel closed while we wait must not spawn.
+    const pending: PendingExec = { owner, cancelled: false };
+    this.pendingExecs.add(pending);
+    let workdir: string | undefined;
+    try {
+      const roots = await this.allRoots();
+      workdir = cwd ? (await this.resolveInside(cwd)).real : roots[0]?.real;
+    } finally {
+      this.pendingExecs.delete(pending);
+    }
+    if (pending.cancelled) throw new RpcError("unsupported", "设备通道已断开");
+    // The switch can be turned off, or expire, while the adapter index is loading.
+    this.requireEnabled();
     if (!workdir) throw new RpcError("unsupported", "没有可用的项目目录");
     const timeout = clamp(Math.round(timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000, MAX_TIMEOUT_MS);
     const shell = process.env["SHELL"] && existsSync(process.env["SHELL"]) ? process.env["SHELL"] : "/bin/sh";
@@ -398,6 +420,9 @@ export class Devtools {
 
   /** Kills everything a closed device channel started. */
   disposeOwner(owner: string): void {
+    for (const pending of this.pendingExecs) {
+      if (pending.owner === owner) pending.cancelled = true;
+    }
     for (const [execId, record] of this.execs) {
       if (record.owner === owner) this.kill(execId, false);
     }
