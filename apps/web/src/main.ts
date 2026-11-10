@@ -514,6 +514,12 @@ function showPairError(message: string): void {
   );
 }
 
+function flashNotice(message: string): void {
+  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" }, text: message });
+  document.body.append(box);
+  window.setTimeout(() => box.remove(), 5000);
+}
+
 function renderHome(): HTMLElement {
   const devices = listDevices();
   const page = el("main", { className: "page narrow" }, [
@@ -1278,6 +1284,8 @@ async function renderRoute(soft = false): Promise<void> {
   const route = parseRoute();
   if (soft && chatResume && chatResumeKey === hashFor(route)) {
     chatResume();
+    // 重连会清空快照；这里补拉一次，分享等依赖全局数据的操作才不会静默失效。
+    if (!snapshot) void ensureSnapshot().catch(() => {});
     return;
   }
   const token = ++renderToken;
@@ -3494,8 +3502,18 @@ interface SharePick {
 }
 
 async function openShare(source: SessionSummary, message: MessageRecord): Promise<void> {
-  if (!snapshot) return;
-  const data: Snapshot = snapshot;
+  // 重连会清空快照；点分享时补拉一次，别让按钮静默失效。
+  let data: Snapshot;
+  if (snapshot) {
+    data = snapshot;
+  } else {
+    try {
+      data = await ensureSnapshot();
+    } catch (error) {
+      flashNotice(`读取会话列表失败：${messageOf(error)}`);
+      return;
+    }
+  }
   const exclude = new Set([source.sessionId]);
   const pick: SharePick = { appId: null, projectId: null, sessionId: null };
   let prepared: TransferPrepareResult | null = null;
