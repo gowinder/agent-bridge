@@ -63,6 +63,7 @@ interface CachedMessages {
   messages: MessageRecord[];
   context?: ContextUsage;
   busy?: BusyState;
+  interrupted?: boolean;
 }
 
 interface RawLine {
@@ -125,11 +126,11 @@ function modelOf(entry: RawLine): string | undefined {
   return typeof model === "string" && model !== "" ? model : undefined;
 }
 
-/** Codex opens a task with `task_started` and closes it with `task_complete`. */
+/** Codex opens a task with `task_started` and closes it with `task_complete` or `turn_aborted`. */
 function trackRolloutBusy(busy: BusyState, entry: RawLine): void {
   if (entry.type !== "event_msg") return;
   const kind = entry.payload?.["type"];
-  if (kind !== "task_started" && kind !== "task_complete") return;
+  if (kind !== "task_started" && kind !== "task_complete" && kind !== "turn_aborted") return;
   const at = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
   if (!Number.isFinite(at)) return;
   if (kind === "task_started") {
@@ -138,6 +139,10 @@ function trackRolloutBusy(busy: BusyState, entry: RawLine): void {
   } else if (at > busy.lastEnd) {
     busy.lastEnd = at;
   }
+}
+
+function isAbortEntry(entry: RawLine): boolean {
+  return entry.type === "event_msg" && entry.payload?.["type"] === "turn_aborted";
 }
 
 const BUSY_MAX_AGE_MS = 30 * 60_000;
@@ -435,6 +440,7 @@ export class CodexAdapter implements SessionAdapter {
     };
     if (parsed.context) result.context = parsed.context;
     if (parsed.busy) result.busy = true;
+    if (parsed.interrupted) result.interrupted = true;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
   }
@@ -714,14 +720,21 @@ export class CodexAdapter implements SessionAdapter {
   private async readRollout(
     path: string,
     threadId: string,
-  ): Promise<{ messages: MessageRecord[]; context?: ContextUsage; busy: boolean }> {
+  ): Promise<{
+    messages: MessageRecord[];
+    context?: ContextUsage;
+    busy: boolean;
+    interrupted: boolean;
+  }> {
     const stat = statSync(path);
     const cached = this.messageCache.get(path);
     if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      const interrupted = cached.interrupted === true;
       return {
         messages: cached.messages,
         ...(cached.context ? { context: cached.context } : {}),
-        busy: rolloutBusy(cached.busy),
+        busy: rolloutBusy(cached.busy) && !interrupted,
+        interrupted,
       };
     }
     const stream = createReadStream(path);
@@ -731,6 +744,9 @@ export class CodexAdapter implements SessionAdapter {
     const busy: BusyState = { lastStart: 0, lastEnd: 0, sawStart: false };
     let context: ContextUsage | undefined;
     let model: string | undefined;
+    let lastContentOrder = -1;
+    let lastAbortOrder = -1;
+    let order = 0;
     try {
       for await (const line of lines) {
         if (!line.trim()) continue;
@@ -740,8 +756,13 @@ export class CodexAdapter implements SessionAdapter {
         } catch {
           continue;
         }
+        order += 1;
+        if (isAbortEntry(entry)) lastAbortOrder = order;
         const message = this.toMessage(entry, threadId, messages.length);
-        if (message) messages.push(message);
+        if (message) {
+          messages.push(message);
+          lastContentOrder = order;
+        }
         model = modelOf(entry) ?? model;
         const usage = contextOf(entry);
         if (usage) context = usage;
@@ -751,6 +772,7 @@ export class CodexAdapter implements SessionAdapter {
       lines.close();
       stream.destroy();
     }
+    const interrupted = lastAbortOrder > lastContentOrder;
     if (context && model) context.model = model;
     this.messageCache.set(path, {
       mtimeMs: stat.mtimeMs,
@@ -758,8 +780,14 @@ export class CodexAdapter implements SessionAdapter {
       messages,
       ...(context ? { context } : {}),
       busy,
+      interrupted,
     });
-    return { messages, ...(context ? { context } : {}), busy: rolloutBusy(busy) };
+    return {
+      messages,
+      ...(context ? { context } : {}),
+      busy: rolloutBusy(busy) && !interrupted,
+      interrupted,
+    };
   }
 
   private toMessage(entry: RawLine, threadId: string, index: number): MessageRecord | null {

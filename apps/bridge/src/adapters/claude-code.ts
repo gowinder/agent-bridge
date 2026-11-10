@@ -71,6 +71,7 @@ interface CachedMessages {
   messages: MessageRecord[];
   context?: ContextUsage;
   busy?: BusyState;
+  interrupted?: boolean;
 }
 
 function asString(value: unknown): string {
@@ -85,6 +86,23 @@ function asNumber(value: unknown): number {
 function isMillionTokenModel(model: string): boolean {
   const name = model.toLowerCase();
   return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
+}
+
+/** A turn the user stopped is recorded as a synthetic user entry. */
+function isInterruptEntry(entry: RawEntry): boolean {
+  if (entry.type !== "user" || entry.isSidechain) return false;
+  const content = entry.message?.content;
+  const texts: string[] = [];
+  if (typeof content === "string") {
+    texts.push(content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const text = (block as Record<string, unknown>)["text"];
+      if (typeof text === "string") texts.push(text);
+    }
+  }
+  return texts.some((text) => text.trim().startsWith("[Request interrupted by user"));
 }
 
 /** A turn is open when the last main-chain user entry is newer than the last turn end. */
@@ -248,6 +266,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     };
     if (parsed.context) result.context = parsed.context;
     if (parsed.busy) result.busy = true;
+    if (parsed.interrupted) result.interrupted = true;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
   }
@@ -495,7 +514,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   private readTranscript(
     path: string,
     sessionId: string,
-  ): { messages: MessageRecord[]; context?: ContextUsage; busy: boolean } {
+  ): { messages: MessageRecord[]; context?: ContextUsage; busy: boolean; interrupted: boolean } {
     let mtimeMs = 0;
     let size = 0;
     try {
@@ -507,16 +526,21 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
     const cached = this.messageCache.get(path);
     if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+      const interrupted = cached.interrupted === true;
       return {
         messages: cached.messages,
         ...(cached.context ? { context: cached.context } : {}),
-        busy: isBusy(cached.busy),
+        busy: isBusy(cached.busy) && !interrupted,
+        interrupted,
       };
     }
 
     const messages: MessageRecord[] = [];
     let context: ContextUsage | undefined;
     const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, sawTurnEnd: false };
+    let lastContentOrder = -1;
+    let lastInterruptOrder = -1;
+    let order = 0;
     let text;
     try {
       text = readFileSync(path, "utf8");
@@ -531,20 +555,35 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       } catch {
         continue;
       }
+      order += 1;
+      if (isInterruptEntry(entry)) {
+        lastInterruptOrder = order;
+        continue;
+      }
       const message = this.toMessage(entry, sessionId, messages.length);
-      if (message) messages.push(message);
+      if (message) {
+        messages.push(message);
+        lastContentOrder = order;
+      }
       const usage = this.contextOf(entry);
       if (usage) context = usage;
       trackBusy(busy, entry);
     }
+    const interrupted = lastInterruptOrder > lastContentOrder;
     this.messageCache.set(path, {
       mtimeMs,
       size,
       messages,
       ...(context ? { context } : {}),
       busy,
+      interrupted,
     });
-    return { messages, ...(context ? { context } : {}), busy: isBusy(busy) };
+    return {
+      messages,
+      ...(context ? { context } : {}),
+      busy: isBusy(busy) && !interrupted,
+      interrupted,
+    };
   }
 
   /** Latest assistant usage entry wins; it describes the context the next turn will see. */

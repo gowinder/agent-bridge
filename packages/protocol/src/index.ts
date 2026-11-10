@@ -342,6 +342,8 @@ export interface MessageListResult {
   context?: ContextUsage;
   /** The client is still working on the latest turn. */
   busy?: boolean;
+  /** The latest turn was stopped by the user before it finished. */
+  interrupted?: boolean;
 }
 
 export interface MessageSendResult {

@@ -1173,6 +1173,22 @@ a.crumb:hover {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
 }
 
+.turn-stop {
+  display: inline-flex;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
+}
+
+.stopped-label {
+  color: var(--muted);
+}
+
+.message.assistant.is-stopped {
+  border-color: var(--line);
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);

@@ -88,6 +88,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.2 8a5.2 5.2 0 1 1-1.6-3.7"/><path d="M13.4 2.6v2.9h-2.9"/></svg>',
   history:
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.8 8a5.2 5.2 0 1 0 1.6-3.7"/><path d="M2.6 2.6v2.9h2.9"/><path d="M8 5.4V8l1.9 1.1"/></svg>',
+  stop:
+    '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><rect x="5.8" y="5.8" width="4.4" height="4.4" rx="1" fill="currentColor" stroke="none"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -1220,6 +1222,8 @@ interface ChatState {
   status: HTMLElement;
   loading: boolean;
   busy: boolean;
+  /** The latest turn was stopped by the user. */
+  interrupted: boolean;
   context?: ContextUsage;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
@@ -1268,6 +1272,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     status,
     loading: false,
     busy: false,
+    interrupted: false,
     contextButton,
     contextPop,
   };
@@ -1613,7 +1618,11 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     }
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
-    if (added || busyChanged || state.messages.length === 0) renderMessages(state);
+    const interruptedChanged = (result.interrupted === true) !== state.interrupted;
+    state.interrupted = result.interrupted === true;
+    if (added || busyChanged || interruptedChanged || state.messages.length === 0) {
+      renderMessages(state);
+    }
     return result;
   } catch (error) {
     if (active) state.status.textContent = messageOf(error);
@@ -1802,21 +1811,29 @@ function spinner(): HTMLElement {
   return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
 }
 
-/** Marks the last assistant turn as still running, so a long run is not mistaken for a stop. */
-function markBusy(list: HTMLElement): void {
+/** Marks the last assistant turn with its state: still running, or stopped by the user. */
+function markTurnState(list: HTMLElement, state: ChatState): void {
+  if (!state.busy && !state.interrupted) return;
   const bubbles = list.querySelectorAll<HTMLElement>("article.message.assistant");
   const last = bubbles[bubbles.length - 1];
   const summary = last?.querySelector<HTMLElement>(".turn-steps-summary");
+  const badge = state.busy
+    ? [spinner(), el("span", { className: "thinking-label", text: "进行中" })]
+    : [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "已中断" })];
   if (summary) {
-    summary.append(spinner(), el("span", { className: "thinking-label", text: "进行中" }));
-    last?.classList.add("is-busy");
+    summary.append(...badge);
+    last?.classList.add(state.busy ? "is-busy" : "is-stopped");
     return;
   }
   const row = el("div", { className: "thinking-row" });
-  row.append(spinner(), el("span", { className: "thinking-label", text: "思考中…" }));
+  if (state.busy) {
+    row.append(spinner(), el("span", { className: "thinking-label", text: "思考中…" }));
+  } else {
+    row.append(icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "该回合已被中断" }));
+  }
   if (last) {
     last.append(row);
-    last.classList.add("is-busy");
+    last.classList.add(state.busy ? "is-busy" : "is-stopped");
     return;
   }
   list.append(row);
@@ -1833,7 +1850,7 @@ function renderMessages(state: ChatState): void {
   if (state.messages.length === 0) {
     list.append(emptyState("没有可读取的消息", "这个会话在桌面应用中可能只有工具调用，或者还没有开始。"));
     appendQueued();
-    if (state.busy) markBusy(list);
+    if (state.busy || state.interrupted) markTurnState(list, state);
     return;
   }
   let turn: MessageRecord[] = [];
@@ -1852,7 +1869,7 @@ function renderMessages(state: ChatState): void {
   }
   flush();
   appendQueued();
-  if (state.busy) markBusy(list);
+  markTurnState(list, state);
   if (stick) list.scrollTop = list.scrollHeight;
 }
 
@@ -1899,6 +1916,7 @@ async function sendMessage(
         held: !result.delivered && (result.detail ?? "").includes("排队"),
       });
       state.busy = true;
+      state.interrupted = false;
       renderMessages(state);
     }
     status.textContent = result.delivered
