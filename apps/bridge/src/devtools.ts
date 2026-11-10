@@ -4,7 +4,7 @@
 // `agent-bridge devtools`. File browsing never leaves the chat's own project directory.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, resolve, sep } from "node:path";
 import {
   DEVTOOLS_CAPABILITIES,
@@ -267,16 +267,20 @@ export class Devtools {
    */
   private async scope(sessionId: string | undefined, root: string): Promise<ScopedRoot> {
     if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
-    let want: string;
+    const { session } = await this.adapters.session(sessionId);
+    // A missing path must not be reported differently from a foreign one, or the
+    // device could probe the filesystem for existence outside the project.
+    let want: string | null = null;
     try {
       want = realpathSync(resolve(root));
     } catch {
-      throw new RpcError("not_found", "项目目录不存在");
+      want = null;
     }
-    const { session } = await this.adapters.session(sessionId);
-    const match = (await this.allRoots()).find(
-      (item) => item.real === want && item.projectIds.has(session.projectId),
-    );
+    const match = want === null
+      ? undefined
+      : (await this.allRoots()).find(
+        (item) => item.real === want && item.projectIds.has(session.projectId),
+      );
     if (!match) throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
     return match;
   }
@@ -314,7 +318,8 @@ export class Devtools {
       const child = `${real}${sep}${entry.name}`;
       let childStats;
       try {
-        childStats = statSync(child);
+        // lstat: a symlink pointing outside the project must not leak its target's size or mtime.
+        childStats = lstatSync(child);
       } catch {
         continue;
       }
