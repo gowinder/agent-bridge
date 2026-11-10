@@ -27,6 +27,8 @@ const MAX_INVITE_TTL_SECONDS = 600;
 const MAX_DEVICE_TTL_SECONDS = 30 * 24 * 3600;
 const MAX_FRAME_BYTES = 64 * 1024;
 const HELLO_TIMEOUT_MS = 5_000;
+/** 认领房间所需的 bridge 凭据最小长度，避免用可猜的短串占号。 */
+const MIN_BRIDGE_TOKEN_CHARS = 16;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -136,27 +138,6 @@ export class Room {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const path = url.pathname;
-
-    if (path === "/admin/create" && request.method === "POST") {
-      if (this.meta("bridge_hash")) return errorResponse("conflict", "room exists", 409);
-      const body = (await request.json()) as { roomId?: string; bridgeHash?: string };
-      if (!body.roomId || !body.bridgeHash) return errorResponse("bad_request", "missing fields", 400);
-      this.setMeta("room_id", body.roomId);
-      this.setMeta("bridge_hash", body.bridgeHash);
-      this.setMeta("created_at", String(Date.now()));
-      return json({ roomId: body.roomId });
-    }
-
-    if (path === "/admin/rotate" && request.method === "POST") {
-      const body = (await request.json()) as { bridgeHash?: string };
-      if (!body.bridgeHash) return errorResponse("bad_request", "missing fields", 400);
-      this.setMeta("bridge_hash", body.bridgeHash);
-      for (const ws of this.ctx.getWebSockets()) {
-        const attachment = ws.deserializeAttachment() as Attachment | null;
-        if (attachment?.role === "bridge") ws.close(4001, "credential rotated");
-      }
-      return json({ ok: true });
-    }
 
     if (path === "/ws") {
       return this.handleWebSocket(request);
@@ -369,7 +350,8 @@ export class Room {
 
   private async authenticate(ws: WebSocket, hello: RelayHello): Promise<void> {
     const roomId = this.meta("room_id");
-    if (!roomId || hello.room !== roomId) {
+    // 房间在首个 bridge 连接时认领；未被认领的房间不接受浏览器连接。
+    if (roomId ? hello.room !== roomId : hello.role !== "bridge") {
       this.fail(ws, "not_found", "unknown room");
       return;
     }
@@ -379,8 +361,17 @@ export class Room {
         this.fail(ws, "invalid_credential", "bridge credential required");
         return;
       }
+      if (hello.credential.token.length < MIN_BRIDGE_TOKEN_CHARS) {
+        this.fail(ws, "invalid_credential", "bridge token too short");
+        return;
+      }
+      const presented = await sha256Hex(hello.credential.token);
       const stored = this.meta("bridge_hash");
-      if (!stored || !constantTimeEqual(await sha256Hex(hello.credential.token), stored)) {
+      if (!stored) {
+        this.setMeta("room_id", hello.room);
+        this.setMeta("bridge_hash", presented);
+        this.setMeta("created_at", String(Date.now()));
+      } else if (!constantTimeEqual(presented, stored)) {
         this.fail(ws, "invalid_credential", "bad bridge token");
         return;
       }

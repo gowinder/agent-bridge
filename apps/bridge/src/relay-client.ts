@@ -42,25 +42,6 @@ function errorCode(body: unknown, fallback: string): string {
   return fallback;
 }
 
-export async function createRoom(
-  relayUrl: string,
-  adminToken: string,
-  roomId: string,
-): Promise<{ roomId: string; bridgeToken: string }> {
-  const response = await fetch(new URL("/v1/rooms", relayUrl), {
-    method: "POST",
-    headers: { authorization: `Bearer ${adminToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ roomId }),
-  });
-  const body = await readJson(response);
-  if (!response.ok) {
-    throw new RelayError(errorCode(body, "request_failed"), `create room failed (${response.status})`, response.status);
-  }
-  const parsed = body as { roomId?: string; bridgeToken?: string };
-  if (!parsed.roomId || !parsed.bridgeToken) throw new RelayError("bad_response", "bad create response", 502);
-  return { roomId: parsed.roomId, bridgeToken: parsed.bridgeToken };
-}
-
 export class RelayApi {
   constructor(
     private readonly relayUrl: string,
