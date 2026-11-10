@@ -305,6 +305,7 @@ function stopActive(): void {
   active = null;
   connected = null;
   snapshot = null;
+  interruptShellRuns();
 }
 
 function stopPolling(): void {
@@ -1931,6 +1932,10 @@ interface ShellPaneState {
   history: string[];
   historyIndex: number;
   cwd?: string;
+  /** A shell.exec request is in flight; its execId is not known yet. */
+  pending: boolean;
+  /** Last request error, shown after the run buffer so a repaint cannot swallow it. */
+  notice?: string;
 }
 
 /**
@@ -2365,6 +2370,7 @@ function openShellPane(state: RailState): void {
     history: [],
     historyIndex: 0,
     cwd,
+    pending: false,
   };
   syncShellPane(state);
   input.focus();
@@ -2381,11 +2387,11 @@ function syncShellPane(state: RailState): void {
   const shell = state.shell;
   if (!shell) return;
   const run = shellRunOf(state);
-  shell.output.textContent = run?.text ?? "";
+  shell.output.textContent = `${run?.text ?? ""}${shell.notice ?? ""}`;
   shell.output.scrollTop = shell.output.scrollHeight;
-  const running = run !== null && !run.done;
+  const running = (run !== null && !run.done) || shell.pending;
   shell.run.disabled = running;
-  shell.stop.hidden = !running;
+  shell.stop.hidden = run === null || run.done;
   if (run) {
     shell.cwd = run.cwd;
     shell.cwdLine.textContent = run.cwd;
@@ -2430,7 +2436,7 @@ function handleShellEvent(data: ShellEventData): void {
 
 async function runShell(state: RailState): Promise<void> {
   const shell = state.shell;
-  if (!shell) return;
+  if (!shell || shell.pending) return;
   const previous = shellRunOf(state);
   if (previous && !previous.done) return;
   const command = shell.input.value.trim();
@@ -2438,10 +2444,11 @@ async function runShell(state: RailState): Promise<void> {
   shell.input.value = "";
   shell.history.push(command);
   shell.historyIndex = shell.history.length;
+  shell.notice = undefined;
+  shell.pending = true;
+  syncShellPane(state);
   shell.output.textContent = capShellText(`${shell.output.textContent ?? ""}$ ${command}\n`);
   shell.output.scrollTop = shell.output.scrollHeight;
-  shell.run.disabled = true;
-  shell.stop.hidden = false;
   try {
     const result = await call<ShellExecResult>("shell.exec", { command, cwd: shell.cwd }, 20_000);
     const run: ShellRun = {
@@ -2458,10 +2465,12 @@ async function runShell(state: RailState): Promise<void> {
     const early = shellEarly.get(result.execId) ?? [];
     shellEarly.delete(result.execId);
     for (const event of early) applyShellEvent(run, event);
+    shell.pending = false;
     syncShellPane(state);
   } catch (error) {
-    shell.output.textContent = `${shell.output.textContent ?? ""}${messageOf(error)}\n`;
-    shell.output.scrollTop = shell.output.scrollHeight;
+    shell.pending = false;
+    // Kept in state so the repaint cannot wipe the reason the command never started.
+    shell.notice = `${messageOf(error)}\n`;
     syncShellPane(state);
   }
 }
@@ -2476,8 +2485,23 @@ async function stopShell(state: RailState): Promise<void> {
     if (run) run.text = capShellText(`${run.text}\n^C 已请求停止\n`);
     syncShellPane(state);
   } catch (error) {
-    shell.output.textContent = `${shell.output.textContent ?? ""}${messageOf(error)}\n`;
+    shell.notice = `${messageOf(error)}\n`;
     syncShellPane(state);
+  }
+}
+
+/** A dropped device channel kills its commands silently, so mark them interrupted. */
+function interruptShellRuns(): void {
+  for (const run of shellRuns.values()) {
+    if (run.done) continue;
+    run.done = true;
+    run.text = capShellText(`${run.text}\n[连接已断开，命令已终止]\n`);
+  }
+  const rail = currentRail;
+  if (rail?.state.shell) {
+    // An exec whose response never arrived would otherwise keep the form locked.
+    rail.state.shell.pending = false;
+    syncShellPane(rail.state);
   }
 }
 
