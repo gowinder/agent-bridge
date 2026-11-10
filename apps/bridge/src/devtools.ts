@@ -98,6 +98,12 @@ interface ExecRecord {
   timer: NodeJS.Timeout;
 }
 
+/** An exec still waiting on the adapter index; a closing channel cancels it before spawn. */
+interface PendingExec {
+  owner: string;
+  cancelled: boolean;
+}
+
 interface ExpiryState {
   timer: NodeJS.Timeout | null;
   for: number | null;
@@ -206,6 +212,8 @@ export class Devtools {
   async roots(root: string): Promise<FsRootsResult> {
     this.requireCapability("files");
     const scoped = await this.scope(root);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireCapability("files");
     return { enabled: true, roots: [{ name: scoped.name, path: scoped.path }] };
   }
 
