@@ -21,7 +21,17 @@ export function credentialsFromFragment(hash: string): PairingLink | null {
   } catch {
     return null;
   }
-  if (relayUrl.protocol !== "https:" && relayUrl.protocol !== "http:") return null;
+  // 中继决定了设备连到哪里：非回环地址必须用 https，否则链路上的房间号与授权都在明处。
+  const loopback =
+    relayUrl.hostname === "localhost" ||
+    relayUrl.hostname === "127.0.0.1" ||
+    relayUrl.hostname === "[::1]";
+  if (
+    relayUrl.protocol !== "https:" &&
+    !(relayUrl.protocol === "http:" && (loopback || location.protocol === "http:"))
+  ) {
+    return null;
+  }
   return { relayUrl: relayUrl.origin, roomId: room, inviteToken: invite };
 }
 
