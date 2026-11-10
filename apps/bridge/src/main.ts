@@ -5,6 +5,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@agent-bridge/crypto";
 import { loadNoiseNode } from "@agent-bridge/crypto/node";
+import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from "@agent-bridge/protocol";
 import { SessionAdapters } from "./adapters/index.js";
 import {
   ADMIN_HOST,
@@ -14,7 +15,7 @@ import {
   type AdminActions,
   type AdminDevice,
 } from "./admin.js";
-import { Devtools } from "./devtools.js";
+import { Devtools, isDevtoolsCapability } from "./devtools.js";
 import {
   RelayApi,
   RelayClient,
@@ -43,7 +44,7 @@ function usage(): void {
   agent-bridge serve
   agent-bridge devices
   agent-bridge revoke <deviceId>
-  agent-bridge devtools [on|off|status] [--ttl 3600]
+  agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]
   agent-bridge status
   agent-bridge info
 
@@ -218,20 +219,16 @@ async function commandRevoke(args: string[]): Promise<void> {
   }
 }
 
-interface DevtoolsSwitchState {
-  enabled: boolean;
-  expiresAt: number | null;
-}
-
 /**
- * Asks the running bridge to flip the switch: it owns the running commands, so a
+ * Asks the running bridge to flip one switch: it owns the running commands, so a
  * direct database write from this process would leave them executing.
  */
 async function setDevtoolsOnBridge(
   store: Store,
+  capability: DevtoolsCapabilityName,
   enabled: boolean,
   ttlSeconds: number | null,
-): Promise<DevtoolsSwitchState | null> {
+): Promise<DevtoolsStatus | null> {
   let token: string;
   try {
     token = readFileSync(join(store.dir, "admin-token"), "utf8").trim();
@@ -245,14 +242,23 @@ async function setDevtoolsOnBridge(
     const response = await fetch(`http://${ADMIN_HOST}:${port}/devtools`, {
       method: "POST",
       headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({ enabled, ttlSeconds }),
+      body: JSON.stringify({ capability, enabled, ttlSeconds }),
       signal: AbortSignal.timeout(3_000),
     });
     if (!response.ok) return null;
-    return (await response.json()) as DevtoolsSwitchState;
+    return (await response.json()) as DevtoolsStatus;
   } catch {
     return null;
   }
+}
+
+function printDevtools(status: DevtoolsStatus): void {
+  const line = (label: string, capability: DevtoolsCapability): string =>
+    `${label}：${capability.enabled ? "已开启" : "已关闭"}${
+      capability.expiresAt ? `（${new Date(capability.expiresAt).toLocaleTimeString()} 失效）` : ""
+    }`;
+  console.log(line("文件浏览", status.files));
+  console.log(line("命令执行", status.terminal));
 }
 
 /** Remote file browsing and command execution are off unless turned on here or in the menu bar. */
@@ -264,29 +270,32 @@ async function commandDevtools(args: string[]): Promise<void> {
       local ??= new Devtools(store, new SessionAdapters(), (line) => console.log(line));
       return local;
     };
-    const action = args[0] ?? "status";
-    let next: DevtoolsSwitchState | null = null;
+    const first = args[0];
+    if (first === undefined || first === "status") {
+      printDevtools(localDevtools().status());
+      return;
+    }
+    if (!isDevtoolsCapability(first)) {
+      throw new Error("用法：agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]");
+    }
+    const action = args[1] ?? "status";
+    let next: DevtoolsStatus | null = null;
     if (action === "on") {
       const ttlRaw = flag(args, "ttl") ?? "3600";
       const ttl = Number(ttlRaw);
       if (!Number.isFinite(ttl) || ttl < 60 || ttl > 86_400) throw new Error("--ttl 必须在 60..86400 秒之间");
-      next = await setDevtoolsOnBridge(store, true, ttl);
-      if (!next) next = localDevtools().setEnabled(true, ttl);
+      next = await setDevtoolsOnBridge(store, first, true, ttl);
+      if (!next) next = localDevtools().setEnabled(first, true, ttl);
     } else if (action === "off") {
-      next = await setDevtoolsOnBridge(store, false, null);
+      next = await setDevtoolsOnBridge(store, first, false, null);
       if (!next) {
         console.log("Bridge 未在运行：只更新本地状态，下次启动时生效");
-        next = localDevtools().setEnabled(false);
+        next = localDevtools().setEnabled(first, false);
       }
     } else if (action !== "status") {
-      throw new Error("用法：agent-bridge devtools [on|off|status] [--ttl 3600]");
+      throw new Error("用法：agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]");
     }
-    const status = next ?? localDevtools().status();
-    console.log(
-      `远程工具：${status.enabled ? "已开启" : "已关闭"}${
-        status.expiresAt ? `（${new Date(status.expiresAt).toLocaleTimeString()} 失效）` : ""
-      }`,
-    );
+    printDevtools(next ?? localDevtools().status());
   } finally {
     store.close();
   }
@@ -408,10 +417,7 @@ async function commandServe(): Promise<void> {
           name: entry.name ?? null,
           since: entry.since,
         })),
-        devtools: {
-          enabled: devtoolsStatus.enabled,
-          expiresAt: devtoolsStatus.expiresAt,
-        },
+        devtools: devtoolsStatus,
         pairings: [...sessions.values()]
           .filter((entry) => entry.kind === "pair")
           .map((entry) => ({ channel: entry.channel, code: entry.code ?? null, since: entry.since })),
@@ -429,9 +435,8 @@ async function commandServe(): Promise<void> {
     async createInvite(ttlSeconds: number) {
       return mintInvite(api, store, config, ttlSeconds);
     },
-    async setDevtools(enabled: boolean, ttlSeconds: number | null) {
-      const status = devtools.setEnabled(enabled, ttlSeconds);
-      return { enabled: status.enabled, expiresAt: status.expiresAt };
+    async setDevtools(capability: DevtoolsCapabilityName, enabled: boolean, ttlSeconds: number | null) {
+      return devtools.setEnabled(capability, enabled, ttlSeconds);
     },
   };
 

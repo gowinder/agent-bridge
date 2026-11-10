@@ -5,6 +5,8 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import type { DevtoolsCapabilityName, DevtoolsStatus } from "@agent-bridge/protocol";
+import { isDevtoolsCapability } from "./devtools.js";
 
 export const ADMIN_HOST = "127.0.0.1";
 export const DEFAULT_ADMIN_PORT = 47825;
@@ -43,7 +45,7 @@ export interface AdminSnapshot {
   bridgePid: number;
   devices: AdminDevice[];
   connections: AdminConnection[];
-  devtools: { enabled: boolean; expiresAt: number | null };
+  devtools: DevtoolsStatus;
   /** Pairing channels that are still waiting for the confirm-code check. */
   pairings: AdminPairing[];
   /** Set when the relay could not be asked for the device list. */
@@ -55,7 +57,11 @@ export interface AdminActions {
   disconnectDevice(deviceId: string): Promise<{ closed: number }>;
   revokeDevice(deviceId: string): Promise<{ closed: number }>;
   createInvite(ttlSeconds: number): Promise<{ url: string; expiresAt: number }>;
-  setDevtools(enabled: boolean, ttlSeconds: number | null): Promise<{ enabled: boolean; expiresAt: number | null }>;
+  setDevtools(
+    capability: DevtoolsCapabilityName,
+    enabled: boolean,
+    ttlSeconds: number | null,
+  ): Promise<DevtoolsStatus>;
 }
 
 export interface AdminServerOptions {
@@ -159,9 +165,14 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
         }
         if (path === "/devtools" && request.method === "POST") {
           const body = await readBody(request);
+          const capability = body["capability"];
+          if (!isDevtoolsCapability(capability)) {
+            send(response, 400, { error: "capability 必须是 files 或 terminal" });
+            return;
+          }
           const enabled = body["enabled"] === true;
           const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : null;
-          send(response, 200, await actions.setDevtools(enabled, ttl));
+          send(response, 200, await actions.setDevtools(capability, enabled, ttl));
           return;
         }
         const action = /^\/devices\/([A-Za-z0-9_-]{8,64})\/(disconnect|revoke)$/.exec(path);
