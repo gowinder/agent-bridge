@@ -660,9 +660,16 @@ function showConfirm(challenge: PairingChallenge): void {
   );
 }
 
+/** 默认名称取设备类型：配对列表里看到的是设备，而不是浏览器。 */
 function defaultDeviceName(): string {
-  const agent = navigator.userAgent.match(/(Firefox|Edg|Chrome|Safari)\/[\d.]+/);
-  return agent ? `浏览器 · ${agent[1]}` : "浏览器";
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/iPad/.test(ua)) return "iPad";
+  if (/Android/.test(ua)) return "Android 设备";
+  if (/Macintosh|Mac OS X/.test(ua)) return "Mac";
+  if (/Windows/.test(ua)) return "Windows";
+  if (/Linux/.test(ua)) return "Linux";
+  return "浏览器";
 }
 
 async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> {
@@ -1017,14 +1024,17 @@ function recentSessionsButton(): HTMLElement | null {
   const titles = sessions.slice(0, 6).map((item) => item.title);
   const run = el("span", { className: "recents-run" });
   for (const title of titles) run.append(el("span", { className: "recents-item", text: title }));
+  // 滚动放在内层：外层只负责裁剪和渐隐，内层平移动画才不会盖到左侧图标上。
   const track = el("span", { className: "recents-track" });
-  track.append(run);
+  const marquee = el("span", { className: "recents-marquee" });
+  marquee.append(run);
   if (titles.length > 1) {
     const clone = el("span", { className: "recents-run" });
     for (const title of titles) clone.append(el("span", { className: "recents-item", text: title }));
-    track.append(clone);
-    track.classList.add("is-scrolling");
+    marquee.append(clone);
+    marquee.classList.add("is-scrolling");
   }
+  track.append(marquee);
   trigger.append(icon("clock"), track);
 
   const menu = el("div", { className: "recent-menu", attrs: { role: "menu" } });
