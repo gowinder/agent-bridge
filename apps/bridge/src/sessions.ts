@@ -329,6 +329,23 @@ export class DeviceSession implements ChannelSession {
         if (before) query.before = before;
         return this.options.adapters.messages(sessionId, query);
       }
+      case "session.rail": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.rail(sessionId);
+      }
+      case "task.messages": {
+        const sessionId = stringParam(params, "sessionId");
+        const taskId = stringParam(params, "taskId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        if (!taskId) throw new RpcError("invalid_params", "taskId required");
+        const query: { limit?: number; before?: string } = {};
+        const limit = numberParam(params, "limit");
+        const before = stringParam(params, "before");
+        if (limit !== undefined) query.limit = limit;
+        if (before) query.before = before;
+        return this.options.adapters.taskMessages(sessionId, taskId, query);
+      }
       case "message.send": {
         const sessionId = stringParam(params, "sessionId");
         const text = stringParam(params, "text") ?? "";

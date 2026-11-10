@@ -14,7 +14,10 @@ import type {
   Method,
   ProjectInfo,
   ProjectListResult,
+  RailRow,
+  RailTask,
   SessionListResult,
+  SessionRailResult,
   SessionSummary,
   TransferCommitResult,
   TransferPrepareResult,
@@ -92,6 +95,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="6"/><rect x="5.8" y="5.8" width="4.4" height="4.4" rx="1" fill="currentColor" stroke="none"/></svg>',
   check:
     '<svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.6 8.4l2.8 2.8 6-6.2"/></svg>',
+  rail:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="10" rx="1.6"/><path d="M9.6 3v10"/><path d="M4.4 6.2h2.4M4.4 8.6h2.4"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -227,7 +232,7 @@ type Route =
   | { level: "clients" }
   | { level: "projects"; appId: string }
   | { level: "sessions"; appId: string; projectId: string }
-  | { level: "chat"; appId: string; projectId: string; sessionId: string }
+  | { level: "chat"; appId: string; projectId: string; sessionId: string; taskId?: string }
   | { level: "devices" };
 
 function parseRoute(): Route {
@@ -241,7 +246,10 @@ function parseRoute(): Route {
   if (!projectId) return { level: "projects", appId };
   const sessionId = parts[4] === "sessions" ? parts[5] : undefined;
   if (!sessionId) return { level: "sessions", appId, projectId };
-  return { level: "chat", appId, projectId, sessionId };
+  const taskId = parts[6] === "tasks" ? parts[7] : undefined;
+  return taskId
+    ? { level: "chat", appId, projectId, sessionId, taskId }
+    : { level: "chat", appId, projectId, sessionId };
 }
 
 function hashFor(route: Route): string {
@@ -255,7 +263,9 @@ function hashFor(route: Route): string {
     case "sessions":
       return `#/clients/${encodeURIComponent(route.appId)}/projects/${encodeURIComponent(route.projectId)}`;
     case "chat":
-      return `#/clients/${encodeURIComponent(route.appId)}/projects/${encodeURIComponent(route.projectId)}/sessions/${encodeURIComponent(route.sessionId)}`;
+      return `#/clients/${encodeURIComponent(route.appId)}/projects/${encodeURIComponent(route.projectId)}/sessions/${encodeURIComponent(route.sessionId)}${
+        route.taskId ? `/tasks/${encodeURIComponent(route.taskId)}` : ""
+      }`;
   }
 }
 
@@ -695,7 +705,12 @@ function crumbsFor(route: Route): Crumb[] {
   }
   if (route.level === "chat") {
     const session = data?.sessions.find((item) => item.sessionId === route.sessionId);
-    crumbs.push({ label: session?.title ?? "会话" });
+    crumbs.push(
+      route.taskId
+        ? { label: session?.title ?? "会话", href: hashFor({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: route.sessionId }) }
+        : { label: session?.title ?? "会话" },
+    );
+    if (route.taskId) crumbs.push({ label: "后台任务" });
   }
   return crumbs;
 }
@@ -1013,6 +1028,7 @@ async function renderRoute(soft = false): Promise<void> {
   else if (route.level === "projects") renderProjects(route);
   else if (route.level === "sessions") renderSessions(route);
   else if (route.level === "devices") renderDevices();
+  else if (route.taskId) await renderTask({ ...route, taskId: route.taskId }, token);
   else await renderChat(route, token);
 }
 
@@ -1279,6 +1295,7 @@ interface ChatState {
   context?: ContextUsage;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
+  rail?: RailState;
 }
 
 async function renderChat(route: Route & { level: "chat" }, token: number): Promise<void> {
@@ -1559,6 +1576,15 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   headToggle.setAttribute("aria-expanded", String(!collapsed));
   headToggle.setAttribute("aria-label", collapsed ? "展开会话信息" : "收起会话信息");
   headToggle.append(icon("chevron", "icon head-chev"), el("span", { text: collapsed ? "展开" : "收起" }));
+  const railToggle = button("", () => {
+    const open = !rail.root.classList.contains("is-open");
+    rail.setOpen(open);
+    writeRailOpen(open);
+  }, "icon-btn rail-toggle");
+  railToggle.append(icon("rail", "icon"), el("span", { className: "rail-toggle-label", text: "侧栏" }));
+  railToggle.setAttribute("aria-label", "显示会话侧栏");
+  railToggle.title = "显示环境、上下文、连接器与后台任务";
+
   head.append(
     back,
     el("div", { className: "view-head-main" }, [
@@ -1568,13 +1594,17 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     ]),
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
+      railToggle,
       headToggle,
     ]),
   );
 
-  renderShell(
-    el("main", { className: "main chat" }, [
-      head,
+  const rail = createRail(summary.sessionId, summary.appId);
+  railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
+  state.rail = rail.state;
+  const main = el("main", { className: `main chat${rail.root.classList.contains("is-open") ? " has-rail" : ""}` }, [
+    head,
+    el("div", { className: "chat-body" }, [
       el("section", { className: "transcript" }, [
         note,
         list,
@@ -1582,8 +1612,16 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       composer,
       status,
     ]),
-    crumbsFor(route),
-  );
+    rail.root,
+    rail.backdrop,
+  ]);
+  rail.onChange = (open) => {
+    main.classList.toggle("has-rail", open);
+    railToggle.setAttribute("aria-pressed", String(open));
+    railToggle.setAttribute("aria-label", open ? "隐藏会话侧栏" : "显示会话侧栏");
+    railToggle.title = open ? "隐藏会话侧栏" : "显示环境、上下文、连接器与后台任务";
+  };  renderShell(main, crumbsFor(route));
+  if (rail.root.classList.contains("is-open")) void refreshRail(rail.state);
   const form = app.querySelector<HTMLFormElement>(".composer");
   form?.addEventListener("submit", (event) => event.preventDefault());
   setCollapsed(readComposerCollapsed());
@@ -1631,6 +1669,348 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   }
 }
 
+async function renderTask(route: Route & { level: "chat"; taskId: string }, token: number): Promise<void> {
+  const data = snapshot!;
+  const summary = data.sessions.find((item) => item.sessionId === route.sessionId);
+  if (!summary) {
+    renderShell(
+      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。"),
+      crumbsFor(route),
+    );
+    return;
+  }
+  document.title = `后台任务 · ${summary.title} · Agent Bridge`;
+
+  const note = el("p", { className: "hint", text: "正在读取子任务记录…" });
+  const list = el("div", { className: "transcript-body" });
+  const status = el("p", { className: "hint" });
+  const loadOlder = button("加载更早", () => void older(), "btn secondary small");
+  loadOlder.hidden = true;
+
+  const back = backButton(() =>
+    navigate({
+      level: "chat",
+      appId: route.appId,
+      projectId: route.projectId,
+      sessionId: route.sessionId,
+    }),
+  );
+  const head = el("section", { className: "view-head chat-head" }, [
+    back,
+    el("div", { className: "view-head-main" }, [
+      el("p", { className: "eyebrow", text: "后台任务 · 子代理记录" }),
+      el("h1", { className: "display chat-title", text: route.taskId }),
+      el("p", { className: "meta", text: summary.title }),
+    ]),
+  ]);
+
+  renderShell(
+    el("main", { className: "main chat task-view" }, [
+      head,
+      el("div", { className: "chat-body" }, [
+        el("section", { className: "transcript" }, [note, list, loadOlder]),
+        status,
+      ]),
+    ]),
+    crumbsFor(route),
+  );
+
+  let messages: MessageRecord[] = [];
+  const known = new Set<string>();
+
+  const paint = (): void => {
+    list.replaceChildren();
+    if (messages.length === 0) {
+      list.append(emptyState("没有可读取的记录", "这个子任务可能只做了工具调用，或者记录尚未写入。"));
+      return;
+    }
+    let turn: MessageRecord[] = [];
+    const flush = (): void => {
+      if (turn.length === 0) return;
+      list.append(assistantTurn(null, turn));
+      turn = [];
+    };
+    for (const message of messages) {
+      if (message.role === "assistant") {
+        turn.push(message);
+        continue;
+      }
+      flush();
+      list.append(messageBubble(null, message));
+    }
+    flush();
+  };
+
+  const load = async (before?: string): Promise<MessageListResult | null> => {
+    try {
+      return await call<MessageListResult>("task.messages", {
+        sessionId: route.sessionId,
+        taskId: route.taskId,
+        limit: 50,
+        ...(before ? { before } : {}),
+      });
+    } catch (error) {
+      status.textContent = messageOf(error);
+      return null;
+    }
+  };
+
+  async function older(): Promise<void> {
+    const oldest = messages[0]?.messageId;
+    if (!oldest) return;
+    loadOlder.disabled = true;
+    const page = await load(oldest);
+    loadOlder.disabled = false;
+    if (!page || token !== renderToken) return;
+    const fresh = page.messages.filter((message) => !known.has(message.messageId));
+    for (const message of fresh) known.add(message.messageId);
+    messages = [...fresh, ...messages];
+    loadOlder.hidden = !page.nextBefore;
+    paint();
+  }
+
+  const first = await load();
+  if (token !== renderToken) return;
+  if (first) {
+    for (const message of first.messages) known.add(message.messageId);
+    messages = [...first.messages];
+    note.textContent = first.note ?? "";
+    loadOlder.hidden = !first.nextBefore;
+    paint();
+    document.title = `后台任务 · ${summary.title} · Agent Bridge`;
+  } else {
+    note.textContent = "";
+  }
+
+  try {
+    const rail = await call<SessionRailResult>("session.rail", { sessionId: route.sessionId });
+    const task = rail.tasks.find((item) => item.taskId === route.taskId);
+    if (task && token === renderToken) {
+      const title = head.querySelector<HTMLElement>(".chat-title");
+      if (title) title.textContent = task.name;
+      const meta = head.querySelector<HTMLElement>(".chat-head .meta");
+      if (meta) {
+        const parts = [summary.title, railTaskMeta(task)];
+        if (task.updatedAt) parts.push(`${timeLabel(task.updatedAt)}更新`);
+        meta.textContent = parts.join(" · ");
+      }
+      document.title = `后台任务 · ${task.name}`;
+    }
+  } catch {
+    // the rail is decoration here; the record itself already loaded
+  }
+}
+
+const RAIL_KEY = "ab.rail";
+
+function readRailOpen(): boolean {
+  try {
+    const stored = localStorage.getItem(RAIL_KEY);
+    if (stored === "1") return true;
+    if (stored === "0") return false;
+  } catch {
+    // private mode: fall back to the viewport
+  }
+  return window.matchMedia("(min-width: 1180px)").matches;
+}
+
+function writeRailOpen(open: boolean): void {
+  try {
+    localStorage.setItem(RAIL_KEY, open ? "1" : "0");
+  } catch {
+    // ignore
+  }
+}
+
+interface RailState {
+  sessionId: string;
+  appId: string;
+  root: HTMLElement;
+  body: HTMLElement;
+  loading: boolean;
+  signature: string;
+}
+
+interface RailHandle {
+  root: HTMLElement;
+  backdrop: HTMLElement;
+  state: RailState;
+  setOpen(open: boolean): void;
+  onChange?: (open: boolean) => void;
+}
+
+function createRail(sessionId: string, appId: string): RailHandle {
+  const body = el("div", { className: "rail-body" });
+  const state: RailState = { sessionId, appId, root: el("div"), body, loading: false, signature: "" };
+  const close = el("button", {
+    className: "icon-btn",
+    attrs: { type: "button", "aria-label": "关闭侧栏", title: "关闭侧栏" },
+  }, [icon("close")]);
+  const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } }, [
+    el("div", { className: "rail-head" }, [
+      el("span", { className: "rail-title", text: "会话侧栏" }),
+      close,
+    ]),
+    body,
+  ]);
+  state.root = root;
+  const backdrop = el("div", { className: "rail-backdrop" });
+  const handle: RailHandle = {
+    root,
+    backdrop,
+    state,
+    setOpen(open: boolean) {
+      root.classList.toggle("is-open", open);
+      backdrop.classList.toggle("is-open", open);
+      if (open) void refreshRail(state);
+      handle.onChange?.(open);
+    },
+  };
+  const open = readRailOpen();
+  root.classList.toggle("is-open", open);
+  backdrop.classList.toggle("is-open", open);
+  const dismiss = (): void => {
+    handle.setOpen(false);
+    writeRailOpen(false);
+  };
+  close.addEventListener("click", dismiss);
+  backdrop.addEventListener("click", dismiss);
+  currentRail = handle;
+  return handle;
+}
+
+/** The rail of the chat on screen; one document key listener serves every render. */
+let currentRail: RailHandle | null = null;
+
+function dismissRail(): void {
+  const rail = currentRail;
+  if (!rail || !rail.root.classList.contains("is-open")) return;
+  rail.setOpen(false);
+  writeRailOpen(false);
+}
+
+async function refreshRail(state: RailState): Promise<void> {
+  if (state.loading) return;
+  state.loading = true;
+  try {
+    const result = await call<SessionRailResult>("session.rail", { sessionId: state.sessionId });
+    paintRail(state, result);
+  } catch (error) {
+    state.signature = "";
+    state.body.replaceChildren(el("p", { className: "rail-empty", text: messageOf(error) }));
+  } finally {
+    state.loading = false;
+  }
+}
+
+function paintRail(state: RailState, result: SessionRailResult): void {
+  const signature = JSON.stringify(result);
+  if (signature === state.signature) return;
+  state.signature = signature;
+  const scroll = state.body.scrollTop;
+  state.body.replaceChildren(
+    railSection("环境", result.environment.map(railRow)),
+    railSection("上下文", [railContext(result.context)]),
+    railSection(
+      "连接器",
+      result.servers.length > 0
+        ? [el("div", { className: "rail-chips" }, result.servers.map((server) => railChip(server)))]
+        : [el("p", { className: "rail-empty", text: "没有挂载 MCP 连接器" })],
+      result.servers.length,
+    ),
+    railSection("后台任务", railTasks(state, result.tasks), result.tasks.length),
+  );
+  if (result.note) state.body.append(el("p", { className: "rail-note", text: result.note }));
+  state.body.scrollTop = scroll;
+}
+
+function railSection(title: string, children: Node[], count?: number): HTMLElement {
+  const head = el("div", { className: "rail-section-head" }, [
+    el("h2", { className: "rail-section-title", text: title }),
+  ]);
+  if (count !== undefined && count > 0) head.append(el("span", { className: "rail-count", text: String(count) }));
+  const section = el("section", { className: "rail-section" }, [head]);
+  for (const child of children) section.append(child);
+  return section;
+}
+
+function railRow(row: RailRow): HTMLElement {
+  return el("div", { className: "rail-row" }, [
+    el("span", { className: "rail-label", text: row.label }),
+    el("span", { className: "rail-value", text: row.value, attrs: { title: row.value } }),
+  ]);
+}
+
+function railChip(server: { name: string; detail?: string }): HTMLElement {
+  const chip = el("span", { className: "rail-chip", text: server.name, attrs: { title: server.detail ?? server.name } });
+  return chip;
+}
+
+function railContext(context: ContextUsage | undefined): HTMLElement {
+  if (!context) return el("p", { className: "rail-empty", text: "这个会话还没有上下文用量" });
+  const window = Math.max(1, context.windowTokens);
+  const ratio = Math.min(1, context.usedTokens / window);
+  const percent = Math.max(2, Math.round(ratio * 100));
+  const meter = el("div", {
+    className: "rail-meter",
+    attrs: { role: "img", "aria-label": `上下文已用 ${percent}%` },
+  }, [el("span", { className: "rail-meter-fill", attrs: { style: `width:${percent}%` } })]);
+  const wrap = el("div", { className: "rail-context" }, [
+    el("div", { className: "rail-context-line" }, [
+      el("strong", { text: `${formatTokens(context.usedTokens)} / ${formatTokens(context.windowTokens)}` }),
+      el("span", { className: "rail-context-pct", text: `${Math.round(ratio * 100)}%` }),
+    ]),
+    meter,
+  ]);
+  if (context.windowEstimated) wrap.append(el("p", { className: "rail-note", text: "窗口大小为估算值" }));
+  return wrap;
+}
+
+function railTasks(state: RailState, tasks: RailTask[]): Node[] {
+  if (tasks.length === 0) {
+    return [
+      el("p", {
+        className: "rail-empty",
+        text: state.appId === "codex" ? "Codex 线程没有可读取的子任务记录" : "没有正在运行的后台任务",
+      }),
+    ];
+  }
+  return tasks.map((task) => {
+    const row = el("button", {
+      className: `rail-task is-${task.status}`,
+      attrs: { type: "button", title: task.detail ?? task.name },
+    }, [
+      el("span", { className: "rail-task-dot", attrs: { "aria-hidden": "true" } }),
+      el("span", { className: "rail-task-main" }, [
+        el("span", { className: "rail-task-name", text: task.name }),
+        el("span", { className: "rail-task-meta", text: railTaskMeta(task) }),
+      ]),
+      icon("chevron", "icon chev"),
+    ]);
+    row.addEventListener("click", () => {
+      const route = parseRoute();
+      if (route.level !== "chat") return;
+      navigate({
+        level: "chat",
+        appId: route.appId,
+        projectId: route.projectId,
+        sessionId: route.sessionId,
+        taskId: task.taskId,
+      });
+    });
+    return row;
+  });
+}
+
+function railTaskMeta(task: RailTask): string {
+  const parts: string[] = [];
+  if (task.agentType) parts.push(task.agentType);
+  if (task.model) parts.push(task.model);
+  if (task.status === "running") parts.push("运行中");
+  if (typeof task.depth === "number" && task.depth > 1) parts.push(`第 ${task.depth} 层`);
+  return parts.join(" · ") || (task.status === "running" ? "运行中" : "已结束");
+}
+
 async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
   if (state.loading) return null;
   state.loading = true;
@@ -1675,6 +2055,7 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     if (added || busyChanged || interruptedChanged || state.messages.length === 0) {
       renderMessages(state);
     }
+    if (state.rail?.root.classList.contains("is-open")) void refreshRail(state.rail);
     return result;
   } catch (error) {
     if (active) state.status.textContent = messageOf(error);
@@ -1782,7 +2163,7 @@ function queuedBubble(item: QueuedMessage): HTMLElement {
   return bubble;
 }
 
-function messageBubble(state: ChatState, message: MessageRecord): HTMLElement {
+function messageBubble(session: SessionSummary | null, message: MessageRecord): HTMLElement {
   const bubble = el("article", { className: `message ${message.role}` });
   const hasText = message.blocks.some((block) => block.type === "text");
   const meta = el("div", { className: "message-meta" }, [
@@ -1790,7 +2171,7 @@ function messageBubble(state: ChatState, message: MessageRecord): HTMLElement {
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (hasText) meta.append(shareButton(state, message));
+  if (hasText && session) meta.append(shareButton(session, message));
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
@@ -1803,18 +2184,18 @@ function messageBubble(state: ChatState, message: MessageRecord): HTMLElement {
   return bubble;
 }
 
-function shareButton(state: ChatState, message: MessageRecord): HTMLButtonElement {
+function shareButton(session: SessionSummary, message: MessageRecord): HTMLButtonElement {
   const share = el("button", {
     className: "share-btn",
     attrs: { type: "button", title: "分享到其他客户端", "aria-label": "分享这条消息" },
   }, [icon("share"), el("span", { text: "分享" })]);
   share.addEventListener("click", () => {
-    void openShare(state.session, message);
+    void openShare(session, message);
   });
   return share;
 }
 
-function assistantTurn(state: ChatState, messages: MessageRecord[]): HTMLElement {
+function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: string[] = [];
   let peer = false;
@@ -1837,7 +2218,7 @@ function assistantTurn(state: ChatState, messages: MessageRecord[]): HTMLElement
     ...(peer ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (lastText) meta.append(shareButton(state, lastText));
+  if (lastText && session) meta.append(shareButton(session, lastText));
   bubble.append(meta);
   let folded = steps.length === 0;
   for (const message of messages) {
@@ -1913,7 +2294,7 @@ function renderMessages(state: ChatState): void {
   let turn: MessageRecord[] = [];
   const flush = (): void => {
     if (turn.length === 0) return;
-    list.append(assistantTurn(state, turn));
+    list.append(assistantTurn(state.session, turn));
     turn = [];
   };
   for (const message of state.messages) {
@@ -1922,7 +2303,7 @@ function renderMessages(state: ChatState): void {
       continue;
     }
     flush();
-    list.append(messageBubble(state, message));
+    list.append(messageBubble(state.session, message));
   }
   flush();
   appendQueued();
@@ -2358,4 +2739,8 @@ window.addEventListener("hashchange", () => {
   const link = takeInviteLink();
   if (link) void beginPairing(link);
   else void renderRoute();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") dismissRail();
 });

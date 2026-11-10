@@ -9,6 +9,7 @@ import type {
   SessionGetResult,
   SessionListParams,
   SessionListResult,
+  SessionRailResult,
   SessionSummary,
   TransferCommitResult,
   TransferPrepareResult,
@@ -111,6 +112,27 @@ export class SessionAdapters {
     if (!adapter.session(sessionId)) throw new RpcError("not_found", "未知会话");
     const limit = clamp(params.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
     return adapter.messages(sessionId, { limit, ...(params.before ? { before: params.before } : {}) });
+  }
+
+  async rail(sessionId: string): Promise<SessionRailResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!adapter.session(sessionId)) throw new RpcError("not_found", "未知会话");
+    return adapter.rail(sessionId);
+  }
+
+  async taskMessages(
+    sessionId: string,
+    taskId: string,
+    params: { limit?: number; before?: string },
+  ): Promise<MessageListResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!adapter.session(sessionId)) throw new RpcError("not_found", "未知会话");
+    if (!adapter.taskMessages) throw new RpcError("unsupported", "该来源不提供子任务记录");
+    const limit = clamp(params.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
+    return adapter.taskMessages(sessionId, taskId, {
+      limit,
+      ...(params.before ? { before: params.before } : {}),
+    });
   }
 
   async send(sessionId: string, text: string): Promise<MessageSendResult> {

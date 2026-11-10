@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, createReadStream } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, createReadStream } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
@@ -14,6 +14,8 @@ import type {
   MessageRecord,
   MessageSendResult,
   ProjectInfo,
+  RailRow,
+  SessionRailResult,
   SessionSummary,
 } from "@agent-bridge/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
@@ -196,6 +198,56 @@ function rolloutFile(path: string): { path: string; compressed: boolean } | null
   return null;
 }
 
+interface ThreadSettings {
+  model?: string;
+  modelProvider?: string;
+  reasoningEffort?: string;
+  approvalPolicy?: string;
+  cwd?: string;
+  roots: string[];
+}
+
+function threadSettingsOf(value: unknown): ThreadSettings | null {
+  const raw = usageOf(value);
+  if (!raw) return null;
+  const settings: ThreadSettings = { roots: [] };
+  const model = raw["model"];
+  if (typeof model === "string" && model) settings.model = model;
+  const provider = raw["model_provider_id"];
+  if (typeof provider === "string" && provider) settings.modelProvider = provider;
+  const effort = raw["reasoning_effort"];
+  if (typeof effort === "string" && effort) settings.reasoningEffort = effort;
+  const approval = raw["approval_policy"];
+  if (typeof approval === "string" && approval) settings.approvalPolicy = approval;
+  const cwd = raw["cwd"];
+  if (typeof cwd === "string" && cwd) settings.cwd = cwd;
+  const roots = raw["runtime_workspace_roots"];
+  if (Array.isArray(roots)) {
+    for (const root of roots) if (typeof root === "string" && root) settings.roots.push(root);
+  }
+  return settings;
+}
+
+const CODEX_CONFIG = join(CODEX_DIR, "config.toml");
+
+/** `[mcp_servers.<name>]` tables of the Codex config; the rollout records no per-thread list. */
+function configuredMcpServers(): string[] {
+  let text: string;
+  try {
+    text = readFileSync(CODEX_CONFIG, "utf8");
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  for (const line of text.split("\n")) {
+    const match = /^\s*\[mcp_servers\.[\w-]+\]\s*$/.exec(line);
+    if (!match) continue;
+    const name = match[0].slice("[mcp_servers.".length, -1);
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
 interface PendingRequest {
   resolve: (value: Record<string, unknown>) => void;
   reject: (error: Error) => void;
@@ -352,6 +404,7 @@ export class CodexAdapter implements SessionAdapter {
   private catalogChecked = false;
   private messageCache = new Map<string, CachedMessages>();
   private rolloutCache = new Map<string, { path: string; compressed: boolean }>();
+  private settingsCache = new Map<string, { mtimeMs: number; size: number; settings: ThreadSettings | null }>();
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
@@ -443,6 +496,76 @@ export class CodexAdapter implements SessionAdapter {
     if (parsed.interrupted) result.interrupted = true;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
+  }
+
+  async rail(sessionId: string): Promise<SessionRailResult> {
+    const thread = this.thread(String(sessionId).slice(this.key.length + 1));
+    if (!thread) throw new RpcError("not_found", "未知线程");
+    const file = this.rolloutFor(thread);
+    const settings = file ? await this.rolloutSettings(file.path) : null;
+    const environment: RailRow[] = [];
+    const cwd = settings?.cwd ?? thread.cwd;
+    if (cwd) environment.push({ label: "目录", value: cwd });
+    const roots = settings?.roots ?? [];
+    if (roots.length > 1) environment.push({ label: "工作区", value: roots.join("、") });
+    if (settings?.model) environment.push({ label: "模型", value: settings.model });
+    if (settings?.modelProvider) environment.push({ label: "提供方", value: settings.modelProvider });
+    if (settings?.reasoningEffort) {
+      environment.push({ label: "推理强度", value: settings.reasoningEffort });
+    }
+    if (settings?.approvalPolicy) environment.push({ label: "批准策略", value: settings.approvalPolicy });
+    const servers = configuredMcpServers().map((name) => ({ name }));
+    const result: SessionRailResult = { environment, servers, tasks: [] };
+    if (file) {
+      const parsed = await this.readRollout(file.path, thread.id);
+      if (parsed.context) result.context = parsed.context;
+    }
+    if (servers.length > 0) result.note = "连接器取自 Codex 全局配置；rollout 不记录每个线程实际挂载的服务器";
+    return result;
+  }
+
+  /** The newest `thread_settings_applied` (falling back to `turn_context`) in the rollout. */
+  private async rolloutSettings(path: string): Promise<ThreadSettings | null> {
+    const stat = statSync(path);
+    const cached = this.settingsCache.get(path);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.settings;
+    const stream = createReadStream(path);
+    const input = path.endsWith(".zst") ? stream.pipe(createZstdDecompress()) : stream;
+    const lines = createInterface({ input, crlfDelay: Infinity });
+    let settings: ThreadSettings | null = null;
+    try {
+      for await (const line of lines) {
+        if (!line.includes("thread_settings_applied") && !line.includes("turn_context")) continue;
+        let entry: RawLine;
+        try {
+          entry = JSON.parse(line) as RawLine;
+        } catch {
+          continue;
+        }
+        if (entry.type === "event_msg" && entry.payload?.["type"] === "thread_settings_applied") {
+          settings = threadSettingsOf(entry.payload["thread_settings"]) ?? settings;
+        } else if (entry.type === "turn_context") {
+          const turn = threadSettingsOf(entry.payload);
+          if (turn) {
+            const base: ThreadSettings = settings ?? { roots: [] };
+            settings = {
+              ...base,
+              ...(turn.model ? { model: turn.model } : {}),
+              ...(turn.modelProvider ? { modelProvider: turn.modelProvider } : {}),
+              ...(turn.reasoningEffort ? { reasoningEffort: turn.reasoningEffort } : {}),
+              ...(turn.approvalPolicy ? { approvalPolicy: turn.approvalPolicy } : {}),
+              ...(turn.cwd ? { cwd: turn.cwd } : {}),
+              roots: turn.roots.length > 0 ? turn.roots : base.roots,
+            };
+          }
+        }
+      }
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+    this.settingsCache.set(path, { mtimeMs: stat.mtimeMs, size: stat.size, settings });
+    return settings;
   }
 
   async messageText(sessionId: string, messageId: string): Promise<MessageText | null> {

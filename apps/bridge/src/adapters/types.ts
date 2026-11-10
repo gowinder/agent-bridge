@@ -5,6 +5,7 @@ import type {
   MessageRecord,
   MessageSendResult,
   ProjectInfo,
+  SessionRailResult,
   SessionSummary,
 } from "@agent-bridge/protocol";
 
@@ -40,6 +41,10 @@ export interface SessionAdapter {
   session(sessionId: string): SessionSummary | null;
   messages(sessionId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
   messageText(sessionId: string, messageId: string): MessageText | null | Promise<MessageText | null>;
+  /** Environment, context, connectors and background tasks of one session. */
+  rail(sessionId: string): SessionRailResult | Promise<SessionRailResult>;
+  /** Messages written by one background task (subagent); absent when the app keeps none. */
+  taskMessages?(sessionId: string, taskId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
   send(sessionId: string, text: string): Promise<MessageSendResult>;
 }
 

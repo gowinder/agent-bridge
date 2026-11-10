@@ -100,6 +100,8 @@ export const METHODS = [
   "project.list",
   "session.list",
   "session.get",
+  "session.rail",
+  "task.messages",
   "message.list",
   "session.subscribe",
   "session.unsubscribe",
@@ -351,6 +353,47 @@ export interface MessageSendResult {
   /** True only when the target confirmed delivery. */
   delivered: boolean;
   detail?: string;
+}
+
+/** One environment row of the session rail. */
+export interface RailRow {
+  label: string;
+  value: string;
+}
+
+/** A background task (subagent) spawned inside a session. */
+export interface RailTask {
+  taskId: string;
+  name: string;
+  detail?: string;
+  kind: "subagent" | "background";
+  agentType?: string;
+  model?: string;
+  status: "running" | "done";
+  startedAt?: number;
+  updatedAt?: number;
+  /** 1 for tasks the session spawned directly. */
+  depth?: number;
+}
+
+/** What the session rail shows beside the conversation. */
+export interface SessionRailResult {
+  environment: RailRow[];
+  context?: ContextUsage;
+  servers: Array<{ name: string; detail?: string }>;
+  tasks: RailTask[];
+  note?: string;
+}
+
+export interface SessionRailParams {
+  sessionId: string;
+}
+
+export interface TaskMessagesParams {
+  sessionId: string;
+  taskId: string;
+  limit?: number;
+  before?: string;
 }
 
 export interface SessionListParams {

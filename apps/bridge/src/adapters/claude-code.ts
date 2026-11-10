@@ -2,15 +2,18 @@ import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   existsSync,
+  openSync,
   readdirSync,
   readFileSync,
+  readSync,
   statSync,
   unlinkSync,
 } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type {
   AppInfo,
   ContextUsage,
@@ -19,6 +22,9 @@ import type {
   MessageRecord,
   MessageSendResult,
   ProjectInfo,
+  RailRow,
+  RailTask,
+  SessionRailResult,
   SessionSummary,
 } from "@agent-bridge/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
@@ -42,6 +48,19 @@ interface DesktopSession {
   updatedAt: number;
   archived: boolean;
   permissionMode: string;
+  model: string;
+  effort: string;
+  /** Server names taken from the enabled MCP tool ids (`local:<server>:<tool>`). */
+  mcpServers: string[];
+}
+
+interface SubagentMeta {
+  agentType?: string;
+  description?: string;
+  name?: string;
+  spawnDepth?: number;
+  finished?: boolean;
+  pickedEffortModel?: string;
 }
 
 interface RawEntry {
@@ -129,6 +148,30 @@ function isBusy(busy: BusyState | undefined): boolean {
   if (!busy) return false;
   if (busy.lastUserAt <= busy.lastTurnEndAt) return false;
   return Date.now() - busy.lastActivityAt < BUSY_IDLE_MS;
+}
+
+/** A subagent whose meta still says "running" is only believed while its file is fresh. */
+const SUBAGENT_RUNNING_MAX_AGE_MS = 10 * 60_000;
+/** The rail lists the newest tasks only; a long session can spawn hundreds. */
+const MAX_RAIL_TASKS = 20;
+
+/** MCP tool ids look like `local:<server>:<tool>`; the rail lists the server. */
+function mcpServersOf(tools: unknown, remote: unknown): string[] {
+  const out = new Set<string>();
+  if (tools && typeof tools === "object") {
+    for (const id of Object.keys(tools as Record<string, unknown>)) {
+      const parts = id.split(":");
+      if (parts.length >= 3 && parts[1]) out.add(parts[1]);
+    }
+  }
+  if (Array.isArray(remote)) {
+    for (const item of remote) {
+      if (!item || typeof item !== "object") continue;
+      const name = asString((item as Record<string, unknown>)["name"]);
+      if (name) out.add(name);
+    }
+  }
+  return [...out];
 }
 
 function listSessionFiles(root: string): string[] {
@@ -278,6 +321,211 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return result;
   }
 
+  rail(sessionId: string): SessionRailResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知会话");
+    const environment: RailRow[] = [];
+    if (record.cwd) environment.push({ label: "目录", value: record.cwd });
+    const branch = this.gitBranch(record);
+    if (branch) environment.push({ label: "分支", value: branch });
+    if (record.model) environment.push({ label: "模型", value: record.model });
+    if (record.effort) environment.push({ label: "推理强度", value: record.effort });
+    if (record.permissionMode) {
+      environment.push({
+        label: "权限",
+        value: record.permissionMode === "bypassPermissions" ? "跳过确认" : record.permissionMode,
+      });
+    }
+    const result: SessionRailResult = {
+      environment,
+      servers: record.mcpServers.map((name) => ({ name })),
+      tasks: this.subagentTasks(record),
+    };
+    const context = this.contextFor(record);
+    if (context) result.context = context;
+    return result;
+  }
+
+  taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知会话");
+    const file = this.subagentFile(record, taskId);
+    if (!file) throw new RpcError("not_found", "未知后台任务");
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch {
+      throw new RpcError("adapter_unavailable", "无法读取子任务记录");
+    }
+    const messages: MessageRecord[] = [];
+    for (const line of text.split("\n")) {
+      if (!line.trim()) continue;
+      let entry: RawEntry;
+      try {
+        entry = JSON.parse(line) as RawEntry;
+      } catch {
+        continue;
+      }
+      const message = this.toMessage(entry, `${sessionId}#${taskId}`, messages.length, true);
+      if (message) messages.push(message);
+    }
+    let end = messages.length;
+    if (page.before) {
+      const index = messages.findIndex((message) => message.messageId === page.before);
+      if (index === -1) throw new RpcError("invalid_params", "未知的分页游标");
+      end = index;
+    }
+    const start = Math.max(0, end - page.limit);
+    const result: MessageListResult = {
+      messages: messages.slice(start, end),
+      completeness: "partial",
+      note: "子任务记录：仅文本与工具调用摘要",
+    };
+    if (start > 0) result.nextBefore = result.messages[0]?.messageId;
+    return result;
+  }
+
+  /** The branch of the working tree; the transcript may lag or be detached. */
+  private gitBranch(record: DesktopSession): string | null {
+    const recorded = this.transcriptBranch(record);
+    if (recorded && recorded !== "HEAD") return recorded;
+    return this.worktreeBranch(record.cwd) ?? recorded;
+  }
+
+  /** `cwd/.git/HEAD`, following the `gitdir:` pointer of a worktree checkout. */
+  private worktreeBranch(cwd: string): string | null {
+    if (!cwd) return null;
+    try {
+      const dotGit = join(cwd, ".git");
+      let headPath = join(dotGit, "HEAD");
+      if (statSync(dotGit).isFile()) {
+        const pointer = readFileSync(dotGit, "utf8").trim();
+        const match = /^gitdir:\s*(.+)$/.exec(pointer);
+        if (!match?.[1]) return null;
+        headPath = join(resolve(cwd, match[1]), "HEAD");
+      }
+      const head = readFileSync(headPath, "utf8").trim();
+      const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
+      if (ref?.[1]) return ref[1];
+      return head ? head.slice(0, 8) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private transcriptBranch(record: DesktopSession): string | null {
+    if (!record.cliSessionId) return null;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return null;
+    try {
+      const size = statSync(path).size;
+      const start = Math.max(0, size - 256 * 1024);
+      const buffer = Buffer.alloc(size - start);
+      const fd = openSync(path, "r");
+      try {
+        readSync(fd, buffer, 0, buffer.length, start);
+      } finally {
+        closeSync(fd);
+      }
+      const matches = buffer.toString("utf8").match(/"gitBranch":"([^"]*)"/g);
+      const last = matches?.[matches.length - 1];
+      const branch = last ? /"gitBranch":"([^"]*)"/.exec(last)?.[1] : undefined;
+      return branch ? branch : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private contextFor(record: DesktopSession): ContextUsage | undefined {
+    if (!record.cliSessionId) return undefined;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return undefined;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).context;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** `~/.claude/projects/<project>/<cliSessionId>/subagents` for this session and its priors. */
+  private subagentDirs(record: DesktopSession): string[] {
+    const dirs: string[] = [];
+    for (const id of [record.cliSessionId, ...record.priorCliSessionIds]) {
+      if (!id) continue;
+      const path = this.transcriptPath(id);
+      if (!path) continue;
+      const dir = join(dirname(path), id, "subagents");
+      if (existsSync(dir) && !dirs.includes(dir)) dirs.push(dir);
+    }
+    return dirs;
+  }
+
+  private subagentFile(record: DesktopSession, taskId: string): string | null {
+    if (!/^agent-[A-Za-z0-9]+$/.test(taskId)) return null;
+    for (const dir of this.subagentDirs(record)) {
+      const file = join(dir, `${taskId}.jsonl`);
+      if (existsSync(file)) return file;
+    }
+    return null;
+  }
+
+  private subagentTasks(record: DesktopSession): RailTask[] {
+    const tasks: RailTask[] = [];
+    const seen = new Set<string>();
+    for (const dir of this.subagentDirs(record)) {
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const name of names) {
+        if (!name.endsWith(".meta.json")) continue;
+        const taskId = name.slice(0, -".meta.json".length);
+        if (seen.has(taskId)) continue;
+        const jsonl = join(dir, `${taskId}.jsonl`);
+        if (!existsSync(jsonl)) continue;
+        let meta: SubagentMeta;
+        let metaMtimeMs = 0;
+        try {
+          meta = JSON.parse(readFileSync(join(dir, name), "utf8")) as SubagentMeta;
+          metaMtimeMs = statSync(join(dir, name)).mtimeMs;
+        } catch {
+          continue;
+        }
+        seen.add(taskId);
+        // meta 在子代理启动时写入、结束时才补 finished；运行期间只有 jsonl 在增长。
+        let jsonlMtimeMs = 0;
+        let startedAt: number | undefined;
+        try {
+          const info = statSync(jsonl);
+          jsonlMtimeMs = info.mtimeMs;
+          startedAt = info.birthtimeMs;
+        } catch {
+          // fall back to meta
+        }
+        const updatedAt = Math.max(metaMtimeMs, jsonlMtimeMs);
+        const running = meta.finished !== true && Date.now() - updatedAt < SUBAGENT_RUNNING_MAX_AGE_MS;
+        const task: RailTask = {
+          taskId,
+          name: meta.name || meta.description || taskId,
+          kind: "subagent",
+          status: running ? "running" : "done",
+          updatedAt,
+        };
+        if (meta.name && meta.description) task.detail = meta.description;
+        if (meta.agentType) task.agentType = meta.agentType;
+        if (meta.pickedEffortModel) task.model = meta.pickedEffortModel;
+        if (typeof meta.spawnDepth === "number") task.depth = meta.spawnDepth;
+        if (startedAt) task.startedAt = startedAt;
+        tasks.push(task);
+      }
+    }
+    return tasks
+      .sort((a, b) => (b.startedAt ?? b.updatedAt ?? 0) - (a.startedAt ?? a.updatedAt ?? 0))
+      .slice(0, MAX_RAIL_TASKS);
+  }
+
   messageText(sessionId: string, messageId: string): MessageText | null {
     const record = this.record(sessionId);
     if (!record?.cliSessionId) return null;
@@ -411,6 +659,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
           createdAt,
         archived: raw["isArchived"] === true,
         permissionMode: asString(raw["permissionMode"]),
+        model: asString(raw["model"]),
+        effort: asString(raw["effort"]),
+        mcpServers: mcpServersOf(raw["enabledMcpTools"], raw["remoteMcpServersConfig"]),
       };
     } catch {
       return null;
@@ -620,9 +871,14 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     };
   }
 
-  private toMessage(entry: RawEntry, sessionId: string, index: number): MessageRecord | null {
+  private toMessage(
+    entry: RawEntry,
+    sessionId: string,
+    index: number,
+    allowSidechain = false,
+  ): MessageRecord | null {
     if (entry.type !== "user" && entry.type !== "assistant") return null;
-    if (entry.isSidechain) return null;
+    if (entry.isSidechain && !allowSidechain) return null;
     const blocks = this.extractBlocks(entry.message?.content);
     if (blocks.length === 0) return null;
     const role = entry.type;
