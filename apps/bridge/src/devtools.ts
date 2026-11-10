@@ -81,13 +81,21 @@ interface ExecRecord {
   timer: NodeJS.Timeout;
 }
 
+/** An exec still waiting on the adapter index; a closing channel cancels it before spawn. */
+interface PendingExec {
+  owner: string;
+  cancelled: boolean;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
 export class Devtools {
   private execs = new Map<string, ExecRecord>();
+  private pendingExecs = new Set<PendingExec>();
   private rootsCache: { at: number; roots: Array<FsRoot & { real: string }> } | null = null;
+  private rootsLoading: Promise<Array<FsRoot & { real: string }>> | null = null;
   private expiryTimer: NodeJS.Timeout | null = null;
   private expiryFor: number | null = null;
 
@@ -158,16 +166,32 @@ export class Devtools {
     return this.status();
   }
 
-  roots(): FsRoot[] {
-    return this.allRoots().map(({ name, path }) => ({ name, path }));
+  async roots(): Promise<FsRoot[]> {
+    return (await this.allRoots()).map(({ name, path }) => ({ name, path }));
   }
 
-  private allRoots(): Array<FsRoot & { real: string }> {
+  /**
+   * The adapter index is async (dsh indexes its sessions lazily), so roots are
+   * loaded asynchronously and kept for 5 s. Concurrent callers share one load.
+   */
+  private async allRoots(): Promise<Array<FsRoot & { real: string }>> {
     const cached = this.rootsCache;
     if (cached && Date.now() - cached.at < 5_000) return cached.roots;
+    if (this.rootsLoading) return this.rootsLoading;
+    const loading = this.loadRoots();
+    this.rootsLoading = loading;
+    try {
+      return await loading;
+    } finally {
+      this.rootsLoading = null;
+    }
+  }
+
+  private async loadRoots(): Promise<Array<FsRoot & { real: string }>> {
     const seen = new Set<string>();
     const roots: Array<FsRoot & { real: string }> = [];
-    for (const project of this.adapters.projects().projects) {
+    const { projects } = await this.adapters.projects();
+    for (const project of projects) {
       if (!project.cwd) continue;
       let real: string;
       try {
@@ -185,8 +209,8 @@ export class Devtools {
   }
 
   /** Resolves a client path and refuses anything outside an allowed project root. */
-  private resolveInside(path: string): { real: string; root: (FsRoot & { real: string }) | null } {
-    const roots = this.allRoots();
+  private async resolveInside(path: string): Promise<{ real: string; root: (FsRoot & { real: string }) | null }> {
+    const roots = await this.allRoots();
     if (roots.length === 0) throw new RpcError("unsupported", "没有可浏览的项目目录");
     const target = resolve(path);
     let real: string;
@@ -206,9 +230,11 @@ export class Devtools {
     }
   }
 
-  listDirs(path: string): FsListResult {
+  async listDirs(path: string): Promise<FsListResult> {
     this.requireEnabled();
-    const { real } = this.resolveInside(path);
+    const { real } = await this.resolveInside(path);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireEnabled();
     let stats;
     try {
       stats = statSync(real);
@@ -240,15 +266,17 @@ export class Devtools {
       if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
-    const all = this.allRoots();
+    const all = await this.allRoots();
     const root = all.find((item) => real === item.real || real.startsWith(item.real + sep));
     const parent = root && real !== root.real ? real.slice(0, real.lastIndexOf(sep)) : null;
     return { path: real, parent, entries };
   }
 
-  readFile(path: string): FsReadResult {
+  async readFile(path: string): Promise<FsReadResult> {
     this.requireEnabled();
-    const { real } = this.resolveInside(path);
+    const { real } = await this.resolveInside(path);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireEnabled();
     let stats;
     try {
       stats = statSync(real);
@@ -295,13 +323,24 @@ export class Devtools {
     };
   }
 
-  exec(owner: string, command: string, cwd: string | undefined, timeoutMs: number | undefined, emit: (data: ShellEventData) => void): ShellExecResult {
+  async exec(owner: string, command: string, cwd: string | undefined, timeoutMs: number | undefined, emit: (data: ShellEventData) => void): Promise<ShellExecResult> {
     this.requireEnabled();
     const text = command.trim();
     if (!text) throw new RpcError("invalid_params", "命令不能为空");
     if (text.length > 8_000) throw new RpcError("invalid_params", "命令过长");
-    const roots = this.allRoots();
-    const workdir = cwd ? this.resolveInside(cwd).real : roots[0]?.real;
+    // Registered before the root lookup: a channel closed while we wait must not spawn.
+    const pending: PendingExec = { owner, cancelled: false };
+    this.pendingExecs.add(pending);
+    let workdir: string | undefined;
+    try {
+      const roots = await this.allRoots();
+      workdir = cwd ? (await this.resolveInside(cwd)).real : roots[0]?.real;
+    } finally {
+      this.pendingExecs.delete(pending);
+    }
+    if (pending.cancelled) throw new RpcError("unsupported", "设备通道已断开");
+    // The switch can be turned off, or expire, while the adapter index is loading.
+    this.requireEnabled();
     if (!workdir) throw new RpcError("unsupported", "没有可用的项目目录");
     const timeout = clamp(Math.round(timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000, MAX_TIMEOUT_MS);
     const shell = process.env["SHELL"] && existsSync(process.env["SHELL"]) ? process.env["SHELL"] : "/bin/sh";
@@ -381,6 +420,9 @@ export class Devtools {
 
   /** Kills everything a closed device channel started. */
   disposeOwner(owner: string): void {
+    for (const pending of this.pendingExecs) {
+      if (pending.owner === owner) pending.cancelled = true;
+    }
     for (const [execId, record] of this.execs) {
       if (record.owner === owner) this.kill(execId, false);
     }

@@ -437,7 +437,7 @@ export class DeviceSession implements ChannelSession {
         return { ok: true };
       }
       case "fs.roots":
-        return { enabled: this.options.devtools.status().enabled, roots: this.options.devtools.roots() };
+        return { enabled: this.options.devtools.status().enabled, roots: await this.options.devtools.roots() };
       case "fs.list": {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
