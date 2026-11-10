@@ -11,10 +11,6 @@ on:
         type: boolean
         default: false
 
-concurrency:
-  group: deploy-${{ github.ref_name }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
 
@@ -57,6 +53,11 @@ jobs:
     if: github.ref == 'refs/heads/develop' && needs.version.outputs.changed == 'true'
     runs-on: ubuntu-latest
     environment: preview
+    # Only runs that actually deploy join this group, so a version-neutral push
+    # cannot cancel a pending release.
+    concurrency:
+      group: deploy-preview
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
@@ -89,6 +90,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (github.ref == 'refs/heads/main' && needs.version.outputs.changed == 'true')
     runs-on: ubuntu-latest
     environment: production
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@v4
 
