@@ -1096,6 +1096,13 @@ a.crumb:hover {
   overflow-y: auto;
 }
 
+/* The narrow-screen sheet slides with a transform, which would make it the containing block
+   for the fixed preview and expanded rail; drop it while either mode is on. */
+.rail.is-open.is-expanded,
+.rail.is-open.is-preview-full {
+  transform: none;
+}
+
 .rail-head {
   display: flex;
   align-items: center;

@@ -2266,7 +2266,10 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     tabBar.append(node);
   }
   paintRailHint(state);
-  const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } }, [
+  const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } });
+  // The header's toggle reads state.root when clicked, so bind the real node before building it.
+  state.root = root;
+  root.append(
     el("div", { className: "rail-head" }, [
       el("span", { className: "rail-title", text: "会话侧栏" }),
       el("div", { className: "rail-head-actions" }, [railExpandButton(state), close]),
@@ -2275,8 +2278,7 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     overview,
     files,
     shell,
-  ]);
-  state.root = root;
+  );
   const backdrop = el("div", { className: "rail-backdrop" });
   const handle: RailHandle = {
     root,
@@ -2509,6 +2511,8 @@ function previewFullButton(state: RailState): HTMLButtonElement {
   return classToggleButton(state.root, "is-preview-full", "全屏查看文件", "退出全屏查看");
 }
 
+const toggleTargets = new WeakMap<HTMLButtonElement, HTMLElement>();
+
 function classToggleButton(
   target: HTMLElement,
   className: string,
@@ -2519,6 +2523,7 @@ function classToggleButton(
     target.classList.toggle(className);
     syncToggle(node);
   }, "icon-btn rail-icon-btn rail-toggle-btn");
+  toggleTargets.set(node, target);
   node.dataset["toggle"] = className;
   node.dataset["title"] = title;
   node.dataset["activeTitle"] = activeTitle;
@@ -2528,7 +2533,7 @@ function classToggleButton(
 
 /** Esc and tab switches change the rail classes outside the button; repaint from the class. */
 function syncToggle(node: HTMLButtonElement): void {
-  const rail = node.closest(".rail");
+  const rail = toggleTargets.get(node) ?? node.closest(".rail");
   const className = node.dataset["toggle"];
   if (!rail || !className) return;
   const active = rail.classList.contains(className);
