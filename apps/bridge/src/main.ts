@@ -1,9 +1,18 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@agent-bridge/crypto";
 import { loadNoiseNode } from "@agent-bridge/crypto/node";
 import { SessionAdapters } from "./adapters/index.js";
+import {
+  ADMIN_HOST,
+  DEFAULT_ADMIN_PORT,
+  ensureAdminToken,
+  startAdminServer,
+  type AdminActions,
+  type AdminDevice,
+} from "./admin.js";
 import { createRoom,
   RelayApi,
   RelayClient,
@@ -217,12 +226,99 @@ async function commandServe(): Promise<void> {
 
   let stopping = false;
   let relay: RelayClient | null = null;
-  const sessions = new Map<string, ChannelSession>();
+  /** Live channel → session, with the device it belongs to for the menu bar app. */
+  const sessions = new Map<
+    string,
+    {
+      channel: string;
+      session: ChannelSession;
+      kind: "pair" | "device";
+      deviceId?: string;
+      name?: string;
+      since: number;
+    }
+  >();
+  let relayOnline = false;
+
+  const dropDevice = (deviceId: string): number => {
+    let closed = 0;
+    for (const entry of [...sessions.values()]) {
+      if (entry.deviceId !== deviceId) continue;
+      entry.session.dispose();
+      closed += 1;
+    }
+    return closed;
+  };
+
+  const adminActions: AdminActions = {
+    async snapshot() {
+      const local = new Map(store.devices().map((device) => [device.id, device]));
+      const online = new Set(
+        [...sessions.values()].flatMap((entry) => (entry.deviceId ? [entry.deviceId] : [])),
+      );
+      let devices: AdminDevice[] = [];
+      let error: string | undefined;
+      try {
+        const remote = await api.devices();
+        devices = remote.devices.map((device) => ({
+          deviceId: device.deviceId,
+          name: local.get(device.deviceId)?.name ?? device.name,
+          createdAt: device.createdAt,
+          expiresAt: device.expiresAt,
+          revokedAt: device.revokedAt,
+          lastSeenAt: device.lastSeenAt,
+          online: online.has(device.deviceId),
+        }));
+      } catch (cause) {
+        error = cause instanceof Error ? cause.message : String(cause);
+      }
+      return {
+        version: VERSION,
+        hostName: config.hostName,
+        roomId: config.roomId,
+        webUrl: config.webUrl,
+        relayOnline,
+        bridgePid: process.pid,
+        devices,
+        connections: [...sessions.values()].map((entry) => ({
+          channel: entry.channel,
+          kind: entry.kind,
+          deviceId: entry.deviceId ?? null,
+          name: entry.name ?? null,
+          since: entry.since,
+        })),
+        ...(error ? { error } : {}),
+      };
+    },
+    async disconnectDevice(deviceId: string) {
+      return { closed: dropDevice(deviceId) };
+    },
+    async revokeDevice(deviceId: string) {
+      await api.revokeDevice(deviceId);
+      store.revokeDevice(deviceId);
+      return { closed: dropDevice(deviceId) };
+    },
+    async createInvite(ttlSeconds: number) {
+      const invite = await api.createInvite(ttlSeconds);
+      store.saveInvite({
+        id: invite.inviteId,
+        token: invite.inviteToken,
+        createdAt: Date.now(),
+        expiresAt: invite.expiresAt,
+        usedAt: null,
+      });
+      store.clearExpiredInvites();
+      return {
+        url: inviteUrl(config.webUrl, config.relayUrl, config.roomId, invite.inviteToken),
+        expiresAt: invite.expiresAt,
+      };
+    },
+  };
 
   const handlers: RelayHandlers = {
     onChannelOpen(message) {
       if (sessions.has(message.channel)) {
-        sessions.get(message.channel)?.dispose();
+        sessions.get(message.channel)?.session.dispose();
         sessions.delete(message.channel);
       }
       const close = (): void => {
@@ -241,9 +337,9 @@ async function commandServe(): Promise<void> {
           return;
         }
         log(`收到配对连接，邀请 ${invite.id}`);
-        sessions.set(
-          message.channel,
-          new PairingSession({
+        sessions.set(message.channel, {
+          channel: message.channel,
+          session: new PairingSession({
             noise,
             identity: config.identity,
             roomId: config.roomId,
@@ -257,7 +353,9 @@ async function commandServe(): Promise<void> {
             hostName: config.hostName,
             deviceTtlSeconds: DEVICE_TTL_OPTIONS[store.meta("device_ttl") ?? "manual"] ?? null,
           }),
-        );
+          kind: "pair",
+          since: Date.now(),
+        });
         return;
       }
 
@@ -278,9 +376,9 @@ async function commandServe(): Promise<void> {
         return;
       }
       log(`设备「${device.name}」正在连接`);
-      sessions.set(
-        message.channel,
-        new DeviceSession({
+      sessions.set(message.channel, {
+        channel: message.channel,
+        session: new DeviceSession({
           noise,
           identity: config.identity,
           roomId: config.roomId,
@@ -295,17 +393,21 @@ async function commandServe(): Promise<void> {
           adapters,
           uploads,
         }),
-      );
+        kind: "device",
+        deviceId: device.id,
+        name: device.name,
+        since: Date.now(),
+      });
     },
     onChannelClose(channel) {
-      sessions.get(channel)?.dispose();
+      sessions.get(channel)?.session.dispose();
       sessions.delete(channel);
     },
     onPeerState() {
       // room-level state; nothing to do while serving
     },
     onFrame(channel, frame) {
-      sessions.get(channel)?.handleFrame(frame);
+      sessions.get(channel)?.session.handleFrame(frame);
     },
   };
 
@@ -313,7 +415,7 @@ async function commandServe(): Promise<void> {
     if (stopping) return;
     stopping = true;
     log("正在退出…");
-    for (const session of sessions.values()) session.dispose();
+    for (const entry of sessions.values()) entry.session.dispose();
     sessions.clear();
     relay?.close(1000, "shutdown");
   };
@@ -325,17 +427,40 @@ async function commandServe(): Promise<void> {
     if (app.capabilities.send || app.status === "unavailable") continue;
     log(`发送不可用（${app.name}）：${app.capabilities.sendDetail ?? app.capabilities.reason ?? "原因未知"}`);
   }
+
+  const configuredPort = process.env["AGENT_BRIDGE_ADMIN_PORT"] ?? store.meta("admin_port");
+  const adminPort = configuredPort ? Number(configuredPort) : DEFAULT_ADMIN_PORT;
+  if (!Number.isInteger(adminPort) || adminPort < 1 || adminPort > 65_535) {
+    log(`本地管理接口端口无效：${configuredPort}，已跳过`);
+  } else {
+    try {
+      const server = await startAdminServer({
+        port: adminPort,
+        token: ensureAdminToken(store.dir),
+        actions: adminActions,
+        log,
+      });
+      log(`本地管理接口 http://${ADMIN_HOST}:${adminPort}（令牌 ${join(store.dir, "admin-token")}）`);
+      process.on("exit", () => server.close());
+    } catch (error) {
+      log(`本地管理接口启动失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   let backoff = 1_000;
   while (!stopping) {
     relay = new RelayClient(config.relayUrl, config.roomId, config.bridgeToken, handlers);
     try {
       await relay.connect();
+      relayOnline = true;
       backoff = 1_000;
       log("已连接中继，等待设备连接");
       const info = await relay.waitClosed();
+      relayOnline = false;
       if (stopping) break;
       log(`中继连接断开（${info.code}${info.reason ? ` ${info.reason}` : ""}），重连中…`);
     } catch (error) {
+      relayOnline = false;
       if (stopping) break;
       if (error instanceof RelayError) {
         log(`中继拒绝连接：${error.code} ${error.message}`);

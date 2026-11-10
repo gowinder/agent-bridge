@@ -26,3 +26,8 @@ $TMPDIR/
 
 __pycache__/
 *.pyc
+
+# 菜单栏 app 构建产物
+apps/menubar/build/
+
+.claude/worktrees/

@@ -12,7 +12,8 @@
     "web": "npm run dev -w @agent-bridge/web",
     "relay:dev": "npm --workspace @agent-bridge/relay run dev",
     "relay:deploy": "npm --workspace @agent-bridge/relay run deploy",
-    "bridge": "node apps/bridge/dist/main.js"
+    "bridge": "node apps/bridge/dist/main.js",
+    "menubar": "bash apps/menubar/build.sh"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250926.0",
