@@ -1003,6 +1003,17 @@ a.crumb:hover {
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
+/* 浮在最上层的临时提示，操作失败时给一句看得见的反馈。 */
+.float-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: calc(var(--z-sheet) + 20);
+  max-width: min(420px, calc(100vw - 32px));
+  box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.35);
+}
+
 /* ---------- chat ---------- */
 
 .main.chat {
