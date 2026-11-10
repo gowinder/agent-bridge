@@ -4,6 +4,15 @@
 const SAFE_SCHEME = /^(https?:|mailto:)/i;
 /** Hard caps so a crafted transcript cannot exhaust the JS stack. */
 const MAX_INLINE_DEPTH = 8;
+
+/**
+ * Hooks for links and images that point at files on the Mac. Both return the
+ * element to use, or null to fall back to plain text / a normal link.
+ */
+export interface MarkdownOptions {
+  localLink?: (label: string, href: string) => HTMLElement | null;
+  localImage?: (alt: string, href: string) => HTMLElement | null;
+}
 const MAX_BLOCK_DEPTH = 16;
 const MAX_LIST_DEPTH = 16;
 
@@ -34,9 +43,33 @@ function anchor(label: string, rawHref: string): HTMLElement {
 }
 
 const INLINE =
-  /(`[^`\n]+`)|(\*\*(?=\S)[\s\S]*?\S\*\*)|(__(?=\S)[\s\S]*?\S__)|(~~(?=\S)[\s\S]*?\S~~)|(\*(?=[^\s*])[^*\n]*[^\s*]\*)|(_(?=[^\s_])[^_\n]*[^\s_]_)|(\[[^\]\n]*\]\([^)\n]+\))|(<https?:\/\/[^>\s]+>)|(https?:\/\/[^\s<>()]+)/;
+  /(`[^`\n]+`)|(\*\*(?=\S)[\s\S]*?\S\*\*)|(__(?=\S)[\s\S]*?\S__)|(~~(?=\S)[\s\S]*?\S~~)|(\*(?=[^\s*])[^*\n]*[^\s*]\*)|(_(?=[^\s_])[^_\n]*[^\s_]_)|(!\[[^\]\n]*\]\([^)\n]+\))|(\[[^\]\n]*\]\([^)\n]+\))|(<https?:\/\/[^>\s]+>)|(https?:\/\/[^\s<>()]+)/;
 
-export function inlineNodes(text: string, depth = 0): Node[] {
+/** A local-file link, if the caller offers one; otherwise the anchor rules apply. */
+function linkNode(label: string, href: string, options: MarkdownOptions): HTMLElement {
+  return options.localLink?.(label, href) ?? anchor(label, href);
+}
+
+function imageNode(raw: string, options: MarkdownOptions): HTMLElement {
+  const parsed = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(raw);
+  const alt = parsed?.[1] ?? "";
+  const href = (parsed?.[2] ?? "").trim();
+  const local = options.localImage?.(alt, href);
+  if (local) return local;
+  const bare = href.replace(/^<|>$/g, "");
+  if (/^https?:\/\//i.test(bare)) {
+    const img = document.createElement("img");
+    img.className = "md-img";
+    img.alt = alt;
+    img.src = bare;
+    img.loading = "lazy";
+    img.referrerPolicy = "no-referrer";
+    return img;
+  }
+  return linkNode(alt || href, href, options);
+}
+
+export function inlineNodes(text: string, depth = 0, options: MarkdownOptions = {}): Node[] {
   if (depth > MAX_INLINE_DEPTH) return [document.createTextNode(text)];
   const out: Node[] = [];
   let rest = text;
@@ -49,20 +82,22 @@ export function inlineNodes(text: string, depth = 0): Node[] {
       out.push(codeSpan(raw.slice(1, -1)));
     } else if (match[2] || match[3]) {
       const strong = document.createElement("strong");
-      strong.append(...inlineNodes(raw.slice(2, -2), depth + 1));
+      strong.append(...inlineNodes(raw.slice(2, -2), depth + 1, options));
       out.push(strong);
     } else if (match[4]) {
       const del = document.createElement("del");
-      del.append(...inlineNodes(raw.slice(2, -2), depth + 1));
+      del.append(...inlineNodes(raw.slice(2, -2), depth + 1, options));
       out.push(del);
     } else if (match[5] || match[6]) {
       const em = document.createElement("em");
-      em.append(...inlineNodes(raw.slice(1, -1), depth + 1));
+      em.append(...inlineNodes(raw.slice(1, -1), depth + 1, options));
       out.push(em);
     } else if (match[7]) {
-      const link = /^\[([^\]]*)\]\(([^)]+)\)$/.exec(raw);
-      out.push(anchor(link?.[1] ?? raw, link?.[2] ?? ""));
+      out.push(imageNode(raw, options));
     } else if (match[8]) {
+      const link = /^\[([^\]]*)\]\(([^)]+)\)$/.exec(raw);
+      out.push(linkNode(link?.[1] ?? raw, link?.[2] ?? "", options));
+    } else if (match[9]) {
       out.push(anchor(raw.slice(1, -1), raw.slice(1, -1)));
     } else {
       const url = raw.replace(/[.,;:!?。，；：！？]+$/, "");
@@ -75,11 +110,11 @@ export function inlineNodes(text: string, depth = 0): Node[] {
   return out;
 }
 
-function appendInline(target: HTMLElement, text: string): void {
+function appendInline(target: HTMLElement, text: string, options: MarkdownOptions): void {
   const parts = text.split("\n");
   parts.forEach((part, index) => {
     if (index > 0) target.append(document.createElement("br"));
-    target.append(...inlineNodes(part));
+    target.append(...inlineNodes(part, 0, options));
   });
 }
 
@@ -91,7 +126,7 @@ interface ListItem {
 
 const LIST_ITEM = /^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$/;
 
-function buildList(items: ListItem[], depth = 0): HTMLElement {
+function buildList(items: ListItem[], depth = 0, options: MarkdownOptions = {}): HTMLElement {
   if (depth > MAX_LIST_DEPTH) {
     // Fold deeper nesting into a flat, unformatted list instead of recursing.
     const flat = document.createElement(items[0]?.ordered ? "ol" : "ul");
@@ -111,11 +146,11 @@ function buildList(items: ListItem[], depth = 0): HTMLElement {
     if (item.indent > base) {
       // Orphan deeper item: fold it into the previous entry.
       const last = root.lastElementChild;
-      if (last) last.append(buildList(items.slice(i), depth + 1));
+      if (last) last.append(buildList(items.slice(i), depth + 1, options));
       return root;
     }
     const li = document.createElement("li");
-    appendInline(li, item.text.join("\n"));
+    appendInline(li, item.text.join("\n"), options);
     i += 1;
     const sub: ListItem[] = [];
     while (i < items.length && (items[i]?.indent ?? 0) > base) {
@@ -123,13 +158,18 @@ function buildList(items: ListItem[], depth = 0): HTMLElement {
       if (next) sub.push(next);
       i += 1;
     }
-    if (sub.length > 0) li.append(buildList(sub, depth + 1));
+    if (sub.length > 0) li.append(buildList(sub, depth + 1, options));
     root.append(li);
   }
   return root;
 }
 
-function readList(lines: string[], start: number, depth = 0): { node: HTMLElement; next: number } | null {
+function readList(
+  lines: string[],
+  start: number,
+  depth = 0,
+  options: MarkdownOptions = {},
+): { node: HTMLElement; next: number } | null {
   const items: ListItem[] = [];
   let last: ListItem | null = null;
   let i = start;
@@ -158,7 +198,7 @@ function readList(lines: string[], start: number, depth = 0): { node: HTMLElemen
     break;
   }
   if (items.length === 0) return null;
-  return { node: buildList(items, depth), next: i };
+  return { node: buildList(items, depth, options), next: i };
 }
 
 function splitRow(line: string): string[] {
@@ -174,7 +214,11 @@ function isTableStart(lines: string[], index: number): boolean {
   return head.includes("|") && /^\s*\|?(?:\s*:?-{2,}:?\s*\|)+\s*(?::?-{2,}:?)?\s*\|?\s*$/.test(sep + "|");
 }
 
-function readTable(lines: string[], start: number): { node: HTMLElement; next: number } {
+function readTable(
+  lines: string[],
+  start: number,
+  options: MarkdownOptions = {},
+): { node: HTMLElement; next: number } {
   const header = splitRow(lines[start] ?? "");
   const align = splitRow(lines[start + 1] ?? "").map((cell) => {
     const left = cell.startsWith(":");
@@ -188,7 +232,7 @@ function readTable(lines: string[], start: number): { node: HTMLElement; next: n
   header.forEach((cell, index) => {
     const th = document.createElement("th");
     if (align[index]) th.style.textAlign = align[index] ?? "";
-    appendInline(th, cell);
+    appendInline(th, cell, options);
     headRow.append(th);
   });
   thead.append(headRow);
@@ -202,7 +246,7 @@ function readTable(lines: string[], start: number): { node: HTMLElement; next: n
     splitRow(line).forEach((cell, index) => {
       const td = document.createElement("td");
       if (align[index]) td.style.textAlign = align[index] ?? "";
-      appendInline(td, cell);
+      appendInline(td, cell, options);
       row.append(td);
     });
     tbody.append(row);
@@ -231,11 +275,11 @@ function isBlockStart(lines: string[], index: number): boolean {
   );
 }
 
-export function renderMarkdown(source: string): DocumentFragment {
-  return renderBlocks(source, 0);
+export function renderMarkdown(source: string, options: MarkdownOptions = {}): DocumentFragment {
+  return renderBlocks(source, 0, options);
 }
 
-function renderBlocks(source: string, depth: number): DocumentFragment {
+function renderBlocks(source: string, depth: number, options: MarkdownOptions = {}): DocumentFragment {
   const fragment = document.createDocumentFragment();
   if (depth > MAX_BLOCK_DEPTH) {
     const p = document.createElement("p");
@@ -279,7 +323,7 @@ function renderBlocks(source: string, depth: number): DocumentFragment {
       const level = Math.min((heading[1] ?? "#").length, 6);
       const node = document.createElement(`h${level}`);
       node.className = "md-h";
-      appendInline(node, heading[2] ?? "");
+      appendInline(node, heading[2] ?? "", options);
       fragment.append(node);
       i += 1;
       continue;
@@ -301,13 +345,13 @@ function renderBlocks(source: string, depth: number): DocumentFragment {
       }
       const quote = document.createElement("blockquote");
       quote.className = "md-quote";
-      quote.append(renderBlocks(body.join("\n"), depth + 1));
+      quote.append(renderBlocks(body.join("\n"), depth + 1, options));
       fragment.append(quote);
       continue;
     }
 
     if (LIST_ITEM.test(line)) {
-      const list = readList(lines, i);
+      const list = readList(lines, i, 0, options);
       if (list) {
         list.node.className = "md-list";
         fragment.append(list.node);
@@ -317,7 +361,7 @@ function renderBlocks(source: string, depth: number): DocumentFragment {
     }
 
     if (isTableStart(lines, i)) {
-      const table = readTable(lines, i);
+      const table = readTable(lines, i, options);
       fragment.append(table.node);
       i = table.next;
       continue;
@@ -330,7 +374,7 @@ function renderBlocks(source: string, depth: number): DocumentFragment {
     }
     const p = document.createElement("p");
     p.className = "md-p";
-    appendInline(p, paragraph.join("\n"));
+    appendInline(p, paragraph.join("\n"), options);
     fragment.append(p);
   }
   return fragment;

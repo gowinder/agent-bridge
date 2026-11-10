@@ -1938,6 +1938,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     ]),
   );
 
+  previewRoot = project?.cwd;
   const rail = createRail(summary.sessionId, summary.appId, project?.cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
@@ -3153,11 +3154,180 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
   return bubble;
 }
 
+// ---- local files referenced by a transcript ----
+
+/** Project directory of the chat on screen; file previews are scoped to it. */
+let previewRoot: string | undefined;
+
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
+
+/**
+ * The Mac-side path behind a transcript link, or null for anything else.
+ * Antigravity writes `cci:<n>://file:///…`, other clients use `file:///…`,
+ * absolute paths, or paths relative to the project directory.
+ */
+function fileRefPath(href: string): string | null {
+  let raw = href.trim().replace(/^<|>$/g, "");
+  if (/^cci:\d*:\/\//i.test(raw)) raw = raw.replace(/^cci:\d*:\/\//i, "");
+  if (/^file:\/\//i.test(raw)) {
+    try {
+      raw = decodeURIComponent(new URL(raw).pathname);
+    } catch {
+      return null;
+    }
+  }
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return null;
+  // Editor-style references carry a line (and column) number.
+  const path = raw.replace(/:\d+(?::\d+)?$/, "").trim();
+  if (!path) return null;
+  if (path.startsWith("/")) return path;
+  if (!path.includes("/") && !/\.[A-Za-z0-9]{1,8}$/.test(path)) return null;
+  return path;
+}
+
+function fileName(path: string): string {
+  const parts = path.split("/");
+  return parts[parts.length - 1] || path;
+}
+
+async function readLocalFile(path: string): Promise<FsReadResult> {
+  const root = previewRoot;
+  if (!root) throw new Error("这个会话没有项目目录，无法预览文件");
+  const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
+  return call<FsReadResult>("fs.read", { root, path: full });
+}
+
+function fileRefChip(label: string, path: string): HTMLElement {
+  const chip = el("button", { className: "file-ref", attrs: { type: "button", title: path } }, [
+    icon("file", "file-ref-icon"),
+    el("span", { className: "file-ref-name", text: label }),
+  ]);
+  chip.addEventListener("click", () => void openFilePreview(path));
+  return chip;
+}
+
+/** A transcript link that points at a local file becomes a preview button. */
+function localFileLink(label: string, href: string): HTMLElement | null {
+  const path = fileRefPath(href);
+  return path ? fileRefChip(label || fileName(path), path) : null;
+}
+
+/** Local images render as a thumbnail that loads once scrolled into view. */
+function localFileImage(alt: string, href: string): HTMLElement | null {
+  const path = fileRefPath(href);
+  if (!path || !IMAGE_EXT.test(path)) return null;
+  const label = alt || fileName(path);
+  const button = el("button", { className: "md-figure-open", attrs: { type: "button", title: `查看 ${label}` } });
+  const img = el("img", { className: "md-img is-loading", attrs: { alt: label, loading: "lazy" } });
+  button.append(img);
+  const figure = el("figure", { className: "md-figure" }, [button, el("figcaption", { className: "md-figcaption", text: label })]);
+  button.addEventListener("click", () => void openFilePreview(path));
+  const load = (): void => {
+    void readLocalFile(path).then(
+      (file) => {
+        img.src = `data:${file.mime};base64,${file.dataBase64 ?? ""}`;
+        img.classList.remove("is-loading");
+      },
+      // Outside the project directory, or file browsing switched off.
+      () => figure.replaceWith(fileRefChip(label, path)),
+    );
+  };
+  if ("IntersectionObserver" in window) {
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+        observer.disconnect();
+        load();
+      },
+      { rootMargin: "300px" },
+    );
+    observer.observe(figure);
+  } else {
+    load();
+  }
+  return figure;
+}
+
+let filePreviewOverlay: HTMLElement | null = null;
+let filePreviewBody: HTMLElement | null = null;
+let filePreviewTitle: HTMLElement | null = null;
+let filePreviewNote: HTMLElement | null = null;
+
+function ensureFilePreview(): HTMLElement {
+  if (filePreviewOverlay) return filePreviewOverlay;
+  const overlay = el("div", { className: "file-preview", attrs: { role: "dialog", "aria-modal": "true", hidden: "" } });
+  const backdrop = el("div", { className: "file-preview-backdrop" });
+  backdrop.addEventListener("click", closeFilePreview);
+  filePreviewTitle = el("span", { className: "file-preview-name" });
+  const close = el("button", {
+    className: "icon-btn file-preview-close",
+    attrs: { type: "button", "aria-label": "关闭预览", title: "关闭预览" },
+  }, [icon("close")]);
+  close.addEventListener("click", closeFilePreview);
+  filePreviewBody = el("div", { className: "file-preview-body" });
+  filePreviewNote = el("p", { className: "file-preview-note" });
+  overlay.append(
+    backdrop,
+    el("div", { className: "file-preview-card" }, [
+      el("header", { className: "file-preview-head" }, [filePreviewTitle, close]),
+      filePreviewBody,
+      filePreviewNote,
+    ]),
+  );
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && filePreviewOverlay && !filePreviewOverlay.hidden) closeFilePreview();
+  });
+  document.body.append(overlay);
+  filePreviewOverlay = overlay;
+  return overlay;
+}
+
+function closeFilePreview(): void {
+  if (!filePreviewOverlay) return;
+  filePreviewOverlay.hidden = true;
+  document.body.classList.remove("has-file-preview");
+  filePreviewBody?.replaceChildren();
+}
+
+async function openFilePreview(path: string): Promise<void> {
+  const overlay = ensureFilePreview();
+  overlay.hidden = false;
+  document.body.classList.add("has-file-preview");
+  if (filePreviewTitle) {
+    filePreviewTitle.textContent = fileName(path);
+    filePreviewTitle.title = path;
+  }
+  if (filePreviewNote) filePreviewNote.textContent = "";
+  filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: "正在读取…" }));
+  try {
+    const file = await readLocalFile(path);
+    if (file.dataBase64) {
+      filePreviewBody?.replaceChildren(
+        el("img", {
+          className: "file-preview-img",
+          attrs: { src: `data:${file.mime};base64,${file.dataBase64}`, alt: file.name },
+        }),
+      );
+    } else if (file.mime === "text/markdown") {
+      const body = el("div", { className: "markdown file-preview-md" });
+      body.append(renderMarkdown(file.text ?? ""));
+      filePreviewBody?.replaceChildren(body);
+    } else {
+      filePreviewBody?.replaceChildren(el("pre", { className: "file-preview-text", text: file.text ?? "" }));
+    }
+    if (filePreviewNote) {
+      filePreviewNote.textContent = `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`;
+    }
+  } catch (error) {
+    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+  }
+}
+
 /** Renders transcript text as Markdown; truncation is annotated after the content. */
 function markdownBlock(text: string, truncated?: boolean): HTMLElement {
   const node = el("div", { className: "message-text md" });
   try {
-    node.append(renderMarkdown(text));
+    node.append(renderMarkdown(text, { localLink: localFileLink, localImage: localFileImage }));
   } catch {
     // A rendering failure must never blank the transcript; fall back to plain text.
     node.textContent = text;
