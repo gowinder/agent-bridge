@@ -15,12 +15,18 @@ import type {
   ShellEventData,
   ShellExecResult,
 } from "@agent-bridge/protocol";
+import { MAX_MESSAGE_BYTES } from "@agent-bridge/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Store } from "./store.js";
 
 const MAX_TEXT_BYTES = 1024 * 1024;
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+/**
+ * Base64 inflates by 4/3 and the response envelope adds a little more, so a raw
+ * image limit near MAX_MESSAGE_BYTES would make `seal()` reject the reply and
+ * drop the device channel. Leave headroom for the encoding and the JSON wrapper.
+ */
+const MAX_IMAGE_BYTES = Math.floor((MAX_MESSAGE_BYTES * 3) / 4) - 256 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -82,6 +88,8 @@ function clamp(value: number, min: number, max: number): number {
 export class Devtools {
   private execs = new Map<string, ExecRecord>();
   private rootsCache: { at: number; roots: Array<FsRoot & { real: string }> } | null = null;
+  private expiryTimer: NodeJS.Timeout | null = null;
+  private expiryFor: number | null = null;
 
   constructor(
     private readonly store: Store,
@@ -93,7 +101,11 @@ export class Devtools {
     const stored = this.store.meta("devtools_enabled") === "1";
     const expiresAt = Number(this.store.meta("devtools_expires_at") ?? "") || null;
     const active = stored && (expiresAt === null || expiresAt > Date.now());
-    if (stored && !active) this.setEnabled(false);
+    if (stored && !active) {
+      this.setEnabled(false);
+      return { enabled: false, expiresAt: null, terminal: false, files: false };
+    }
+    if (active) this.armExpiry(expiresAt);
     return {
       enabled: active,
       expiresAt: active ? expiresAt : null,
@@ -102,8 +114,34 @@ export class Devtools {
     };
   }
 
+  /**
+   * Shuts the switch down at its deadline even if no client asks for status again;
+   * a command started just before expiry would otherwise keep running.
+   */
+  private armExpiry(expiresAt: number | null): void {
+    if (this.expiryFor === expiresAt && this.expiryTimer) return;
+    this.clearExpiry();
+    this.expiryFor = expiresAt;
+    if (expiresAt === null) return;
+    const timer = setTimeout(() => {
+      this.expiryTimer = null;
+      this.expiryFor = null;
+      this.log("远程工具已到期，自动关闭");
+      this.setEnabled(false);
+    }, Math.max(0, expiresAt - Date.now()));
+    timer.unref();
+    this.expiryTimer = timer;
+  }
+
+  private clearExpiry(): void {
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    this.expiryFor = null;
+  }
+
   setEnabled(enabled: boolean, ttlSeconds?: number | null): DevtoolsStatus {
     if (!enabled) {
+      this.clearExpiry();
       this.killAll();
       this.store.setMeta("devtools_enabled", "0");
       this.store.setMeta("devtools_expires_at", "");
@@ -273,6 +311,8 @@ export class Devtools {
       cwd: workdir,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
+      // Own process group, so cancellation reaches anything the command started.
+      detached: process.platform !== "win32",
     });
     const record: ExecRecord = {
       proc,
@@ -352,17 +392,17 @@ export class Devtools {
     if (!record) return;
     record.killed = true;
     if (byUser) this.log(`已终止命令 ${execId.slice(0, 8)}`);
-    try {
-      record.proc.kill("SIGTERM");
-    } catch {
-      // already gone
-    }
-    setTimeout(() => {
+    // Signal the whole group: the shell's children outlive a signal sent to the shell alone.
+    const signal = (name: NodeJS.Signals): void => {
+      const pid = record.proc.pid;
       try {
-        record.proc.kill("SIGKILL");
+        if (pid !== undefined && process.platform !== "win32") process.kill(-pid, name);
+        else record.proc.kill(name);
       } catch {
         // already gone
       }
-    }, 2_000);
+    };
+    signal("SIGTERM");
+    setTimeout(() => signal("SIGKILL"), 2_000).unref();
   }
 }
