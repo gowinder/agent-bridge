@@ -62,7 +62,7 @@ interface RawEntry {
 interface BusyState {
   lastUserAt: number;
   lastTurnEndAt: number;
-  sawTurnEnd: boolean;
+  lastActivityAt: number;
 }
 
 interface CachedMessages {
@@ -110,19 +110,25 @@ function trackBusy(busy: BusyState, entry: RawEntry): void {
   if (entry.isSidechain) return;
   const at = entry.timestamp ? Date.parse(entry.timestamp) : Number.NaN;
   if (!Number.isFinite(at)) return;
+  if (at > busy.lastActivityAt) busy.lastActivityAt = at;
   if (entry.type === "user" && at > busy.lastUserAt) busy.lastUserAt = at;
   if (entry.type === "system" && entry.subtype === "turn_duration") {
-    busy.sawTurnEnd = true;
     if (at > busy.lastTurnEndAt) busy.lastTurnEndAt = at;
   }
 }
 
-const BUSY_MAX_AGE_MS = 30 * 60_000;
+const BUSY_IDLE_MS = 30 * 60_000;
 
+/**
+ * A turn is open while the last main-chain user entry is newer than the last turn end and
+ * the transcript is still being written. The first turn of a session has no
+ * `turn_duration` yet, and a long turn keeps writing tool steps past the user timestamp,
+ * so freshness is measured from the last entry of any kind.
+ */
 function isBusy(busy: BusyState | undefined): boolean {
-  if (!busy || !busy.sawTurnEnd) return false;
+  if (!busy) return false;
   if (busy.lastUserAt <= busy.lastTurnEndAt) return false;
-  return Date.now() - busy.lastUserAt < BUSY_MAX_AGE_MS;
+  return Date.now() - busy.lastActivityAt < BUSY_IDLE_MS;
 }
 
 function listSessionFiles(root: string): string[] {
@@ -538,7 +544,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
 
     const messages: MessageRecord[] = [];
     let context: ContextUsage | undefined;
-    const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, sawTurnEnd: false };
+    const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, lastActivityAt: 0 };
     let lastContentOrder = -1;
     let lastInterruptOrder = -1;
     let order = 0;
