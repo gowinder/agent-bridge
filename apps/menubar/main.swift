@@ -27,9 +27,15 @@ struct PairingInfo: Decodable {
     let since: Double
 }
 
-struct DevtoolsInfo: Decodable {
+struct DevtoolsCapabilityInfo: Decodable {
     let enabled: Bool
     let expiresAt: Double?
+}
+
+/// File browsing (read-only, one project) and command execution (can write) switch separately.
+struct DevtoolsInfo: Decodable {
+    let files: DevtoolsCapabilityInfo?
+    let terminal: DevtoolsCapabilityInfo?
 }
 
 struct Snapshot: Decodable {
@@ -147,9 +153,9 @@ final class AdminClient {
         return url
     }
 
-    /// Turns remote file browsing and command execution on or off. `ttl` nil keeps it on until turned off.
-    func setDevtools(enabled: Bool, ttlSeconds: Double?) async throws {
-        var body: [String: Any] = ["enabled": enabled]
+    /// Turns one remote capability on or off. `ttl` nil keeps it on until turned off.
+    func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?) async throws {
+        var body: [String: Any] = ["capability": capability, "enabled": enabled]
         if let ttlSeconds { body["ttlSeconds"] = ttlSeconds }
         _ = try await request("POST", "/devtools", body: body)
     }
@@ -427,23 +433,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(item("邀请新设备…", #selector(inviteDevice), "i"))
 
         let devtools = snapshot.devtools
-        let devTitle: String
-        if devtools?.enabled == true {
-            if let expiresAt = devtools?.expiresAt {
-                let minutes = max(1, Int((expiresAt / 1000 - Date().timeIntervalSince1970) / 60))
-                devTitle = "远程工具：已开启（约 \(minutes) 分钟）"
-            } else {
-                devTitle = "远程工具：已开启"
-            }
-        } else {
-            devTitle = "远程工具：已关闭"
-        }
-        let devItem = NSMenuItem(title: devTitle, action: nil, keyEquivalent: "")
+        let devItem = NSMenuItem(title: devtoolsTitle(devtools), action: nil, keyEquivalent: "")
         devItem.isEnabled = true
         let devSub = NSMenu()
-        devSub.addItem(item("开启 1 小时", #selector(enableDevtoolsOneHour), ""))
-        devSub.addItem(item("开启 8 小时", #selector(enableDevtoolsEightHours), ""))
-        devSub.addItem(item("关闭", #selector(disableDevtools), ""))
+        devSub.addItem(disabled("文件浏览（只读，仅当前项目目录）"))
+        devSub.addItem(item("开启 1 小时", #selector(enableFilesOneHour), ""))
+        devSub.addItem(item("开启 8 小时", #selector(enableFilesEightHours), ""))
+        devSub.addItem(item("关闭", #selector(disableFiles), ""))
+        devSub.addItem(.separator())
+        devSub.addItem(disabled("命令执行（可写，可访问整台机器）"))
+        devSub.addItem(item("开启 1 小时", #selector(enableTerminalOneHour), ""))
+        devSub.addItem(item("开启 8 小时", #selector(enableTerminalEightHours), ""))
+        devSub.addItem(item("关闭", #selector(disableTerminal), ""))
         devItem.submenu = devSub
         menu.addItem(devItem)
 
@@ -455,6 +456,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(item("打开日志", #selector(openLog), ""))
         menu.addItem(item("退出", #selector(quit), "q"))
+    }
+
+    private func devtoolsTitle(_ info: DevtoolsInfo?) -> String {
+        let files = info?.files?.enabled == true
+        let terminal = info?.terminal?.enabled == true
+        guard files || terminal else { return "远程工具：已关闭" }
+        let parts = [files ? "文件" : nil, terminal ? "命令" : nil].compactMap { $0 }
+        return "远程工具：\(parts.joined(separator: " + ")) 已开启"
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
@@ -522,22 +531,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func enableDevtoolsOneHour() {
-        setDevtools(enabled: true, ttlSeconds: 3_600)
+    @objc private func enableFilesOneHour() {
+        setDevtools(capability: "files", enabled: true, ttlSeconds: 3_600)
     }
 
-    @objc private func enableDevtoolsEightHours() {
-        setDevtools(enabled: true, ttlSeconds: 8 * 3_600)
+    @objc private func enableFilesEightHours() {
+        setDevtools(capability: "files", enabled: true, ttlSeconds: 8 * 3_600)
     }
 
-    @objc private func disableDevtools() {
-        setDevtools(enabled: false, ttlSeconds: nil)
+    @objc private func disableFiles() {
+        setDevtools(capability: "files", enabled: false, ttlSeconds: nil)
     }
 
-    private func setDevtools(enabled: Bool, ttlSeconds: Double?) {
+    @objc private func enableTerminalOneHour() {
+        setDevtools(capability: "terminal", enabled: true, ttlSeconds: 3_600)
+    }
+
+    @objc private func enableTerminalEightHours() {
+        setDevtools(capability: "terminal", enabled: true, ttlSeconds: 8 * 3_600)
+    }
+
+    @objc private func disableTerminal() {
+        setDevtools(capability: "terminal", enabled: false, ttlSeconds: nil)
+    }
+
+    private func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?) {
         Task {
             do {
-                try await client.setDevtools(enabled: enabled, ttlSeconds: ttlSeconds)
+                try await client.setDevtools(capability: capability, enabled: enabled, ttlSeconds: ttlSeconds)
                 await refresh()
             } catch {
                 alert("设置远程工具失败", error.localizedDescription)

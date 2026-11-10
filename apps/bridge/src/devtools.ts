@@ -1,21 +1,26 @@
 // Remote devtools: read-only project file browsing plus single command execution.
-// Both are off by default and only work while the local user has switched them on
-// from the menu bar app or `agent-bridge devtools on`.
+// The two capabilities are switched independently, both off by default, and each is
+// only usable while the local user has switched it on from the menu bar app or
+// `agent-bridge devtools`. File browsing never leaves the chat's own project directory.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
-import { basename, extname, resolve, sep } from "node:path";
-import type {
-  DevtoolsStatus,
-  FsEntry,
-  FsListResult,
-  FsReadResult,
-  FsRoot,
-  ShellCancelResult,
-  ShellEventData,
-  ShellExecResult,
+import { basename, dirname, extname, resolve, sep } from "node:path";
+import {
+  DEVTOOLS_CAPABILITIES,
+  MAX_MESSAGE_BYTES,
+  type DevtoolsCapability,
+  type DevtoolsCapabilityName,
+  type DevtoolsStatus,
+  type FsEntry,
+  type FsListResult,
+  type FsReadResult,
+  type FsRoot,
+  type FsRootsResult,
+  type ShellCancelResult,
+  type ShellEventData,
+  type ShellExecResult,
 } from "@agent-bridge/protocol";
-import { MAX_MESSAGE_BYTES } from "@agent-bridge/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Store } from "./store.js";
@@ -31,6 +36,14 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_ENTRIES = 2_000;
+
+type Capability = DevtoolsCapabilityName;
+type ScopedRoot = FsRoot & { real: string };
+
+const CAPABILITY_LABEL: Record<Capability, string> = {
+  files: "文件浏览",
+  terminal: "命令执行",
+};
 
 const IMAGE_MIME: Record<string, string> = {
   ".png": "image/png",
@@ -72,6 +85,10 @@ const TEXT_MIME: Record<string, string> = {
   ".csv": "text/csv",
 };
 
+export function isDevtoolsCapability(value: unknown): value is Capability {
+  return typeof value === "string" && (DEVTOOLS_CAPABILITIES as readonly string[]).includes(value);
+}
+
 interface ExecRecord {
   proc: ChildProcess;
   owner: string;
@@ -87,6 +104,11 @@ interface PendingExec {
   cancelled: boolean;
 }
 
+interface ExpiryState {
+  timer: NodeJS.Timeout | null;
+  for: number | null;
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -94,10 +116,8 @@ function clamp(value: number, min: number, max: number): number {
 export class Devtools {
   private execs = new Map<string, ExecRecord>();
   private pendingExecs = new Set<PendingExec>();
-  private rootsCache: { at: number; roots: Array<FsRoot & { real: string }> } | null = null;
-  private rootsLoading: Promise<Array<FsRoot & { real: string }>> | null = null;
-  private expiryTimer: NodeJS.Timeout | null = null;
-  private expiryFor: number | null = null;
+  private rootsCache: { at: number; roots: ScopedRoot[] } | null = null;
+  private readonly expiry = new Map<Capability, ExpiryState>();
 
   constructor(
     private readonly store: Store,
@@ -106,92 +126,96 @@ export class Devtools {
   ) {}
 
   status(): DevtoolsStatus {
-    const stored = this.store.meta("devtools_enabled") === "1";
-    const expiresAt = Number(this.store.meta("devtools_expires_at") ?? "") || null;
-    const active = stored && (expiresAt === null || expiresAt > Date.now());
-    if (stored && !active) {
-      this.setEnabled(false);
-      return { enabled: false, expiresAt: null, terminal: false, files: false };
+    return { files: this.readCapability("files"), terminal: this.readCapability("terminal") };
+  }
+
+  private readCapability(capability: Capability): DevtoolsCapability {
+    const stored = this.store.meta(`devtools_${capability}_enabled`) === "1";
+    if (!stored) return { enabled: false, expiresAt: null };
+    const expiresAt = Number(this.store.meta(`devtools_${capability}_expires_at`) ?? "") || null;
+    if (expiresAt !== null && expiresAt <= Date.now()) {
+      this.disable(capability, "expired");
+      return { enabled: false, expiresAt: null };
     }
-    if (active) this.armExpiry(expiresAt);
-    return {
-      enabled: active,
-      expiresAt: active ? expiresAt : null,
-      terminal: active,
-      files: active,
-    };
+    this.armExpiry(capability, expiresAt);
+    return { enabled: true, expiresAt };
   }
 
   /**
-   * Shuts the switch down at its deadline even if no client asks for status again;
+   * Shuts a capability down at its deadline even if no client asks for status again;
    * a command started just before expiry would otherwise keep running.
    */
-  private armExpiry(expiresAt: number | null): void {
-    if (this.expiryFor === expiresAt && this.expiryTimer) return;
-    this.clearExpiry();
-    this.expiryFor = expiresAt;
-    if (expiresAt === null) return;
-    const timer = setTimeout(() => {
-      this.expiryTimer = null;
-      this.expiryFor = null;
-      this.log("远程工具已到期，自动关闭");
-      this.setEnabled(false);
-    }, Math.max(0, expiresAt - Date.now()));
-    timer.unref();
-    this.expiryTimer = timer;
+  private armExpiry(capability: Capability, expiresAt: number | null): void {
+    const current = this.expiry.get(capability);
+    if (current && current.for === expiresAt && (expiresAt === null || current.timer)) return;
+    this.clearExpiry(capability);
+    const state: ExpiryState = { timer: null, for: expiresAt };
+    if (expiresAt !== null) {
+      const timer = setTimeout(() => {
+        state.timer = null;
+        state.for = null;
+        this.disable(capability, "expired");
+      }, Math.max(0, expiresAt - Date.now()));
+      timer.unref();
+      state.timer = timer;
+    }
+    this.expiry.set(capability, state);
   }
 
-  private clearExpiry(): void {
-    if (this.expiryTimer) clearTimeout(this.expiryTimer);
-    this.expiryTimer = null;
-    this.expiryFor = null;
+  private clearExpiry(capability: Capability): void {
+    const current = this.expiry.get(capability);
+    if (current?.timer) clearTimeout(current.timer);
+    this.expiry.delete(capability);
   }
 
-  setEnabled(enabled: boolean, ttlSeconds?: number | null): DevtoolsStatus {
+  private disable(capability: Capability, reason: "manual" | "expired"): void {
+    this.clearExpiry(capability);
+    this.store.setMeta(`devtools_${capability}_enabled`, "0");
+    this.store.setMeta(`devtools_${capability}_expires_at`, "");
+    // Commands belong to the terminal switch; file browsing never started any.
+    if (capability === "terminal") this.killAll();
+    const label = CAPABILITY_LABEL[capability];
+    this.log(reason === "expired" ? `${label}已到期，自动关闭` : `${label}已关闭`);
+  }
+
+  setEnabled(capability: Capability, enabled: boolean, ttlSeconds?: number | null): DevtoolsStatus {
     if (!enabled) {
-      this.clearExpiry();
-      this.killAll();
-      this.store.setMeta("devtools_enabled", "0");
-      this.store.setMeta("devtools_expires_at", "");
-      this.log("远程工具已关闭");
+      this.disable(capability, "manual");
       return this.status();
     }
     const ttl = ttlSeconds === null || ttlSeconds === undefined ? null : clamp(Math.round(ttlSeconds), 60, 86400);
     const expiresAt = ttl === null ? null : Date.now() + ttl * 1000;
-    this.store.setMeta("devtools_enabled", "1");
-    this.store.setMeta("devtools_expires_at", expiresAt === null ? "" : String(expiresAt));
+    this.store.setMeta(`devtools_${capability}_enabled`, "1");
+    this.store.setMeta(`devtools_${capability}_expires_at`, expiresAt === null ? "" : String(expiresAt));
+    this.armExpiry(capability, expiresAt);
+    const label = CAPABILITY_LABEL[capability];
     this.log(
-      `远程工具已开启${expiresAt === null ? "（不自动关闭）" : `，${new Date(expiresAt).toLocaleTimeString()} 失效`}`,
+      `${label}已开启${expiresAt === null ? "（不自动关闭）" : `，${new Date(expiresAt).toLocaleTimeString()} 失效`}`,
     );
     return this.status();
   }
 
-  async roots(): Promise<FsRoot[]> {
-    return (await this.allRoots()).map(({ name, path }) => ({ name, path }));
-  }
-
-  /**
-   * The adapter index is async (dsh indexes its sessions lazily), so roots are
-   * loaded asynchronously and kept for 5 s. Concurrent callers share one load.
-   */
-  private async allRoots(): Promise<Array<FsRoot & { real: string }>> {
-    const cached = this.rootsCache;
-    if (cached && Date.now() - cached.at < 5_000) return cached.roots;
-    if (this.rootsLoading) return this.rootsLoading;
-    const loading = this.loadRoots();
-    this.rootsLoading = loading;
-    try {
-      return await loading;
-    } finally {
-      this.rootsLoading = null;
+  private requireCapability(capability: Capability): void {
+    if (!this.readCapability(capability).enabled) {
+      throw new RpcError("unsupported", `${CAPABILITY_LABEL[capability]}未开启，请在 Mac 菜单栏中打开`);
     }
   }
 
-  private async loadRoots(): Promise<Array<FsRoot & { real: string }>> {
+  /** `root` must be one of the known project directories; the reply names it back. */
+  async roots(root: string): Promise<FsRootsResult> {
+    this.requireCapability("files");
+    const scoped = await this.scope(root);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    this.requireCapability("files");
+    return { enabled: true, roots: [{ name: scoped.name, path: scoped.path }] };
+  }
+
+  private async allRoots(): Promise<ScopedRoot[]> {
+    const cached = this.rootsCache;
+    if (cached && Date.now() - cached.at < 5_000) return cached.roots;
     const seen = new Set<string>();
-    const roots: Array<FsRoot & { real: string }> = [];
-    const { projects } = await this.adapters.projects();
-    for (const project of projects) {
+    const roots: ScopedRoot[] = [];
+    for (const project of (await this.adapters.projects()).projects) {
       if (!project.cwd) continue;
       let real: string;
       try {
@@ -208,33 +232,42 @@ export class Devtools {
     return roots;
   }
 
-  /** Resolves a client path and refuses anything outside an allowed project root. */
-  private async resolveInside(path: string): Promise<{ real: string; root: (FsRoot & { real: string }) | null }> {
-    const roots = await this.allRoots();
-    if (roots.length === 0) throw new RpcError("unsupported", "没有可浏览的项目目录");
-    const target = resolve(path);
+  /**
+   * Resolves the chat's project directory. Only a directory that belongs to one of
+   * the known projects is accepted, so a device cannot aim the browser at `/`.
+   */
+  private async scope(root: string): Promise<ScopedRoot> {
+    let want: string;
+    try {
+      want = realpathSync(resolve(root));
+    } catch {
+      throw new RpcError("not_found", "项目目录不存在");
+    }
+    const match = (await this.allRoots()).find((item) => item.real === want);
+    if (!match) throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
+    return match;
+  }
+
+  /** Resolves a client path and refuses anything outside the scoped project root. */
+  private resolveInside(root: ScopedRoot, path: string): string {
     let real: string;
     try {
-      real = realpathSync(target);
+      real = realpathSync(resolve(root.real, path));
     } catch {
       throw new RpcError("not_found", "路径不存在");
     }
-    const root = roots.find((item) => real === item.real || real.startsWith(item.real + sep));
-    if (!root) throw new RpcError("unauthorized", "路径不在允许的项目目录内");
-    return { real, root };
-  }
-
-  private requireEnabled(): void {
-    if (!this.status().enabled) {
-      throw new RpcError("unsupported", "远程工具未开启，请在 Mac 的菜单栏中打开");
+    if (real !== root.real && !real.startsWith(root.real + sep)) {
+      throw new RpcError("unauthorized", "路径不在该项目目录内");
     }
+    return real;
   }
 
-  async listDirs(path: string): Promise<FsListResult> {
-    this.requireEnabled();
-    const { real } = await this.resolveInside(path);
+  async listDirs(root: string, path?: string): Promise<FsListResult> {
+    this.requireCapability("files");
+    const scoped = await this.scope(root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
-    this.requireEnabled();
+    this.requireCapability("files");
+    const real = path ? this.resolveInside(scoped, path) : scoped.real;
     let stats;
     try {
       stats = statSync(real);
@@ -266,17 +299,19 @@ export class Devtools {
       if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
       return a.name.localeCompare(b.name);
     });
-    const all = await this.allRoots();
-    const root = all.find((item) => real === item.real || real.startsWith(item.real + sep));
-    const parent = root && real !== root.real ? real.slice(0, real.lastIndexOf(sep)) : null;
-    return { path: real, parent, entries };
+    return {
+      path: real,
+      parent: real === scoped.real ? null : dirname(real),
+      entries,
+    };
   }
 
-  async readFile(path: string): Promise<FsReadResult> {
-    this.requireEnabled();
-    const { real } = await this.resolveInside(path);
+  async readFile(root: string, path: string): Promise<FsReadResult> {
+    this.requireCapability("files");
+    const scoped = await this.scope(root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
-    this.requireEnabled();
+    this.requireCapability("files");
+    const real = this.resolveInside(scoped, path);
     let stats;
     try {
       stats = statSync(real);
@@ -323,25 +358,31 @@ export class Devtools {
     };
   }
 
-  async exec(owner: string, command: string, cwd: string | undefined, timeoutMs: number | undefined, emit: (data: ShellEventData) => void): Promise<ShellExecResult> {
-    this.requireEnabled();
+  async exec(
+    owner: string,
+    root: string,
+    command: string,
+    cwd: string | undefined,
+    timeoutMs: number | undefined,
+    emit: (data: ShellEventData) => void,
+  ): Promise<ShellExecResult> {
+    this.requireCapability("terminal");
     const text = command.trim();
     if (!text) throw new RpcError("invalid_params", "命令不能为空");
     if (text.length > 8_000) throw new RpcError("invalid_params", "命令过长");
     // Registered before the root lookup: a channel closed while we wait must not spawn.
     const pending: PendingExec = { owner, cancelled: false };
     this.pendingExecs.add(pending);
-    let workdir: string | undefined;
+    let workdir: string;
     try {
-      const roots = await this.allRoots();
-      workdir = cwd ? (await this.resolveInside(cwd)).real : roots[0]?.real;
+      const scoped = await this.scope(root);
+      workdir = cwd ? this.resolveInside(scoped, cwd) : scoped.real;
     } finally {
       this.pendingExecs.delete(pending);
     }
     if (pending.cancelled) throw new RpcError("unsupported", "设备通道已断开");
     // The switch can be turned off, or expire, while the adapter index is loading.
-    this.requireEnabled();
-    if (!workdir) throw new RpcError("unsupported", "没有可用的项目目录");
+    this.requireCapability("terminal");
     const timeout = clamp(Math.round(timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000, MAX_TIMEOUT_MS);
     const shell = process.env["SHELL"] && existsSync(process.env["SHELL"]) ? process.env["SHELL"] : "/bin/sh";
     const execId = randomUUID();

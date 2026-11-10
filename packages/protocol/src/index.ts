@@ -236,17 +236,33 @@ export interface HostInfoResult {
 
 // ---- Remote devtools (files + single command execution) ----
 
-/** Off unless the local user turns it on; `expiresAt` null means until the bridge exits. */
-export interface DevtoolsStatus {
+export const DEVTOOLS_CAPABILITIES = ["files", "terminal"] as const;
+
+export type DevtoolsCapabilityName = (typeof DEVTOOLS_CAPABILITIES)[number];
+
+/** One independently switched capability; `expiresAt` null means until it is turned off. */
+export interface DevtoolsCapability {
   enabled: boolean;
   expiresAt: number | null;
-  terminal: boolean;
-  files: boolean;
+}
+
+/**
+ * Reading project files and running commands are separate switches: the browser is
+ * read-only and stays inside one project, while a command can write anywhere.
+ */
+export interface DevtoolsStatus {
+  files: DevtoolsCapability;
+  terminal: DevtoolsCapability;
 }
 
 export interface FsRoot {
   name: string;
   path: string;
+}
+
+/** `root` is the project directory the chat belongs to; the bridge refuses anything else. */
+export interface FsRootsParams {
+  root: string;
 }
 
 export interface FsRootsResult {
@@ -263,7 +279,9 @@ export interface FsEntry {
 }
 
 export interface FsListParams {
-  path: string;
+  /** Project directory of the chat; every read is confined to it. */
+  root: string;
+  path?: string;
 }
 
 export interface FsListResult {
@@ -274,6 +292,7 @@ export interface FsListResult {
 }
 
 export interface FsReadParams {
+  root: string;
   path: string;
 }
 
@@ -291,6 +310,8 @@ export interface FsReadResult {
 }
 
 export interface ShellExecParams {
+  /** Project directory of the chat; the command starts there unless `cwd` names a path inside it. */
+  root: string;
   command: string;
   cwd?: string;
   timeoutMs?: number;
