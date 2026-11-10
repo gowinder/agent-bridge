@@ -369,7 +369,7 @@ export class DeviceSession implements ChannelSession {
         if (!text.trim() && attachments.length === 0) throw new RpcError("invalid_params", "消息不能为空");
         const composed = composeMessage(text.trim(), attachments);
         if (composed.length > 32_000) throw new RpcError("invalid_params", "消息过长");
-        return this.options.adapters.send(sessionId, composed);
+        return this.options.adapters.send(sessionId, composed, this.options.device.name);
       }
       case "file.upload.begin": {
         const sessionId = stringParam(params, "sessionId");
