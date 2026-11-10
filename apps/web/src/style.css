@@ -929,6 +929,16 @@ a.crumb:hover {
   padding: 1px 6px;
 }
 
+.pill.unread {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-soft);
+}
+
+.notify-btn.is-on {
+  color: var(--accent);
+}
+
 /* ---------- devices on home ---------- */
 
 .device-list {
