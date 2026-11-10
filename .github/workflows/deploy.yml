@@ -9,6 +9,9 @@ concurrency:
   group: deploy-${{ github.ref_name }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   preview:
     if: github.ref_name == 'develop'
@@ -23,6 +26,10 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      - run: rustup target add wasm32-unknown-unknown
+
+      - run: npm run build:wasm -w @agent-bridge/crypto
 
       - run: npm run check
 
@@ -49,6 +56,10 @@ jobs:
           cache: npm
 
       - run: npm ci
+
+      - run: rustup target add wasm32-unknown-unknown
+
+      - run: npm run build:wasm -w @agent-bridge/crypto
 
       - run: npm run check
 

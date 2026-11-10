@@ -1285,9 +1285,7 @@ function renderDevices(): void {
         ]),
         self || revoked
           ? el("span", { className: "pill", text: revoked ? "已撤销" : "本机" })
-          : button("撤销", () => {
-              void revokeDevice(item.deviceId, status);
-            }, "btn ghost small danger"),
+          : el("span", { className: "meta", text: "在 Mac 上撤销" }),
       ]),
     );
   }
@@ -2263,7 +2261,12 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
 /** Renders transcript text as Markdown; truncation is annotated after the content. */
 function markdownBlock(text: string, truncated?: boolean): HTMLElement {
   const node = el("div", { className: "message-text md" });
-  node.append(renderMarkdown(text));
+  try {
+    node.append(renderMarkdown(text));
+  } catch {
+    // A rendering failure must never blank the transcript; fall back to plain text.
+    node.textContent = text;
+  }
   if (truncated) node.append(el("p", { className: "md-note", text: "…（已截断）" }));
   return node;
 }
@@ -2746,24 +2749,6 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   }
 
   await render();
-}
-
-async function revokeDevice(deviceId: string, status: HTMLElement): Promise<void> {
-  if (!active) return;
-  if (!confirm("撤销后该设备必须重新配对，确定继续？")) return;
-  const response = await active.request("device.revoke", { deviceId });
-  if (!response.ok) {
-    status.classList.add("error");
-    status.textContent = response.error?.message ?? "撤销失败";
-    return;
-  }
-  const device = connected?.device;
-  if (!device) return;
-  try {
-    await connectAndShow(device);
-  } catch (error) {
-    status.textContent = messageOf(error);
-  }
 }
 
 function emptyState(title: string, hint: string): HTMLElement {

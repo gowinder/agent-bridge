@@ -1,5 +1,5 @@
 export const PROTOCOL_VERSION = 1 as const;
-export const RELAY_PROTOCOL_VERSION = 1 as const;
+export const RELAY_PROTOCOL_VERSION = 2 as const;
 
 /** Max plaintext bytes carried by one Noise transport message. */
 export const MAX_FRAME_BYTES = 32 * 1024;
@@ -18,7 +18,8 @@ export type RelayRole = "bridge" | "browser";
 
 export type RelayCredential =
   | { kind: "bridge"; token: string }
-  | { kind: "invite"; token: string }
+  /** Only the SHA-256 of the invite token is sent, so the relay never learns the PSK input. */
+  | { kind: "invite"; tokenHash: string }
   | { kind: "device"; deviceId: string; token: string };
 
 export interface RelayHello {
@@ -520,9 +521,15 @@ export interface CreateRoomResponse {
   bridgeToken: string;
 }
 
+export interface CreateInviteRequest {
+  inviteId: string;
+  /** SHA-256 of the invite token, hex. The raw token never leaves the bridge. */
+  tokenHash: string;
+  ttlSeconds?: number;
+}
+
 export interface InviteResponse {
   inviteId: string;
-  inviteToken: string;
   expiresAt: number;
 }
 
@@ -567,15 +574,21 @@ export function parseRelayHello(value: unknown): RelayHello | null {  if (!isObj
   const credential = value["credential"];
   if (!isObject(credential)) return null;
   const kind = credential["kind"];
-  const token = credential["token"];
-  if (!isString(token) || token.length < 16 || token.length > 256) return null;
   let parsed: RelayCredential;
-  if (kind === "bridge" || kind === "invite") {
-    parsed = { kind, token };
-  } else if (kind === "device") {
-    const deviceId = credential["deviceId"];
-    if (!isString(deviceId) || !/^[a-z0-9-]{8,64}$/.test(deviceId)) return null;
-    parsed = { kind, deviceId, token };
+  if (kind === "invite") {
+    const tokenHash = credential["tokenHash"];
+    if (!isString(tokenHash) || !/^[0-9a-f]{64}$/.test(tokenHash)) return null;
+    parsed = { kind, tokenHash };
+  } else if (kind === "bridge" || kind === "device") {
+    const token = credential["token"];
+    if (!isString(token) || token.length < 16 || token.length > 256) return null;
+    if (kind === "bridge") {
+      parsed = { kind, token };
+    } else {
+      const deviceId = credential["deviceId"];
+      if (!isString(deviceId) || !/^[a-z0-9-]{8,64}$/.test(deviceId)) return null;
+      parsed = { kind, deviceId, token };
+    }
   } else {
     return null;
   }
@@ -586,8 +599,8 @@ export function parseRelayHello(value: unknown): RelayHello | null {  if (!isObj
     return null;
   }
   return channel === undefined
-    ? { v: 1, type: "hello", role, room, credential: parsed }
-    : { v: 1, type: "hello", role, room, channel, credential: parsed };
+    ? { v: RELAY_PROTOCOL_VERSION, type: "hello", role, room, credential: parsed }
+    : { v: RELAY_PROTOCOL_VERSION, type: "hello", role, room, channel, credential: parsed };
 }
 
 export function parseWireMessage(value: unknown): WireMessage | null {
@@ -645,6 +658,6 @@ export function parseBridgeControl(value: unknown): RelayBridgeControl | null {
   const reason = value["reason"];
   if (reason !== undefined && !isString(reason)) return null;
   return reason === undefined
-    ? { v: 1, type: "channel.close", channel }
-    : { v: 1, type: "channel.close", channel, reason };
+    ? { v: RELAY_PROTOCOL_VERSION, type: "channel.close", channel }
+    : { v: RELAY_PROTOCOL_VERSION, type: "channel.close", channel, reason };
 }

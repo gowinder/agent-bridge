@@ -6,7 +6,10 @@ import { Room } from "./room.js";
 export { Room };
 
 function json(data: unknown, status = 200, origin?: string): Response {
-  const headers = new Headers({ "content-type": "application/json; charset=utf-8" });
+  const headers = new Headers({
+    "content-type": "application/json; charset=utf-8",
+    "cache-control": "no-store",
+  });
   if (origin) {
     headers.set("access-control-allow-origin", origin);
     headers.set("vary", "origin");
@@ -22,15 +25,39 @@ function roomStub(env: Env, roomId: string): DurableObjectStub {
   return env.ROOMS.get(env.ROOMS.idFromName(roomId));
 }
 
-function corsHeaders(request: Request, env: Env): Headers {
+function isLoopback(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
+
+/**
+ * Only the configured web origin (or, when unset, the relay's own origin) may call
+ * the API from a browser. Never reflect an arbitrary Origin. A relay running on
+ * loopback additionally accepts loopback origins so `vite dev` keeps working.
+ */
+function allowedOrigin(request: Request, env: Env): string | null {
   const origin = request.headers.get("origin");
-  const allowed = env.WEB_ORIGIN ?? origin ?? "*";
+  if (!origin) return null;
+  if (env.WEB_ORIGIN) return origin === env.WEB_ORIGIN ? origin : null;
+  try {
+    const originUrl = new URL(origin);
+    const requestUrl = new URL(request.url);
+    if (originUrl.host === requestUrl.host) return origin;
+    if (isLoopback(requestUrl.hostname) && isLoopback(originUrl.hostname)) return origin;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function corsHeaders(request: Request, env: Env): Headers {
   const headers = new Headers();
-  headers.set("access-control-allow-origin", allowed === "*" ? "*" : allowed);
+  headers.set("vary", "origin");
+  const origin = allowedOrigin(request, env);
+  if (!origin) return headers;
+  headers.set("access-control-allow-origin", origin);
   headers.set("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
   headers.set("access-control-allow-headers", "authorization, content-type");
   headers.set("access-control-max-age", "86400");
-  headers.set("vary", "origin");
   return headers;
 }
 
@@ -85,6 +112,11 @@ export default {
     if (url.pathname === "/v1/ws") {
       if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
         return fail("bad_request", "expected websocket upgrade", 426);
+      }
+      // Browsers always attach Origin; a foreign page must not drive this room.
+      // Non-browser clients (the bridge) send no Origin and are still authenticated by hello.
+      if (request.headers.get("origin") !== null && allowedOrigin(request, env) === null) {
+        return fail("unauthorized", "origin not allowed", 403);
       }
       const wsLimit = rateLimit(`ws:${clientIp(request)}`, WS_LIMIT_PER_MIN, 60_000);
       if (!wsLimit.ok) return tooMany(wsLimit.retryAfter, request.headers.get("origin") ?? undefined);
