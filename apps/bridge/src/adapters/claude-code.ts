@@ -225,6 +225,23 @@ function matchCatalogModel(raw: string, catalog: ModelOption[]): ModelOption | u
   return best;
 }
 
+/** 目录里的 models 数组：只留下选择器会显示的常用与更多两组。 */
+function modelOptionsOf(list: unknown): ModelOption[] {
+  if (!Array.isArray(list)) return [];
+  const out: ModelOption[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const id = typeof entry["id"] === "string" ? entry["id"] : "";
+    const name = typeof entry["name"] === "string" ? entry["name"] : "";
+    if (!id || !name) continue;
+    const section = entry["section"];
+    if (section !== "main" && section !== "overflow") continue;
+    out.push({ id, name, section });
+  }
+  return out;
+}
+
 function isMillionTokenModel(model: string): boolean {
   const name = model.toLowerCase();
   return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
@@ -472,7 +489,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     if (record.cwd) environment.push({ label: "目录", value: record.cwd });
     const branch = this.gitBranch(record);
     if (branch) environment.push({ label: "分支", value: branch });
-    if (record.model) environment.push({ label: "模型", value: record.model });
+    const model = this.runningModel(record) ?? record.model;
+    if (model) environment.push({ label: "模型", value: model });
     if (record.effort) environment.push({ label: "推理强度", value: record.effort });
     if (record.permissionMode) {
       environment.push({
@@ -491,15 +509,17 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   }
 
   /**
-   * 桌面端把模型目录缓存在 ~/.claude/cache/model-catalog，取最新的 ccd 表面那份；
-   * 目录只用于展示名称与可选项，切换模型仍然只能在桌面里做。
+   * 桌面端的模型清单来自它自己拉取的 signed catalog（model-catalog/published.json），
+   * 里面 ccd 表面就是 Code 会话的模型选择器；只有取不到时才退回 CLI 的本地缓存。
    */
   models(sessionId: string): SessionModelsResult {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知会话");
     const catalog = this.modelCatalog();
+    // 会话记录里的模型是建会话时选的，在桌面里切换后不会回写；转录里最后一条回复
+    // 实际用的模型才算「当前模型」。
+    const raw = this.runningModel(record) ?? (record.model || undefined);
     // 桌面记录里可能是路由别名或带 [1m] 后缀，能对上目录时以目录里的 id 为准。
-    const raw = record.model || undefined;
     const matched = raw ? matchCatalogModel(raw, catalog) : undefined;
     const current = matched?.id ?? raw;
     const currentName = matched?.name ?? raw;
@@ -512,6 +532,18 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     };
   }
 
+  /** 转录里最后一条主链回复用的模型；读不到就交给会话记录兜底。 */
+  private runningModel(record: DesktopSession): string | undefined {
+    if (!record.cliSessionId) return undefined;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return undefined;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).context?.model;
+    } catch {
+      return undefined;
+    }
+  }
+
   private modelCatalogCache: { at: number; models: ModelOption[] } | null = null;
 
   private modelCatalog(): ModelOption[] {
@@ -519,6 +551,34 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     if (this.modelCatalogCache && now - this.modelCatalogCache.at < 60_000) {
       return this.modelCatalogCache.models;
     }
+    const published = this.publishedCatalogModels();
+    const models = published.length > 0 ? published : this.cachedCatalogModels();
+    this.modelCatalogCache = { at: now, models };
+    return models;
+  }
+
+  /** 桌面端拉取的 signed catalog：surfaces.ccd 就是 Code 会话模型选择器的清单。 */
+  private publishedCatalogModels(): ModelOption[] {
+    for (const name of ["Claude-3p", "Claude"]) {
+      const path = join(SUPPORT_DIR, name, "model-catalog", "published.json");
+      try {
+        const outer = JSON.parse(readFileSync(path, "utf8")) as { documentBytes?: unknown };
+        if (typeof outer.documentBytes !== "string") continue;
+        const doc = JSON.parse(Buffer.from(outer.documentBytes, "base64").toString("utf8")) as {
+          surfaces?: Record<string, { model_selector_config?: { models?: unknown }[] }>;
+        };
+        const configs = doc.surfaces?.["ccd"]?.model_selector_config ?? doc.surfaces?.["cc"]?.model_selector_config;
+        const models = modelOptionsOf(configs?.[0]?.models);
+        if (models.length > 0) return models;
+      } catch {
+        // 应用没写过这份缓存：试下一个目录，最后退回 CLI 的本地缓存。
+      }
+    }
+    return [];
+  }
+
+  /** CLI 自己缓存的目录，字段比桌面端少一档，内容也常常落后一版。 */
+  private cachedCatalogModels(): ModelOption[] {
     const models: ModelOption[] = [];
     try {
       const dir = join(homedir(), ".claude", "cache", "model-catalog");
@@ -549,7 +609,6 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     } catch {
       // 没有缓存或格式变了：只展示当前模型名。
     }
-    this.modelCatalogCache = { at: now, models };
     return models;
   }
 
