@@ -3476,10 +3476,20 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     // The adapter's completeness note ("仅主链文本与工具调用摘要…") is noise in the
     // chat view; only surface it when there is nothing else to show.
     state.note.textContent = state.messages.length === 0 ? (result.note ?? "") : "";
-    if (result.context) {
-      state.context = result.context;
-      paintContext(state);
+    let compactChanged = false;
+    if (result.compact) {
+      state.compact = result.compact.pending
+        ? { pending: true }
+        : { pending: false, error: result.compact.error };
+      compactChanged = true;
+    } else if (state.compact?.pending) {
+      // 先前确认的压缩请求已经不在客户端的待办里：完成或失效，按完成提示。
+      state.compact = { pending: false, note: "已压缩上下文" };
+      state.status.textContent = "客户端已完成上下文压缩";
+      compactChanged = true;
     }
+    if (result.context) state.context = result.context;
+    if (result.context || compactChanged) paintContext(state);
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;

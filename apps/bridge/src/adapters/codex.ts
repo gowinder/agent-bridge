@@ -486,6 +486,8 @@ export class CodexAdapter implements SessionAdapter {
   private rolloutCache = new Map<string, { path: string; compressed: boolean }>();
   private settingsCache = new Map<string, { mtimeMs: number; size: number; settings: ThreadSettings | null }>();
   private busyTail = new Map<string, BusyTail>();
+  /** 已确认提交、但客户端还没回复的压缩请求；跟随 message.list 一起上报。 */
+  private compactStates = new Map<string, { pending: boolean; error?: string }>();
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
@@ -668,6 +670,8 @@ export class CodexAdapter implements SessionAdapter {
     if (parsed.context) result.context = parsed.context;
     if (parsed.busy) result.busy = true;
     if (parsed.interrupted) result.interrupted = true;
+    const compact = this.compactStates.get(thread.id);
+    if (compact) result.compact = compact;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
   }
@@ -893,10 +897,26 @@ export class CodexAdapter implements SessionAdapter {
         params: { conversationId: threadId },
       });
       // 压缩可能要几十秒，不能一直占着设备通道；请求发出去后先把连接留给结果。
+      // 结果晚于确认到达时就记在线程上，跟随 message.list 一起上报给网页。
       compactPromise.then(
-        () => client.close(),
-        () => client.close(),
+        (response) => {
+          if (response["resultType"] === "success") {
+            this.compactStates.delete(threadId);
+          } else {
+            this.compactStates.set(threadId, {
+              pending: false,
+              error: `Codex 拒绝压缩：${String(response["error"] ?? response["resultType"] ?? "unknown")}`,
+            });
+          }
+          client.close();
+        },
+        (error: unknown) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.compactStates.set(threadId, { pending: false, error: `Codex 桌面未响应（${reason}）` });
+          client.close();
+        },
       );
+      this.compactStates.set(threadId, { pending: true });
       const early = await Promise.race([
         compactPromise,
         new Promise<null>((resolve) => setTimeout(() => resolve(null), COMPACT_WAIT_MS)),
@@ -905,6 +925,7 @@ export class CodexAdapter implements SessionAdapter {
         return { compacted: true, detail: "已请求 Codex 压缩上下文，仍在执行；稍后刷新查看" };
       }
       if (early["resultType"] !== "success") {
+        this.compactStates.delete(threadId);
         throw new RpcError(
           "adapter_unavailable",
           `Codex 拒绝压缩：${String(early["error"] ?? early["resultType"] ?? "unknown")}`,
@@ -912,6 +933,7 @@ export class CodexAdapter implements SessionAdapter {
       }
       return { compacted: true };
     } catch (error) {
+      this.compactStates.delete(threadId);
       client.close();
       if (
         error instanceof Error &&

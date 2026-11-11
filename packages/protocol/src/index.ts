@@ -516,6 +516,8 @@ export interface MessageListResult {
   busy?: boolean;
   /** The latest turn was stopped by the user before it finished. */
   interrupted?: boolean;
+  /** An on-demand compaction that is still running in the client, or how it failed. */
+  compact?: { pending: boolean; error?: string };
 }
 
 export interface MessageSendResult {
