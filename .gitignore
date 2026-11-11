@@ -31,3 +31,6 @@ __pycache__/
 apps/menubar/build/
 
 .claude/worktrees/
+
+# 本地环境变量（含敏感 token）
+.env*.local
