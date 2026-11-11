@@ -7,6 +7,7 @@ import type {
   ProjectInfo,
   SessionRailResult,
   SessionModelsResult,
+  SessionCompactResult,
   SessionSummary,
 } from "@craftstead/protocol";
 
@@ -46,6 +47,8 @@ export interface SessionAdapter {
   rail(sessionId: string): SessionRailResult | Promise<SessionRailResult>;
   /** 当前模型与可选模型；客户端没有这个概念时可以不实现。 */
   models?(sessionId: string): SessionModelsResult | Promise<SessionModelsResult>;
+  /** 让客户端自己压缩该会话的上下文；客户端没有原生入口时可以不实现。 */
+  compact?(sessionId: string): Promise<SessionCompactResult>;
   /** Messages written by one background task (subagent); absent when the app keeps none. */
   taskMessages?(sessionId: string, taskId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
   /** `origin` 是发起人的标识（例如配对设备名），用于让目标会话区分消息从哪个客户端来。 */

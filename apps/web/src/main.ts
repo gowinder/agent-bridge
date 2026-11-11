@@ -25,6 +25,7 @@ import type {
   ProjectListResult,
   RailRow,
   RailTask,
+  SessionCompactResult,
   SessionListResult,
   SessionModelsResult,
   SessionRailResult,
@@ -3576,7 +3577,86 @@ function paintContext(state: ChatState): void {
           el("dd", { text: detail.value }),
         ]))]
       : []),
+    ...(percent >= 50 ? [contextCompactActions(state)] : []),
   );
+}
+
+/** 上下文过半时在弹层里给出压缩入口：客户端能自己压就调用，否则复制命令让用户粘贴。 */
+function contextCompactActions(state: ChatState): HTMLElement {
+  const row = el("div", { className: "context-actions" });
+  const hint = el("p", { className: "context-hint" });
+  if (state.session.canCompact) {
+    const btn = el("button", {
+      className: "context-action",
+      text: "压缩上下文",
+      attrs: { type: "button" },
+    });
+    hint.textContent = "由桌面客户端自己压缩，摘要会写回该会话。";
+    btn.addEventListener("click", () => {
+      void runCompact(state, btn, hint);
+    });
+    row.append(btn, hint);
+    return row;
+  }
+  const btn = el("button", {
+    className: "context-action",
+    text: "复制 /compact",
+    attrs: { type: "button" },
+  });
+  hint.textContent = "浏览器无法直接操作客户端输入框；复制后粘贴到输入框发送。";
+  btn.addEventListener("click", () => {
+    if (!navigator.clipboard) {
+      hint.textContent = "当前页面不能写剪贴板，请在客户端输入框手动输入 /compact";
+      hint.classList.add("is-error");
+      return;
+    }
+    void navigator.clipboard.writeText("/compact").then(
+      () => {
+        btn.textContent = "已复制";
+        setTimeout(() => {
+          btn.textContent = "复制 /compact";
+        }, 1_500);
+      },
+      () => {
+        hint.textContent = "复制失败，请在客户端输入框手动输入 /compact";
+        hint.classList.add("is-error");
+      },
+    );
+  });
+  row.append(btn, hint);
+  return row;
+}
+
+async function runCompact(
+  state: ChatState,
+  btn: HTMLButtonElement,
+  hint: HTMLElement,
+): Promise<void> {
+  btn.disabled = true;
+  btn.textContent = "压缩中…";
+  hint.classList.remove("is-error");
+  try {
+    const result = await call<SessionCompactResult>(
+      "session.compact",
+      { sessionId: state.session.sessionId },
+      130_000,
+    );
+    if (!result.compacted) {
+      btn.disabled = false;
+      btn.textContent = "压缩上下文";
+      hint.textContent = result.detail ?? "客户端没有执行压缩";
+      hint.classList.add("is-error");
+      return;
+    }
+    btn.textContent = "已压缩";
+    state.status.textContent = "已在客户端压缩上下文";
+    void refreshTail(state);
+  } catch (error) {
+    btn.disabled = false;
+    btn.textContent = "压缩上下文";
+    hint.textContent = messageOf(error);
+    hint.classList.add("is-error");
+  }
 }
 
 function queuedBubble(item: QueuedMessage): HTMLElement {
