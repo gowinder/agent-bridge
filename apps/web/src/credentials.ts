@@ -402,6 +402,26 @@ async function deleteDevice(relayUrl: string, roomId: string): Promise<void> {
   vaultData = vault.data;
 }
 
+/** 改名只动明文元数据、不碰密文，所以凭据锁定时也能写。 */
+export function renameDevice(relayUrl: string, roomId: string, name: string): Promise<void> {
+  return withVaultLock(() => updateDeviceName(relayUrl, roomId, name));
+}
+
+async function updateDeviceName(relayUrl: string, roomId: string, name: string): Promise<void> {
+  const store = readStore();
+  if (!store || store.vault === null) {
+    const legacy = readLegacy().map((item) =>
+      item.relayUrl === relayUrl && item.roomId === roomId ? { ...item, name } : item,
+    );
+    localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
+    return;
+  }
+  const devices = store.devices.map((item) =>
+    item.relayUrl === relayUrl && item.roomId === roomId ? { ...item, name } : item,
+  );
+  writeStore({ devices, vault: store.vault });
+}
+
 const EXPIRY_WARNING_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** 到期前 3 天就要提示重新配对，否则用户会在某天突然连不上。 */
