@@ -10,6 +10,7 @@ import type {
   SessionGetResult,
   SessionListParams,
   SessionListResult,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
   TransferCommitResult,
@@ -127,6 +128,15 @@ export class SessionAdapters {
     const adapter = this.adapterFor(sessionId);
     if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
     return adapter.rail(sessionId);
+  }
+
+  async models(sessionId: string): Promise<SessionModelsResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
+    if (!adapter.models) {
+      return { models: [], canSwitch: false, note: "这个客户端没有模型信息" };
+    }
+    return adapter.models(sessionId);
   }
 
   async taskMessages(

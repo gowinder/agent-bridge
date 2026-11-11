@@ -349,6 +349,11 @@ export class DeviceSession implements ChannelSession {
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.rail(sessionId);
       }
+      case "session.models": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.models(sessionId);
+      }
       case "task.messages": {
         const sessionId = stringParam(params, "sessionId");
         const taskId = stringParam(params, "taskId");

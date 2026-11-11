@@ -21,10 +21,12 @@ import type {
   MessageListResult,
   MessageRecord,
   MessageSendResult,
+  ModelOption,
   NextStepAction,
   ProjectInfo,
   RailRow,
   RailTask,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
 } from "@agent-bridge/protocol";
@@ -160,6 +162,25 @@ function asNumber(value: unknown): number {
 }
 
 /** Models advertised with a 1M token context window (e.g. `claude-sonnet-4-5[1m]`). */
+/** 桌面记录的模型值可能是路由别名（`a.b.claude-opus-5-5`）或带 `[1m]` 后缀。 */
+function normalizeModelId(raw: string): string {
+  let value = raw.replace(/\[1m\]$/i, "").trim();
+  const dot = value.lastIndexOf(".");
+  if (dot >= 0) value = value.slice(dot + 1);
+  return value;
+}
+
+/** 取最长匹配，避免 `claude-opus-4-8` 抢走 `claude-opus-4-8-20261210`。 */
+function matchCatalogModel(raw: string, catalog: ModelOption[]): ModelOption | undefined {
+  const value = normalizeModelId(raw);
+  let best: ModelOption | undefined;
+  for (const item of catalog) {
+    if (value !== item.id && !value.startsWith(`${item.id}-`)) continue;
+    if (!best || item.id.length > best.id.length) best = item;
+  }
+  return best;
+}
+
 function isMillionTokenModel(model: string): boolean {
   const name = model.toLowerCase();
   return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
@@ -423,6 +444,69 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const context = this.contextFor(record);
     if (context) result.context = context;
     return result;
+  }
+
+  /**
+   * 桌面端把模型目录缓存在 ~/.claude/cache/model-catalog，取最新的 ccd 表面那份；
+   * 目录只用于展示名称与可选项，切换模型仍然只能在桌面里做。
+   */
+  models(sessionId: string): SessionModelsResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知会话");
+    const catalog = this.modelCatalog();
+    // 桌面记录里可能是路由别名或带 [1m] 后缀，能对上目录时以目录里的 id 为准。
+    const raw = record.model || undefined;
+    const matched = raw ? matchCatalogModel(raw, catalog) : undefined;
+    const current = matched?.id ?? raw;
+    const currentName = matched?.name ?? raw;
+    return {
+      ...(current ? { current } : {}),
+      ...(currentName ? { currentName } : {}),
+      models: catalog,
+      canSwitch: false,
+      note: "模型需要在 Claude 桌面里切换；这里只展示当前会话可用的模型。",
+    };
+  }
+
+  private modelCatalogCache: { at: number; models: ModelOption[] } | null = null;
+
+  private modelCatalog(): ModelOption[] {
+    const now = Date.now();
+    if (this.modelCatalogCache && now - this.modelCatalogCache.at < 60_000) {
+      return this.modelCatalogCache.models;
+    }
+    const models: ModelOption[] = [];
+    try {
+      const dir = join(homedir(), ".claude", "cache", "model-catalog");
+      const files = readdirSync(dir)
+        .filter((name) => name.endsWith("-ccd.json"))
+        .map((name) => {
+          const path = join(dir, name);
+          try {
+            return { path, mtimeMs: statSync(path).mtimeMs };
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is { path: string; mtimeMs: number } => item !== null)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      const raw = files[0] ? JSON.parse(readFileSync(files[0].path, "utf8")) : null;
+      const list = raw?.catalog?.config?.models;
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          if (typeof item?.id !== "string" || typeof item?.name !== "string") continue;
+          models.push({
+            id: item.id,
+            name: item.name,
+            ...(item.section === "main" || item.section === "overflow" ? { section: item.section } : {}),
+          });
+        }
+      }
+    } catch {
+      // 没有缓存或格式变了：只展示当前模型名。
+    }
+    this.modelCatalogCache = { at: now, models };
+    return models;
   }
 
   taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
