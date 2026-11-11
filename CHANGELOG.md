@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-11-11
+
 ### Added
 
 - macOS 菜单栏 app 与 bridge CLI 打成通用 DMG，推 tag 时自动建 Release（附 sha256，未签名构建附 Gatekeeper 说明）。
