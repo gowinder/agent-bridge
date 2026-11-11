@@ -1962,6 +1962,17 @@ h6.md-h {
   text-wrap: pretty;
 }
 
+.ask-multi {
+  flex: none;
+  align-self: center;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
 .ask-options {
   display: grid;
   gap: 6px;
