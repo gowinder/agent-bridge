@@ -17,6 +17,7 @@ import type {
   MessageAttachment,
   MessageBlock,
   MessageListResult,
+  MessageQuestion,
   MessageRecord,
   MessageSendResult,
   Method,
@@ -2007,7 +2008,7 @@ interface ChatState {
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
   compactSince?: number;
-  /** 已经作答的提问块（按块文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
+  /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
   answers?: Map<string, string[]>;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
@@ -3740,6 +3741,11 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
   return bubble;
 }
 
+/** 提问块里的一个问题在作答记录里的键；同一块里的多个问题各自独立。 */
+function askKey(block: MessageBlock, question: MessageQuestion): string {
+  return `${block.text}｜${question.question}`;
+}
+
 /** 桌面端弹出的结构化提问：点选后把选项文本作为一条消息发给会话。 */
 function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElement {
   const box = el("div", { className: "message-ask" });
@@ -3748,9 +3754,14 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     box.append(el("p", { className: "ask-question-text", text: block.text }));
     return box;
   }
-  const sent = state?.answers?.get(block.text);
-  const selectable = state !== null && sent === undefined && state.session.canSend;
+  const answered = questions
+    .map((question) => state?.answers?.get(askKey(block, question)))
+    .filter((labels): labels is string[] => labels !== undefined);
+  // 提问在等答案时回合仍在跑；回合结束后的旧提问不能再点，否则会当新消息重发。
+  const canAnswer = state !== null && state.session.canSend && state.busy;
   for (const question of questions) {
+    const sent = state?.answers?.get(askKey(block, question));
+    const selectable = canAnswer && sent === undefined;
     const card = el("div", { className: "ask-question" });
     card.append(
       el("div", { className: "ask-question-head" }, [
@@ -3787,12 +3798,11 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
         );
         choice.addEventListener("click", () => {
           if (!question.multiSelect) {
-            void submitAskAnswer(state, block, [option.label], choices);
+            void submitAskAnswer(state, askKey(block, question), [option.label], choices);
             return;
           }
           if (picked.has(option.label)) picked.delete(option.label);
           else picked.add(option.label);
-          choice.classList.toggle("is-picked", picked.has(option.label));
           choice.setAttribute("aria-pressed", picked.has(option.label) ? "true" : "false");
           if (submit) submit.disabled = picked.size === 0;
         });
@@ -3807,7 +3817,7 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
             .map((option) => option.label)
             .filter((label) => picked.has(label));
           if (labels.length === 0) return;
-          void submitAskAnswer(state, block, labels, [...choices, submit]);
+          void submitAskAnswer(state, askKey(block, question), labels, [...choices, submit]);
         });
         row.append(submit);
       }
@@ -3819,9 +3829,9 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     el("p", {
       className: "ask-note",
       text:
-        sent !== undefined
-          ? `已发送：${sent.join("、")}`
-          : selectable
+        answered.length > 0
+          ? `已发送：${answered.flat().join("、")}`
+          : canAnswer
             ? "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
             : "请在桌面端回答这个提问",
     }),
@@ -3832,7 +3842,7 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
 /** 选项就是一句话：原样发出去，桌面端的提问对话框仍由桌面收尾。 */
 async function submitAskAnswer(
   state: ChatState | null,
-  block: MessageBlock,
+  key: string,
   labels: string[],
   buttons: HTMLButtonElement[],
 ): Promise<void> {
@@ -3852,7 +3862,7 @@ async function submitAskAnswer(
       for (const item of buttons) item.disabled = false;
       return;
     }
-    (state.answers ??= new Map<string, string[]>()).set(block.text, labels);
+    (state.answers ??= new Map<string, string[]>()).set(key, labels);
     state.queued.push({
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       match: text,
