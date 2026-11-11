@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-11-11
+
+### Added
+
+- Bridge 托管会话：由本机 Bridge 启动并持有 `claude -p` stream-json 进程，网页可新建、停止、恢复，输入直接写入 stdin（不再经过桌面 peer 通道）。
+- 托管目录允许列表 `$AGENT_BRIDGE_HOME/hosted.json`，默认权限模式 `manual`，工具批准与 AskUserQuestion 在网页上作答。
+- `npm test` 运行 node:test 用例，覆盖托管会话关键路径。
+
+### Changed
+
+- 网页会话列表与聊天页标注「由 Bridge 托管，不出现在桌面应用」。
+
 ## [0.1.6] - 2026-11-11
 
 ### Added
