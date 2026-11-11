@@ -1,3 +1,4 @@
+import { MAX_TRANSFER_CHARS } from "@agent-bridge/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -14,15 +15,18 @@ import type {
   FsRootsResult,
   HostInfoResult,
   MessageAttachment,
+  MessageBlock,
   MessageListResult,
   MessageRecord,
   MessageSendResult,
   Method,
+  NextStepAction,
   ProjectInfo,
   ProjectListResult,
   RailRow,
   RailTask,
   SessionListResult,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
   ShellCancelResult,
@@ -526,6 +530,12 @@ function showPairError(message: string): void {
   );
 }
 
+function flashNotice(message: string): void {
+  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" }, text: message });
+  document.body.append(box);
+  window.setTimeout(() => box.remove(), 5000);
+}
+
 function renderHome(): HTMLElement {
   const devices = listDevices();
   const page = el("main", { className: "page narrow" }, [
@@ -692,9 +702,16 @@ function showConfirm(challenge: PairingChallenge): void {
   );
 }
 
+/** 默认名称取设备类型：配对列表里看到的是设备，而不是浏览器。 */
 function defaultDeviceName(): string {
-  const agent = navigator.userAgent.match(/(Firefox|Edg|Chrome|Safari)\/[\d.]+/);
-  return agent ? `浏览器 · ${agent[1]}` : "浏览器";
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/iPad/.test(ua)) return "iPad";
+  if (/Android/.test(ua)) return "Android 设备";
+  if (/Macintosh|Mac OS X/.test(ua)) return "Mac";
+  if (/Windows/.test(ua)) return "Windows";
+  if (/Linux/.test(ua)) return "Linux";
+  return "浏览器";
 }
 
 /**
@@ -1240,14 +1257,17 @@ function recentSessionsButton(): HTMLElement | null {
   const titles = sessions.slice(0, 6).map((item) => item.title);
   const run = el("span", { className: "recents-run" });
   for (const title of titles) run.append(el("span", { className: "recents-item", text: title }));
+  // 滚动放在内层：外层只负责裁剪和渐隐，内层平移动画才不会盖到左侧图标上。
   const track = el("span", { className: "recents-track" });
-  track.append(run);
+  const marquee = el("span", { className: "recents-marquee" });
+  marquee.append(run);
   if (titles.length > 1) {
     const clone = el("span", { className: "recents-run" });
     for (const title of titles) clone.append(el("span", { className: "recents-item", text: title }));
-    track.append(clone);
-    track.classList.add("is-scrolling");
+    marquee.append(clone);
+    marquee.classList.add("is-scrolling");
   }
+  track.append(marquee);
   trigger.append(icon("clock"), track);
 
   const menu = el("div", { className: "recent-menu", attrs: { role: "menu" } });
@@ -1491,6 +1511,8 @@ async function renderRoute(soft = false): Promise<void> {
   const route = parseRoute();
   if (soft && chatResume && chatResumeKey === hashFor(route)) {
     chatResume();
+    // 重连会清空快照；这里补拉一次，分享等依赖全局数据的操作才不会静默失效。
+    if (!snapshot) void ensureSnapshot().catch(() => {});
     return;
   }
   const token = ++renderToken;
@@ -2126,6 +2148,102 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const back = backButton(() => navigate({ level: "sessions", appId: route.appId, projectId: route.projectId }));
 
+  const modelButton = el("button", {
+    className: "model-chip",
+    attrs: {
+      type: "button",
+      "aria-label": "当前模型",
+      "aria-expanded": "false",
+      "aria-haspopup": "true",
+    },
+  });
+  modelButton.hidden = true;
+  const modelPop = el("div", { className: "model-pop" });
+  modelPop.hidden = true;
+  const modelWrap = el("div", { className: "model-wrap" }, [modelButton, modelPop]);
+
+  function onModelKey(event: KeyboardEvent): void {
+    if (event.key === "Escape") closeModels();
+  }
+  function onModelOutside(event: Event): void {
+    const target = event.target as Node | null;
+    if (!target) return;
+    if (modelPop.contains(target) || modelButton.contains(target)) return;
+    closeModels();
+  }
+  function closeModels(): void {
+    modelPop.hidden = true;
+    modelButton.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onModelOutside);
+    document.removeEventListener("keydown", onModelKey);
+  }
+
+  const paintModels = (info: SessionModelsResult): void => {
+    const label = info.currentName ?? info.current;
+    if (!label && info.models.length === 0) {
+      modelButton.hidden = true;
+      modelPop.hidden = true;
+      return;
+    }
+    modelButton.hidden = false;
+    modelButton.replaceChildren(
+      el("span", { className: "model-chip-label", text: "模型" }),
+      el("span", { className: "model-chip-value", text: label ?? "未知" }),
+      icon("chevron", "icon model-chev"),
+    );
+    modelButton.title = `当前模型：${label ?? "未知"}`;
+    const rows: HTMLElement[] = [];
+    for (const section of ["main", "overflow"] as const) {
+      const items = info.models.filter((item) => (item.section ?? "main") === section);
+      if (items.length === 0) continue;
+      rows.push(
+        el("p", { className: "model-pop-group", text: section === "main" ? "常用" : "更多" }),
+      );
+      for (const item of items) {
+        const current = item.id === info.current;
+        rows.push(
+          el("div", { className: `model-item${current ? " is-current" : ""}` }, [
+            el("div", { className: "model-item-main" }, [
+              el("span", { className: "model-item-name", text: item.name }),
+              el("span", { className: "model-item-id", text: item.id }),
+            ]),
+            ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+          ]),
+        );
+      }
+    }
+    if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
+    modelPop.replaceChildren(...rows);
+  };
+
+  /** 上一次画出来的模型信息；轮询时没变化就不重绘。 */
+  let modelsKey = "";
+  const loadModels = async (): Promise<void> => {
+    try {
+      const info = await call<SessionModelsResult>("session.models", { sessionId: summary.sessionId });
+      if (token !== renderToken) return;
+      const key = JSON.stringify(info);
+      if (key === modelsKey) return;
+      modelsKey = key;
+      paintModels(info);
+    } catch {
+      // 拿不到模型信息就不显示这块，不影响聊天。
+    }
+  };
+
+  modelButton.addEventListener("click", () => {
+    if (!modelPop.hidden) {
+      closeModels();
+      return;
+    }
+    modelPop.hidden = false;
+    modelButton.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onModelOutside);
+    document.addEventListener("keydown", onModelKey);
+    void loadModels();
+  });
+  void loadModels();
+
   const collapsed = window.matchMedia("(max-width: 720px)").matches;
   const head = el("section", { className: `view-head chat-head${collapsed ? " is-collapsed" : ""}` });
   const headToggle = button("", () => {
@@ -2157,13 +2275,15 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
     ]),
     el("div", { className: "chat-head-side" }, [
+      modelWrap,
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
       railToggle,
       headToggle,
     ]),
   );
 
-  const rail = createRail(summary.sessionId, summary.appId, project?.cwd);
+  // 工作树会话的项目是原仓库，但远程工具要落在它真正工作的目录。
+  const rail = createRail(summary.sessionId, summary.appId, summary.cwd ?? project?.cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
   const main = el("main", { className: `main chat${rail.root.classList.contains("is-open") ? " has-rail" : ""}` }, [
@@ -2197,6 +2317,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       if (token !== renderToken) return;
       if (document.visibilityState !== "visible" || state.loading) return;
       void refreshTail(state);
+      void loadModels();
     }, 5_000);
   };
 
@@ -2207,6 +2328,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   chatResumeKey = hashFor(route);
   chatResume = () => {
     void refreshTail(state);
+    void loadModels();
     startPolling();
   };
 
@@ -3383,10 +3505,122 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     bubble.append(
       block.type === "tool"
         ? el("div", { className: "message-tool", text: block.truncated ? `${block.text}\n…（已截断）` : block.text })
-        : markdownBlock(block.text, block.truncated),
+        : block.type === "next-step"
+          ? nextStepBox(block, null)
+          : block.type === "ask"
+            ? askBox(block)
+            : markdownBlock(block.text, block.truncated),
     );
   }
   return bubble;
+}
+
+/** 桌面端弹出的结构化提问：展示问题与选项，回答仍然在桌面里做。 */
+function askBox(block: MessageBlock): HTMLElement {
+  const box = el("div", { className: "message-ask" });
+  const questions = block.questions ?? [];
+  if (questions.length === 0) {
+    box.append(el("p", { className: "ask-question-text", text: block.text }));
+    return box;
+  }
+  for (const question of questions) {
+    const card = el("div", { className: "ask-question" });
+    card.append(
+      el("div", { className: "ask-question-head" }, [
+        ...(question.header ? [el("span", { className: "ask-header", text: question.header })] : []),
+        el("span", { className: "ask-question-text", text: question.question }),
+      ]),
+    );
+    if (question.options.length > 0) {
+      card.append(
+        el(
+          "div",
+          { className: "ask-options" },
+          question.options.map((option) =>
+            el("div", { className: "ask-option" }, [
+              el("span", { className: "ask-option-label", text: option.label }),
+              ...(option.description
+                ? [el("span", { className: "ask-option-desc", text: option.description })]
+                : []),
+            ]),
+          ),
+        ),
+      );
+    }
+    box.append(card);
+  }
+  box.append(el("p", { className: "ask-note", text: "请在桌面端回答这个提问" }));
+  return box;
+}
+
+/** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
+function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement {
+  const box = el("div", { className: "next-step" });
+  box.append(el("p", { className: "next-step-ask", text: block.ask ?? block.text }));
+  const actions = block.actions ?? [];
+  if (!state || actions.length === 0) return box;
+  const row = el("div", { className: "next-step-actions" });
+  for (const action of actions) {
+    const btn = el("button", {
+      className: "next-step-btn",
+      attrs: {
+        type: "button",
+        ...(action.action ? { title: "桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步" } : {}),
+      },
+      text: action.label,
+    });
+    btn.addEventListener("click", () => {
+      const buttons = [...row.querySelectorAll<HTMLButtonElement>("button")];
+      for (const item of buttons) item.disabled = true;
+      void sendNextStep(state, action, buttons);
+    });
+    row.append(btn);
+  }
+  box.append(row);
+  return box;
+}
+
+/** 回复型按钮就是一句话，原样发出；应用动作（合并、提交…）只能作为指令发过去。 */
+async function sendNextStep(
+  state: ChatState,
+  action: NextStepAction,
+  buttons: HTMLButtonElement[],
+): Promise<void> {
+  const text = action.action ? `点击了「${action.label}」，请执行这一步。` : action.label;
+  state.status.classList.remove("error");
+  state.status.textContent = "正在发送…";
+  try {
+    const result = await call<MessageSendResult>("message.send", {
+      sessionId: state.session.sessionId,
+      text,
+    }, 60_000);
+    if (!result.accepted) {
+      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.classList.add("error");
+      for (const item of buttons) item.disabled = false;
+      return;
+    }
+    state.queued.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      match: text,
+      display: text,
+      at: Date.now(),
+      held: !result.delivered && (result.detail ?? "").includes("排队"),
+    });
+    state.busy = true;
+    state.interrupted = false;
+    renderMessages(state);
+    state.status.textContent = result.delivered
+      ? "已投递到桌面会话"
+      : (result.detail ?? "已提交，等待桌面执行");
+    window.setTimeout(() => {
+      void refreshTail(state);
+    }, 800);
+  } catch (error) {
+    state.status.textContent = messageOf(error);
+    state.status.classList.add("error");
+    for (const item of buttons) item.disabled = false;
+  }
 }
 
 /** Renders transcript text as Markdown; truncation is annotated after the content. */
@@ -3413,9 +3647,14 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
   return share;
 }
 
-function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]): HTMLElement {
+function assistantTurn(
+  session: SessionSummary | null,
+  messages: MessageRecord[],
+  state: ChatState | null = null,
+): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: string[] = [];
+  const nextSteps: MessageBlock[] = [];
   let peer = false;
   let lastText: MessageRecord | undefined;
   for (const message of messages) {
@@ -3424,6 +3663,10 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     for (const block of message.blocks) {
       if (block.type === "text") {
         hasText = true;
+      } else if (block.type === "next-step") {
+        nextSteps.push(block);
+      } else if (block.type === "ask") {
+        continue;
       } else {
         steps.push(block.truncated ? `${block.text}\n…（已截断）` : block.text);
       }
@@ -3443,6 +3686,10 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     for (const block of message.blocks) {
       if (block.type === "text") {
         bubble.append(markdownBlock(block.text, block.truncated));
+      } else if (block.type === "next-step") {
+        continue;
+      } else if (block.type === "ask") {
+        bubble.append(askBox(block));
       } else if (!folded) {
         bubble.append(processFold(steps));
         folded = true;
@@ -3450,6 +3697,9 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     }
   }
   if (!folded) bubble.append(processFold(steps));
+  // 只有最新一回合的盒子可以点；历史回合保留文字说明。
+  const latest = nextSteps[nextSteps.length - 1];
+  if (latest) bubble.append(nextStepBox(latest, state));
   return bubble;
 }
 
@@ -3505,9 +3755,12 @@ function renderMessages(state: ChatState): void {
     return;
   }
   let turn: MessageRecord[] = [];
+  const lastMessage = state.messages[state.messages.length - 1];
+  const canAct = state.session.canSend && !state.busy && !state.interrupted && state.queued.length === 0;
   const flush = (): void => {
     if (turn.length === 0) return;
-    list.append(assistantTurn(state.session, turn));
+    const isLastTurn = turn[turn.length - 1] === lastMessage;
+    list.append(assistantTurn(state.session, turn, isLastTurn && canAct ? state : null));
     turn = [];
   };
   for (const message of state.messages) {
@@ -3619,11 +3872,22 @@ interface SharePick {
 }
 
 async function openShare(source: SessionSummary, message: MessageRecord): Promise<void> {
-  if (!snapshot) return;
-  const data: Snapshot = snapshot;
+  // 重连会清空快照；点分享时补拉一次，别让按钮静默失效。
+  let data: Snapshot;
+  if (snapshot) {
+    data = snapshot;
+  } else {
+    try {
+      data = await ensureSnapshot();
+    } catch (error) {
+      flashNotice(`读取会话列表失败：${messageOf(error)}`);
+      return;
+    }
+  }
   const exclude = new Set([source.sessionId]);
   const pick: SharePick = { appId: null, projectId: null, sessionId: null };
   let prepared: TransferPrepareResult | null = null;
+  let shareEditor: HTMLTextAreaElement | null = null;
   let sending = false;
   let done = false;
 
@@ -3724,6 +3988,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   async function render(): Promise<void> {
     renderSteps();
     body.replaceChildren();
+    shareEditor = null;
     note.textContent = "";
     status.classList.remove("error");
     status.textContent = "";
@@ -3816,15 +4081,21 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
     const target = sessionOf(pick.sessionId);
     note.textContent = `目标：${appName(pick.appId)} / ${projectName(pick.projectId)} / ${target?.title ?? "会话"}`;
-    const preview = el("pre", { className: "preview", text: "正在生成预览…" });
-    body.append(preview);
-    await prepare(preview);
+    const editor = el("textarea", {
+      className: "preview preview-editor",
+      attrs: { spellcheck: "false", "aria-label": "待发送内容，可直接编辑", placeholder: "正在生成预览…" },
+    });
+    editor.readOnly = true;
+    shareEditor = editor;
+    body.append(editor);
+    await prepare(editor);
   }
 
-  async function prepare(preview: HTMLElement): Promise<void> {
+  async function prepare(editor: HTMLTextAreaElement): Promise<void> {
     prepared = null;
     if (!pick.sessionId) return;
     send.disabled = true;
+    editor.readOnly = true;
     status.classList.remove("error");
     status.textContent = "正在校验目标会话…";
     try {
@@ -3837,12 +4108,26 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
         },
         60_000,
       );
-      preview.textContent = prepared.text;
-      status.textContent = `${prepared.textLength} 字符 · 发送内容与预览完全一致${prepared.note ? ` · ${prepared.note}` : ""}`;
-      send.disabled = !prepared.target.canSend || sending || done;
-      if (!prepared.target.canSend) status.classList.add("error");
+      editor.value = prepared.text;
+      editor.readOnly = false;
+      const sync = (): void => {
+        const text = editor.value;
+        const tooLong = text.length > MAX_TRANSFER_CHARS;
+        const blocked = !prepared?.target.canSend;
+        // 超长和空内容在本地就拦住：服务端拒绝时会清掉 prepared，编辑内容也会一起丢。
+        status.textContent = !text.trim()
+          ? "内容为空，无法发送"
+          : tooLong
+            ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
+            : `${text.length} 字符 · ${text === prepared?.text ? "发送内容与预览一致" : "已编辑，将发送当前内容"}${prepared?.note ? ` · ${prepared.note}` : ""}`;
+        status.classList.toggle("error", tooLong || !text.trim() || blocked);
+        send.disabled = blocked || sending || done || tooLong || !text.trim();
+      };
+      editor.addEventListener("input", sync);
+      sync();
     } catch (error) {
-      preview.textContent = "无法生成预览";
+      editor.placeholder = "无法生成预览";
+      editor.readOnly = true;
       status.classList.add("error");
       status.textContent = messageOf(error);
     }
@@ -3850,14 +4135,23 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
   async function commit(): Promise<void> {
     if (!prepared || sending || done || !prepared.target.canSend) return;
+    const text = shareEditor?.value ?? prepared.text;
+    if (!text.trim() || text.length > MAX_TRANSFER_CHARS) {
+      status.classList.add("error");
+      status.textContent = text.trim()
+        ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
+        : "消息不能为空";
+      return;
+    }
     sending = true;
     send.disabled = true;
+    if (shareEditor) shareEditor.readOnly = true;
     status.classList.remove("error");
     status.textContent = "正在发送…";
     try {
       const result = await call<TransferCommitResult>(
         "transfer.commit",
-        { transferId: prepared.transferId },
+        text === prepared.text ? { transferId: prepared.transferId } : { transferId: prepared.transferId, text },
         60_000,
       );
       done = true;
@@ -3871,6 +4165,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
       back.classList.add("hidden");
     } catch (error) {
       prepared = null;
+      if (shareEditor) shareEditor.readOnly = false;
       status.classList.add("error");
       status.textContent = `${messageOf(error)}；重新选择会话可再试`;
       send.disabled = true;

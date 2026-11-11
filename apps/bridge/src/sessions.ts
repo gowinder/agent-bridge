@@ -349,6 +349,11 @@ export class DeviceSession implements ChannelSession {
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.rail(sessionId);
       }
+      case "session.models": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.models(sessionId);
+      }
       case "task.messages": {
         const sessionId = stringParam(params, "sessionId");
         const taskId = stringParam(params, "taskId");
@@ -418,7 +423,11 @@ export class DeviceSession implements ChannelSession {
       case "transfer.commit": {
         const transferId = stringParam(params, "transferId");
         if (!transferId) throw new RpcError("invalid_params", "transferId required");
-        return this.options.adapters.commitTransfer(this.options.device.id, transferId);
+        return this.options.adapters.commitTransfer(
+          this.options.device.id,
+          transferId,
+          stringParam(params, "text"),
+        );
       }
       case "device.list": {
         const devices: DeviceSummary[] = this.options.store.devices().map((device) => ({

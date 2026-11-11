@@ -6,6 +6,7 @@ import type {
   MessageSendResult,
   ProjectInfo,
   SessionRailResult,
+  SessionModelsResult,
   SessionSummary,
 } from "@agent-bridge/protocol";
 
@@ -43,6 +44,8 @@ export interface SessionAdapter {
   messageText(sessionId: string, messageId: string): MessageText | null | Promise<MessageText | null>;
   /** Environment, context, connectors and background tasks of one session. */
   rail(sessionId: string): SessionRailResult | Promise<SessionRailResult>;
+  /** 当前模型与可选模型；客户端没有这个概念时可以不实现。 */
+  models?(sessionId: string): SessionModelsResult | Promise<SessionModelsResult>;
   /** Messages written by one background task (subagent); absent when the app keeps none. */
   taskMessages?(sessionId: string, taskId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
   /** `origin` 是发起人的标识（例如配对设备名），用于让目标会话区分消息从哪个客户端来。 */

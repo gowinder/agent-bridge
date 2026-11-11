@@ -102,6 +102,7 @@ export const METHODS = [
   "session.list",
   "session.get",
   "session.rail",
+  "session.models",
   "task.messages",
   "message.list",
   "session.subscribe",
@@ -409,14 +410,49 @@ export interface SessionSummary {
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;
+  /**
+   * The directory the session actually works in. A worktree session keeps the
+   * original repository as its project but runs in `.claude/worktrees/<name>`;
+   * remote tools (file browsing, commands) must start here, not at the project.
+   */
+  cwd?: string;
 }
 
 export type MessageRole = "user" | "assistant" | "system";
 
+/** One button the desktop client offered after a turn. */
+export interface NextStepAction {
+  /** Desktop host action id (`commit`, `merge`, …); absent for reply buttons. */
+  action?: string;
+  /** Button text; a client sends it as the user's message when it has no host API. */
+  label: string;
+}
+
+/** 桌面端弹给用户选的选项；网页只展示，回答仍然在桌面里做。 */
+export interface MessageQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** 桌面端的一次结构化提问（AskUserQuestion）。 */
+export interface MessageQuestion {
+  /** 分组标题，桌面端显示在问题上方。 */
+  header?: string;
+  question: string;
+  multiSelect?: boolean;
+  options: MessageQuestionOption[];
+}
+
 export interface MessageBlock {
-  type: "text" | "tool";
+  type: "text" | "tool" | "next-step" | "ask";
   text: string;
   truncated?: boolean;
+  /** `next-step` only: the question the client drew above the buttons. */
+  ask?: string;
+  /** `next-step` only: the buttons the desktop client offered. */
+  actions?: NextStepAction[];
+  /** `ask` only: the structured questions, for clients that can draw them. */
+  questions?: MessageQuestion[];
 }
 
 export interface MessageRecord {
@@ -519,6 +555,30 @@ export interface SessionRailParams {
   sessionId: string;
 }
 
+export interface SessionModelsParams {
+  sessionId: string;
+}
+
+/** 会话所属客户端提供的一个模型。 */
+export interface ModelOption {
+  id: string;
+  name: string;
+  /** 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。 */
+  section?: "main" | "overflow";
+}
+
+/** 当前会话的模型信息；各 agent 能给出的内容不一样，缺字段就是不知道。 */
+export interface SessionModelsResult {
+  /** 客户端报告的模型标识。 */
+  current?: string;
+  /** 模型的可读名称。 */
+  currentName?: string;
+  models: ModelOption[];
+  /** 能否从网页切换模型；false 时看 note。 */
+  canSwitch: boolean;
+  note?: string;
+}
+
 export interface TaskMessagesParams {
   sessionId: string;
   taskId: string;
@@ -614,6 +674,9 @@ export interface TransferTargetInfo {
   sendBlockedReason?: string;
 }
 
+/** 转发正文（含预览里编辑后的内容）的长度上限，客户端据此提前拦住过长的内容。 */
+export const MAX_TRANSFER_CHARS = 200_000;
+
 export interface TransferPrepareResult {
   transferId: string;
   /** Epoch ms after which the prepared transfer is discarded. */
@@ -628,6 +691,8 @@ export interface TransferPrepareResult {
 
 export interface TransferCommitParams {
   transferId: string;
+  /** 预览里改过的正文；省略时发送 prepare 生成的内容。 */
+  text?: string;
 }
 
 export interface TransferCommitResult extends MessageSendResult {

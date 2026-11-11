@@ -298,12 +298,18 @@ a.crumb:hover {
   mask-image: linear-gradient(90deg, transparent 0, #000 5%, #000 95%, transparent 100%);
 }
 
-.recents-track.is-scrolling {
+.recents-marquee {
+  display: inline-flex;
+  flex: none;
+  min-width: 0;
+}
+
+.recents-marquee.is-scrolling {
   animation: recents-marquee 24s linear infinite;
 }
 
-.recents-btn:hover .recents-track.is-scrolling,
-.recents-btn:focus-visible .recents-track.is-scrolling {
+.recents-btn:hover .recents-marquee.is-scrolling,
+.recents-btn:focus-visible .recents-marquee.is-scrolling {
   animation-play-state: paused;
 }
 
@@ -330,7 +336,7 @@ a.crumb:hover {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .recents-track.is-scrolling {
+  .recents-marquee.is-scrolling {
     animation: none;
   }
 }
@@ -1005,6 +1011,17 @@ a.crumb:hover {
 
 .hint.warn {
   color: var(--warn);
+}
+
+/* 浮在最上层的临时提示，操作失败时给一句看得见的反馈。 */
+.float-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  z-index: calc(var(--z-sheet) + 20);
+  max-width: min(420px, calc(100vw - 32px));
+  box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.35);
 }
 
 /* ---------- chat ---------- */
@@ -1913,6 +1930,127 @@ h6.md-h {
   overflow: auto;
 }
 
+.message-ask {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent-soft));
+}
+
+.ask-question {
+  display: grid;
+  gap: 8px;
+}
+
+.ask-question-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ask-header {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.ask-question-text {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.55;
+  color: var(--text);
+  text-wrap: pretty;
+}
+
+.ask-options {
+  display: grid;
+  gap: 6px;
+}
+
+.ask-option {
+  display: grid;
+  gap: 2px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.ask-option-label {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.ask-option-desc {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.ask-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.next-step {
+  display: grid;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 88%, var(--accent-soft));
+}
+
+.next-step-ask {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text);
+  text-wrap: pretty;
+}
+
+.next-step-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.next-step-btn {
+  padding: 7px 13px;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--line));
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 180ms ease, border-color 180ms ease, transform 120ms ease;
+}
+
+.next-step-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.next-step-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.next-step-btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
 .turn-steps {
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
@@ -2292,6 +2430,140 @@ h6.md-h {
   display: none;
 }
 
+/* ---------- model chip ---------- */
+
+.model-wrap {
+  position: relative;
+}
+
+.model-chip[hidden] {
+  display: none;
+}
+
+.model-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background-color 0.2s ease, border-color 0.2s ease;
+}
+
+.model-chip:hover {
+  border-color: color-mix(in srgb, var(--text) 22%, transparent);
+}
+
+.model-chip:active {
+  transform: translateY(1px);
+}
+
+.model-chip-label {
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.model-chip-value {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16ch;
+}
+
+.model-chev {
+  width: 12px;
+  height: 12px;
+  color: var(--muted);
+  transform: rotate(90deg);
+  flex: none;
+}
+
+.model-chip[aria-expanded="true"] .model-chev {
+  transform: rotate(-90deg);
+}
+
+.model-pop {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  width: min(300px, calc(100vw - 32px));
+  max-height: min(60vh, 420px);
+  overflow: auto;
+  padding: 10px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.model-pop[hidden] {
+  display: none;
+}
+
+.model-pop-group {
+  margin: 4px 6px 6px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.model-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.model-item.is-current {
+  background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+.model-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.model-item-name {
+  font-weight: 500;
+}
+
+.model-item-id {
+  color: var(--muted);
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-wrap: anywhere;
+}
+
+.model-item-tag {
+  flex: none;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.model-pop-note {
+  margin: 8px 6px 2px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .context-head {
   display: flex;
   align-items: baseline;
@@ -2592,6 +2864,20 @@ h6.md-h {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 14px;
+}
+
+/* 预览里的正文就是待发送内容，可以直接改；改成 textarea 后保留同样的外观。 */
+.preview-editor {
+  display: block;
+  width: 100%;
+  margin: 0;
+  color: var(--text);
+  resize: vertical;
+  tab-size: 2;
+}
+
+.preview-editor:read-only {
+  color: var(--muted);
 }
 
 .sheet-foot {

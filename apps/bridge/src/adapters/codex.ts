@@ -24,6 +24,7 @@ import type {
   MessageSendResult,
   ProjectInfo,
   RailRow,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
 } from "@agent-bridge/protocol";
@@ -689,6 +690,20 @@ export class CodexAdapter implements SessionAdapter {
     }
     if (servers.length > 0) result.note = "连接器取自 Codex 全局配置；rollout 不记录每个线程实际挂载的服务器";
     return result;
+  }
+
+  async models(sessionId: string): Promise<SessionModelsResult> {
+    const thread = this.thread(String(sessionId).slice(this.key.length + 1));
+    if (!thread) throw new RpcError("not_found", "未知线程");
+    const file = this.rolloutFor(thread);
+    const settings = file ? await this.rolloutSettings(file.path) : null;
+    const current = settings?.model;
+    return {
+      ...(current ? { current, currentName: current } : {}),
+      models: [],
+      canSwitch: false,
+      note: "模型需要在 Codex 里切换；这里只显示这个线程使用的模型。",
+    };
   }
 
   /** The newest `thread_settings_applied` (falling back to `turn_context`) in the rollout. */
