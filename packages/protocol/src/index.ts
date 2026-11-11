@@ -428,14 +428,31 @@ export interface NextStepAction {
   label: string;
 }
 
+/** 桌面端弹给用户选的选项；网页只展示，回答仍然在桌面里做。 */
+export interface MessageQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** 桌面端的一次结构化提问（AskUserQuestion）。 */
+export interface MessageQuestion {
+  /** 分组标题，桌面端显示在问题上方。 */
+  header?: string;
+  question: string;
+  multiSelect?: boolean;
+  options: MessageQuestionOption[];
+}
+
 export interface MessageBlock {
-  type: "text" | "tool" | "next-step";
+  type: "text" | "tool" | "next-step" | "ask";
   text: string;
   truncated?: boolean;
   /** `next-step` only: the question the client drew above the buttons. */
   ask?: string;
   /** `next-step` only: the buttons the desktop client offered. */
   actions?: NextStepAction[];
+  /** `ask` only: the structured questions, for clients that can draw them. */
+  questions?: MessageQuestion[];
 }
 
 export interface MessageRecord {

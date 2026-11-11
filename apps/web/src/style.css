@@ -1920,6 +1920,79 @@ h6.md-h {
   overflow: auto;
 }
 
+.message-ask {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+  border-left: 3px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--surface) 90%, var(--accent-soft));
+}
+
+.ask-question {
+  display: grid;
+  gap: 8px;
+}
+
+.ask-question-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ask-header {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.ask-question-text {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.55;
+  color: var(--text);
+  text-wrap: pretty;
+}
+
+.ask-options {
+  display: grid;
+  gap: 6px;
+}
+
+.ask-option {
+  display: grid;
+  gap: 2px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.ask-option-label {
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.ask-option-desc {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  text-wrap: pretty;
+}
+
+.ask-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
 .next-step {
   display: grid;
   gap: 10px;
