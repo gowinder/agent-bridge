@@ -3182,10 +3182,50 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
         ? el("div", { className: "message-tool", text: block.truncated ? `${block.text}\n…（已截断）` : block.text })
         : block.type === "next-step"
           ? nextStepBox(block, null)
-          : markdownBlock(block.text, block.truncated),
+          : block.type === "ask"
+            ? askBox(block)
+            : markdownBlock(block.text, block.truncated),
     );
   }
   return bubble;
+}
+
+/** 桌面端弹出的结构化提问：展示问题与选项，回答仍然在桌面里做。 */
+function askBox(block: MessageBlock): HTMLElement {
+  const box = el("div", { className: "message-ask" });
+  const questions = block.questions ?? [];
+  if (questions.length === 0) {
+    box.append(el("p", { className: "ask-question-text", text: block.text }));
+    return box;
+  }
+  for (const question of questions) {
+    const card = el("div", { className: "ask-question" });
+    card.append(
+      el("div", { className: "ask-question-head" }, [
+        ...(question.header ? [el("span", { className: "ask-header", text: question.header })] : []),
+        el("span", { className: "ask-question-text", text: question.question }),
+      ]),
+    );
+    if (question.options.length > 0) {
+      card.append(
+        el(
+          "div",
+          { className: "ask-options" },
+          question.options.map((option) =>
+            el("div", { className: "ask-option" }, [
+              el("span", { className: "ask-option-label", text: option.label }),
+              ...(option.description
+                ? [el("span", { className: "ask-option-desc", text: option.description })]
+                : []),
+            ]),
+          ),
+        ),
+      );
+    }
+    box.append(card);
+  }
+  box.append(el("p", { className: "ask-note", text: "请在桌面端回答这个提问" }));
+  return box;
 }
 
 /** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
@@ -3300,6 +3340,8 @@ function assistantTurn(
         hasText = true;
       } else if (block.type === "next-step") {
         nextSteps.push(block);
+      } else if (block.type === "ask") {
+        continue;
       } else {
         steps.push(block.truncated ? `${block.text}\n…（已截断）` : block.text);
       }
@@ -3321,6 +3363,8 @@ function assistantTurn(
         bubble.append(markdownBlock(block.text, block.truncated));
       } else if (block.type === "next-step") {
         continue;
+      } else if (block.type === "ask") {
+        bubble.append(askBox(block));
       } else if (!folded) {
         bubble.append(processFold(steps));
         folded = true;

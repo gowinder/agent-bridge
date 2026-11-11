@@ -19,6 +19,8 @@ import type {
   ContextUsage,
   MessageBlock,
   MessageListResult,
+  MessageQuestion,
+  MessageQuestionOption,
   MessageRecord,
   MessageSendResult,
   NextStepAction,
@@ -144,6 +146,48 @@ function nextStepBlock(input: unknown): MessageBlock | null {
   if (ask) block.ask = ask;
   if (actions.length > 0) block.actions = actions;
   return block;
+}
+
+/** 桌面端弹给用户选的提问工具；网页只展示，不在网页里回答。 */
+const ASK_TOOL = "AskUserQuestion";
+
+/** 把 AskUserQuestion 的输入转成一行行可读的问题与选项。 */
+function askBlock(input: unknown, max: number): MessageBlock | null {
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (!Array.isArray(raw["questions"])) return null;
+  const questions: MessageQuestion[] = [];
+  const lines: string[] = [];
+  for (const item of raw["questions"]) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const question = (typeof entry["question"] === "string" ? entry["question"] : "").trim();
+    if (!question) continue;
+    const header = (typeof entry["header"] === "string" ? entry["header"] : "").trim();
+    const options: MessageQuestionOption[] = [];
+    if (Array.isArray(entry["options"])) {
+      for (const option of entry["options"]) {
+        if (typeof option !== "object" || option === null) continue;
+        const value = option as Record<string, unknown>;
+        const label = (typeof value["label"] === "string" ? value["label"] : "").trim();
+        if (!label) continue;
+        const description = (typeof value["description"] === "string" ? value["description"] : "").trim();
+        options.push(description ? { label, description } : { label });
+      }
+    }
+    questions.push({
+      ...(header ? { header } : {}),
+      question,
+      ...(typeof entry["multiSelect"] === "boolean" ? { multiSelect: entry["multiSelect"] } : {}),
+      options,
+    });
+    lines.push(`${header ? `${header}：` : ""}${question}`);
+    for (const option of options) {
+      lines.push(option.description ? `- ${option.label}：${option.description}` : `- ${option.label}`);
+    }
+  }
+  if (questions.length === 0) return null;
+  return { type: "ask", ...truncate(lines.join("\n"), max), questions };
 }
 
 /**
@@ -1095,6 +1139,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         const nextStep = name === WRAP_UP_TOOL ? nextStepBlock(block["input"]) : null;
         if (nextStep) {
           blocks.push(nextStep);
+          continue;
+        }
+        const ask = name === ASK_TOOL ? askBlock(block["input"], MAX_BLOCK_CHARS) : null;
+        if (ask) {
+          blocks.push(ask);
           continue;
         }
         const input = block["input"] === undefined ? "" : JSON.stringify(block["input"]);
