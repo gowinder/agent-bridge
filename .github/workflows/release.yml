@@ -79,9 +79,15 @@ jobs:
           test -f "$app/Contents/Resources/bridge/node_modules/@craftstead/crypto/wasm/noise.wasm"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist"
           # 用 bundle 里的 node 跑一次 CLI，证明拷进去的运行时真的能用。
+          # 从仓库外的一份拷贝里跑：留在仓库内时 Node 会顺着目录往上解析到源码树的
+          # node_modules，bundle 少带依赖也照样通过。
+          outside="$RUNNER_TEMP/outside/AgentBridge.app"
+          rm -rf "$RUNNER_TEMP/outside"
+          mkdir -p "$RUNNER_TEMP/outside"
+          cp -R "$app" "$outside"
           AGENT_BRIDGE_HOME="$RUNNER_TEMP/state" \
-            "$app/Contents/Resources/node/bin/node" \
-            "$app/Contents/Resources/bridge/apps/bridge/dist/main.js" info
+            "$outside/Contents/Resources/node/bin/node" \
+            "$outside/Contents/Resources/bridge/apps/bridge/dist/main.js" info
 
       - name: 签名（配置了证书时）
         id: sign

@@ -54,6 +54,26 @@ if [ -n "${AGENT_BRIDGE_NODE:-}" ]; then
   cp -R "$repo/apps/bridge/dist/." "$contents/Resources/bridge/apps/bridge/dist/"
   cp "$repo/apps/bridge/package.json" "$contents/Resources/bridge/apps/bridge/package.json"
 
+  # 第三方运行时依赖（web-push 及其传递依赖）也必须带上：bundle 装在仓库之外，
+  # 从 dist 往上解析不到源码树的 node_modules，缺了 CLI 一启动就 ERR_MODULE_NOT_FOUND。
+  # 只装 bridge 的第三方依赖：@craftstead/* 是源码树里的 workspace 包，按上面的布局
+  # 手工拷进去，不能交给 npm 去解析（它们没有发布到 registry）。
+  stage="$out/deps"
+  rm -rf "$stage"
+  mkdir -p "$stage/apps/bridge"
+  printf '{"name":"agent-bridge-dmg-deps","private":true,"workspaces":["apps/bridge"]}' \
+    > "$stage/package.json"
+  node -e '
+    const fs = require("fs");
+    const p = require(process.argv[1]);
+    const dependencies = Object.fromEntries(
+      Object.entries(p.dependencies ?? {}).filter(([name]) => !name.startsWith("@craftstead/")),
+    );
+    fs.writeFileSync(process.argv[2], JSON.stringify({ name: p.name, version: p.version, private: true, type: "module", dependencies }, null, 2));
+  ' "$repo/apps/bridge/package.json" "$stage/apps/bridge/package.json"
+  (cd "$stage" && npm install --omit=dev --ignore-scripts --no-audit --no-fund --no-package-lock >/dev/null)
+  cp -R "$stage/node_modules/." "$contents/Resources/bridge/node_modules/"
+
   for pkg in crypto protocol; do
     target="$contents/Resources/bridge/node_modules/@craftstead/$pkg"
     mkdir -p "$target"
