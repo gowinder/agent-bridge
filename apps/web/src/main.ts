@@ -1,3 +1,4 @@
+import { MAX_TRANSFER_CHARS } from "@agent-bridge/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -3742,12 +3743,19 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
       editor.readOnly = false;
       const sync = (): void => {
         const text = editor.value;
-        status.textContent = `${text.length} 字符 · ${text === prepared?.text ? "发送内容与预览一致" : "已编辑，将发送当前内容"}${prepared?.note ? ` · ${prepared.note}` : ""}`;
-        send.disabled = !prepared?.target.canSend || sending || done || !text.trim();
+        const tooLong = text.length > MAX_TRANSFER_CHARS;
+        const blocked = !prepared?.target.canSend;
+        // 超长和空内容在本地就拦住：服务端拒绝时会清掉 prepared，编辑内容也会一起丢。
+        status.textContent = !text.trim()
+          ? "内容为空，无法发送"
+          : tooLong
+            ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
+            : `${text.length} 字符 · ${text === prepared?.text ? "发送内容与预览一致" : "已编辑，将发送当前内容"}${prepared?.note ? ` · ${prepared.note}` : ""}`;
+        status.classList.toggle("error", tooLong || !text.trim() || blocked);
+        send.disabled = blocked || sending || done || tooLong || !text.trim();
       };
       editor.addEventListener("input", sync);
       sync();
-      if (!prepared.target.canSend) status.classList.add("error");
     } catch (error) {
       editor.placeholder = "无法生成预览";
       editor.readOnly = true;
@@ -3759,9 +3767,11 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   async function commit(): Promise<void> {
     if (!prepared || sending || done || !prepared.target.canSend) return;
     const text = shareEditor?.value ?? prepared.text;
-    if (!text.trim()) {
+    if (!text.trim() || text.length > MAX_TRANSFER_CHARS) {
       status.classList.add("error");
-      status.textContent = "消息不能为空";
+      status.textContent = text.trim()
+        ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
+        : "消息不能为空";
       return;
     }
     sending = true;

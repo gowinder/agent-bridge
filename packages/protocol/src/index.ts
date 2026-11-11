@@ -632,6 +632,9 @@ export interface TransferTargetInfo {
   sendBlockedReason?: string;
 }
 
+/** 转发正文（含预览里编辑后的内容）的长度上限，客户端据此提前拦住过长的内容。 */
+export const MAX_TRANSFER_CHARS = 200_000;
+
 export interface TransferPrepareResult {
   transferId: string;
   /** Epoch ms after which the prepared transfer is discarded. */

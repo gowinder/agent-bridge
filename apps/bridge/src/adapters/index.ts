@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MAX_TRANSFER_CHARS } from "@agent-bridge/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -25,7 +26,6 @@ const DEFAULT_SESSION_LIMIT = 200;
 const MAX_SESSION_LIMIT = 500;
 const DEFAULT_MESSAGE_LIMIT = 50;
 const MAX_MESSAGE_LIMIT = 200;
-const MAX_TRANSFER_CHARS = 200_000;
 const TRANSFER_TTL_MS = 120_000;
 
 interface PreparedTransfer {
