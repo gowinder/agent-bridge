@@ -3517,6 +3517,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   const exclude = new Set([source.sessionId]);
   const pick: SharePick = { appId: null, projectId: null, sessionId: null };
   let prepared: TransferPrepareResult | null = null;
+  let shareEditor: HTMLTextAreaElement | null = null;
   let sending = false;
   let done = false;
 
@@ -3617,6 +3618,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   async function render(): Promise<void> {
     renderSteps();
     body.replaceChildren();
+    shareEditor = null;
     note.textContent = "";
     status.classList.remove("error");
     status.textContent = "";
@@ -3709,15 +3711,21 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
     const target = sessionOf(pick.sessionId);
     note.textContent = `目标：${appName(pick.appId)} / ${projectName(pick.projectId)} / ${target?.title ?? "会话"}`;
-    const preview = el("pre", { className: "preview", text: "正在生成预览…" });
-    body.append(preview);
-    await prepare(preview);
+    const editor = el("textarea", {
+      className: "preview preview-editor",
+      attrs: { spellcheck: "false", "aria-label": "待发送内容，可直接编辑", placeholder: "正在生成预览…" },
+    });
+    editor.readOnly = true;
+    shareEditor = editor;
+    body.append(editor);
+    await prepare(editor);
   }
 
-  async function prepare(preview: HTMLElement): Promise<void> {
+  async function prepare(editor: HTMLTextAreaElement): Promise<void> {
     prepared = null;
     if (!pick.sessionId) return;
     send.disabled = true;
+    editor.readOnly = true;
     status.classList.remove("error");
     status.textContent = "正在校验目标会话…";
     try {
@@ -3730,12 +3738,19 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
         },
         60_000,
       );
-      preview.textContent = prepared.text;
-      status.textContent = `${prepared.textLength} 字符 · 发送内容与预览完全一致${prepared.note ? ` · ${prepared.note}` : ""}`;
-      send.disabled = !prepared.target.canSend || sending || done;
+      editor.value = prepared.text;
+      editor.readOnly = false;
+      const sync = (): void => {
+        const text = editor.value;
+        status.textContent = `${text.length} 字符 · ${text === prepared?.text ? "发送内容与预览一致" : "已编辑，将发送当前内容"}${prepared?.note ? ` · ${prepared.note}` : ""}`;
+        send.disabled = !prepared?.target.canSend || sending || done || !text.trim();
+      };
+      editor.addEventListener("input", sync);
+      sync();
       if (!prepared.target.canSend) status.classList.add("error");
     } catch (error) {
-      preview.textContent = "无法生成预览";
+      editor.placeholder = "无法生成预览";
+      editor.readOnly = true;
       status.classList.add("error");
       status.textContent = messageOf(error);
     }
@@ -3743,14 +3758,21 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
   async function commit(): Promise<void> {
     if (!prepared || sending || done || !prepared.target.canSend) return;
+    const text = shareEditor?.value ?? prepared.text;
+    if (!text.trim()) {
+      status.classList.add("error");
+      status.textContent = "消息不能为空";
+      return;
+    }
     sending = true;
     send.disabled = true;
+    if (shareEditor) shareEditor.readOnly = true;
     status.classList.remove("error");
     status.textContent = "正在发送…";
     try {
       const result = await call<TransferCommitResult>(
         "transfer.commit",
-        { transferId: prepared.transferId },
+        text === prepared.text ? { transferId: prepared.transferId } : { transferId: prepared.transferId, text },
         60_000,
       );
       done = true;
@@ -3764,6 +3786,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
       back.classList.add("hidden");
     } catch (error) {
       prepared = null;
+      if (shareEditor) shareEditor.readOnly = false;
       status.classList.add("error");
       status.textContent = `${messageOf(error)}；重新选择会话可再试`;
       send.disabled = true;

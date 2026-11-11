@@ -210,7 +210,11 @@ export class SessionAdapters {
     return result;
   }
 
-  async commitTransfer(deviceId: string, transferId: string): Promise<TransferCommitResult> {
+  async commitTransfer(
+    deviceId: string,
+    transferId: string,
+    edited?: string,
+  ): Promise<TransferCommitResult> {
     this.pruneTransfers();
     const prepared = this.transfers.get(transferId);
     if (!prepared) {
@@ -218,6 +222,15 @@ export class SessionAdapters {
     }
     if (prepared.deviceId !== deviceId) {
       throw new RpcError("invalid_params", "转发不属于当前设备，请重新预览");
+    }
+    // 预览里改过的正文以这次提交的内容为准，长度与空白的限制和 prepare 保持一致。
+    const text = edited ?? prepared.text;
+    if (!text.trim()) throw new RpcError("invalid_params", "消息不能为空");
+    if (text.length > MAX_TRANSFER_CHARS) {
+      throw new RpcError(
+        "invalid_params",
+        `消息过长（${text.length} 字符，上限 ${MAX_TRANSFER_CHARS}）`,
+      );
     }
     // Consume before sending so a double click cannot submit twice.
     this.transfers.delete(transferId);
@@ -230,12 +243,12 @@ export class SessionAdapters {
         target.sendBlockedReason ?? "目标会话当前不可发送",
       );
     }
-    const sent = await this.send(prepared.targetSessionId, prepared.text);
+    const sent = await this.send(prepared.targetSessionId, text);
     return {
       ...sent,
       transferId,
       targetSessionId: prepared.targetSessionId,
-      textLength: prepared.text.length,
+      textLength: text.length,
     };
   }
 

@@ -418,7 +418,11 @@ export class DeviceSession implements ChannelSession {
       case "transfer.commit": {
         const transferId = stringParam(params, "transferId");
         if (!transferId) throw new RpcError("invalid_params", "transferId required");
-        return this.options.adapters.commitTransfer(this.options.device.id, transferId);
+        return this.options.adapters.commitTransfer(
+          this.options.device.id,
+          transferId,
+          stringParam(params, "text"),
+        );
       }
       case "device.list": {
         const devices: DeviceSummary[] = this.options.store.devices().map((device) => ({

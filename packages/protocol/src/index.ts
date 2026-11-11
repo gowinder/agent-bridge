@@ -646,6 +646,8 @@ export interface TransferPrepareResult {
 
 export interface TransferCommitParams {
   transferId: string;
+  /** 预览里改过的正文；省略时发送 prepare 生成的内容。 */
+  text?: string;
 }
 
 export interface TransferCommitResult extends MessageSendResult {

@@ -2649,6 +2649,20 @@ h6.md-h {
   padding: 14px;
 }
 
+/* 预览里的正文就是待发送内容，可以直接改；改成 textarea 后保留同样的外观。 */
+.preview-editor {
+  display: block;
+  width: 100%;
+  margin: 0;
+  color: var(--text);
+  resize: vertical;
+  tab-size: 2;
+}
+
+.preview-editor:read-only {
+  color: var(--muted);
+}
+
 .sheet-foot {
   display: flex;
   flex-direction: column;
