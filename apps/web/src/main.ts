@@ -2065,6 +2065,11 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
       .then((result) => {
+        // Chat pages read the cached snapshot, so the new session must be in it
+        // before navigating; otherwise the page reports it as missing.
+        if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
+          snapshot = { ...snapshot, sessions: [result.session, ...snapshot.sessions] };
+        }
         navigate({
           level: "chat",
           appId: "hosted",
