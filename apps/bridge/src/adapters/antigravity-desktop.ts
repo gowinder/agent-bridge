@@ -1,7 +1,7 @@
 import { execFile, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { homedir } from "node:os";
-import { basename, join } from "node:path";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import type {
@@ -15,7 +15,7 @@ import type {
   RailRow,
   SessionRailResult,
   SessionSummary,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const ANTIGRAVITY_DIR = join(homedir(), ".gemini", "antigravity");
@@ -186,6 +186,32 @@ interface Endpoint {
   pid: number;
   port: number;
   token: string;
+}
+
+/**
+ * CSRF 令牌只写进 0600 的 curl 配置文件：放进 argv 的话，本机任何进程 `ps` 都能读到，
+ * 而 curl 的报错信息也可能把它带进错误回执转发给设备。
+ */
+const csrfConfigs = new Map<string, string>();
+
+process.once("exit", () => {
+  for (const file of csrfConfigs.values()) {
+    try {
+      rmSync(dirname(file), { recursive: true, force: true });
+    } catch {
+      // best effort
+    }
+  }
+});
+
+function csrfConfig(token: string): string {
+  const cached = csrfConfigs.get(token);
+  if (cached) return cached;
+  const dir = mkdtempSync(join(tmpdir(), "agent-bridge-curl-"));
+  const file = join(dir, "csrf.conf");
+  writeFileSync(file, `header = "X-Codeium-Csrf-Token: ${token}"\n`, { mode: 0o600 });
+  csrfConfigs.set(token, file);
+  return file;
 }
 
 interface StepInputItem {
@@ -587,19 +613,28 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
   private call(endpoint: Endpoint, method: string, body: unknown, timeoutSec: number): Promise<string> {
     return execFileAsync(
       CURL_BIN,
-      curlArgs(endpoint, method, JSON.stringify(body), timeoutSec),
+      curlArgs(endpoint, method, JSON.stringify(body), timeoutSec, csrfConfig(endpoint.token)),
       { encoding: "utf8", timeout: (timeoutSec + 2) * 1000, maxBuffer: 64 * 1024 * 1024 },
     ).then(
       (result) => result.stdout,
       (cause: unknown) => {
-        const message = cause instanceof Error ? cause.message : String(cause);
+        const message = (cause instanceof Error ? cause.message : String(cause)).replaceAll(
+          endpoint.token,
+          "***",
+        );
         throw new RpcError("adapter_unavailable", `无法调用 Antigravity 桌面版接口：${message}`);
       },
     );
   }
 }
 
-function curlArgs(endpoint: Endpoint, method: string, body: string, timeoutSec: number): string[] {
+function curlArgs(
+  endpoint: Endpoint,
+  method: string,
+  body: string,
+  timeoutSec: number,
+  configFile: string,
+): string[] {
   return [
     "-s",
     "-S",
@@ -610,12 +645,12 @@ function curlArgs(endpoint: Endpoint, method: string, body: string, timeoutSec: 
     "-X",
     "POST",
     `http://127.0.0.1:${endpoint.port}${RPC_PREFIX}${method}`,
+    "--config",
+    configFile,
     "-H",
     "Content-Type: application/json",
     "-H",
     "Connect-Protocol-Version: 1",
-    "-H",
-    `X-Codeium-Csrf-Token: ${endpoint.token}`,
     "-d",
     body,
   ];
@@ -683,7 +718,13 @@ function probe(port: number, token: string): { ok: boolean; current: Set<string>
     // 顺带从状态里认出正在运行的会话。
     const output = execFileSync(
       CURL_BIN,
-      curlArgs({ pid: 0, port, token }, "GetAllCascadeTrajectories", "{}", PROBE_TIMEOUT_SEC),
+      curlArgs(
+        { pid: 0, port, token },
+        "GetAllCascadeTrajectories",
+        "{}",
+        PROBE_TIMEOUT_SEC,
+        csrfConfig(token),
+      ),
       { encoding: "utf8", timeout: (PROBE_TIMEOUT_SEC + 1) * 1000, maxBuffer: 8 * 1024 * 1024 },
     );
     const parsed: unknown = JSON.parse(output);
@@ -756,7 +797,13 @@ function readLiveSummaries(endpoint: Endpoint, current: Set<string>): Map<string
   try {
     output = execFileSync(
       CURL_BIN,
-      curlArgs(endpoint, "GetAllCascadeTrajectories", "{}", PROBE_TIMEOUT_SEC + 1),
+      curlArgs(
+        endpoint,
+        "GetAllCascadeTrajectories",
+        "{}",
+        PROBE_TIMEOUT_SEC + 1,
+        csrfConfig(endpoint.token),
+      ),
       { encoding: "utf8", timeout: (PROBE_TIMEOUT_SEC + 2) * 1000, maxBuffer: 16 * 1024 * 1024 },
     );
   } catch {

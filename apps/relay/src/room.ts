@@ -8,7 +8,7 @@ import {
   type RelayErrorCode,
   type RelayHello,
   type RelayServerMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { Env } from "./env.js";
 
 interface Attachment {
@@ -38,7 +38,12 @@ const TOUCH_INTERVAL_MS = 60_000;
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8" },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "referrer-policy": "no-referrer",
+    },
   });
 }
 
@@ -156,6 +161,12 @@ export class Room {
     if (now - this.lastTouchAt < TOUCH_INTERVAL_MS) return;
     this.lastTouchAt = now;
     await this.ctx.storage.put("last_seen", now);
+    // 还有没完成 hello 的 socket 时，闹钟是在做握手兜底；往后推就等于把兜底关掉。
+    const pending = this.ctx.getWebSockets().some((ws) => {
+      const attachment = ws.deserializeAttachment() as (Attachment & { deadline?: number }) | null;
+      return attachment?.pending === true;
+    });
+    if (pending) return;
     const alarm = await this.ctx.storage.getAlarm();
     if (alarm === null || alarm < now + IDLE_ROOM_MS - TOUCH_INTERVAL_MS) {
       await this.ctx.storage.setAlarm(now + IDLE_ROOM_MS);
@@ -184,8 +195,17 @@ export class Room {
       const idleAt = Math.max(lastSeen, now) + IDLE_ROOM_MS;
       next = next === null ? idleAt : Math.min(next, idleAt);
     } else {
-      // 没有连接也没有 bridge 用这份凭据登录过：整间清空，房间号回到可认领状态。
+      // 没有连接也没有 bridge 用这份凭据登录过：清空房间数据，但保留认领凭据。
+      // 保留是必要的：认领是 TOFU（谁先连上谁就是桥），如果整间清空让房间回到
+      // 可认领状态，任何还知道旧 roomId 的人都能在原 Mac 离线时把它抢注走。
+      // 代价是每个废弃房间永久留下几个字节的认领锚点。
+      const anchors: Array<[string, string | null]> = [
+        ["room_id", await this.meta("room_id")],
+        ["bridge_hash", await this.meta("bridge_hash")],
+        ["created_at", await this.meta("created_at")],
+      ];
       await this.ctx.storage.deleteAll();
+      for (const [key, value] of anchors) if (value !== null) await this.ctx.storage.put(key, value);
       this.schemaReady = false;
       this.lastTouchAt = 0;
       return;
@@ -221,11 +241,17 @@ export class Room {
       if (!body.tokenHash || !/^[0-9a-f]{64}$/.test(body.tokenHash)) {
         return errorResponse("bad_request", "bad tokenHash", 400);
       }
+      if (body.ttlSeconds !== undefined && (!Number.isFinite(body.ttlSeconds) || body.ttlSeconds <= 0)) {
+        return errorResponse("bad_request", "bad ttlSeconds", 400);
+      }
       const ttl = Math.min(
         Math.max(Math.trunc(body.ttlSeconds ?? INVITE_TTL_SECONDS), 30),
         MAX_INVITE_TTL_SECONDS,
       );
       const now = Date.now();
+      // Rows are never read again once expired; sweep them here so a room that keeps
+      // minting invites does not grow storage without bound.
+      this.ctx.storage.sql.exec("DELETE FROM invites WHERE expires_at <= ?", now);
       this.ctx.storage.sql.exec(
         "INSERT INTO invites (id, hash, created_at, expires_at) VALUES (?, ?, ?, ?)",
         body.inviteId,
@@ -254,20 +280,37 @@ export class Room {
     }
 
     if (path === "/devices" && request.method === "POST") {
-      const body = (await request.json()) as {
+      const body = (await request.json().catch(() => ({}))) as {
         deviceId?: string;
         name?: string;
         publicKey?: string;
         ttlSeconds?: number | null;
       };
-      if (!body.deviceId || !body.name || !body.publicKey) {
+      if (
+        typeof body.deviceId !== "string" ||
+        typeof body.name !== "string" ||
+        typeof body.publicKey !== "string" ||
+        !body.deviceId ||
+        !body.name ||
+        !body.publicKey
+      ) {
         return errorResponse("bad_request", "missing fields", 400);
       }
       if (!/^[a-z0-9-]{8,64}$/.test(body.deviceId)) {
         return errorResponse("bad_request", "bad deviceId", 400);
       }
+      if (body.name.length > 64) {
+        return errorResponse("bad_request", "device name too long", 400);
+      }
+      if (!/^[0-9a-f]{64}$/.test(body.publicKey)) {
+        return errorResponse("bad_request", "bad publicKey", 400);
+      }
       let expiresAt: number | null = null;
       if (body.ttlSeconds != null) {
+        // NaN 会让 Math.trunc 之后的比较全部为 false，设备就成了永不过期。
+        if (!Number.isFinite(body.ttlSeconds)) {
+          return errorResponse("bad_request", "bad ttlSeconds", 400);
+        }
         const ttl = Math.min(Math.max(Math.trunc(body.ttlSeconds), 60), MAX_DEVICE_TTL_SECONDS);
         expiresAt = Date.now() + ttl * 1000;
       }

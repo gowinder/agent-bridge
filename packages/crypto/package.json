@@ -1,7 +1,8 @@
 {
-  "name": "@agent-bridge/crypto",
+  "name": "@craftstead/crypto",
   "version": "0.1.0",
-  "private": true,
+  "description": "Agent Bridge 的 Noise 握手与 wasm 加密实现",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -15,11 +16,24 @@
       "default": "./dist/node.js"
     }
   },
+  "files": [
+    "dist",
+    "wasm",
+    "!dist/*.tsbuildinfo"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gowinder/agent-bridge.git",
+    "directory": "packages/crypto"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -b",
     "build:wasm": "sh scripts/build-wasm.sh"
   },
   "dependencies": {
-    "@agent-bridge/protocol": "*"
+    "@craftstead/protocol": "^0.1.0"
   }
 }

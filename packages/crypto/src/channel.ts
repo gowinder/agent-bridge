@@ -5,7 +5,7 @@ import {
   MAX_PENDING_MESSAGES,
   parseWireMessage,
   type WireMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import {
   concatBytes,
   fromBase64,

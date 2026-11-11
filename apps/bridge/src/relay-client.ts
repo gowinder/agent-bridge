@@ -6,8 +6,8 @@ import {
   type RegisterDeviceResponse,
   type RelayServerMessage,
   type RoomStatusResponse,
-} from "@agent-bridge/protocol";
-import { fromHex, toHex } from "@agent-bridge/crypto";
+} from "@craftstead/protocol";
+import { fromHex, toHex } from "@craftstead/crypto";
 
 export class RelayError extends Error {
   readonly code: string;

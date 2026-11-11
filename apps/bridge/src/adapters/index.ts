@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -9,11 +10,13 @@ import type {
   SessionGetResult,
   SessionListParams,
   SessionListResult,
+  SessionModelsResult,
+  SessionCompactResult,
   SessionRailResult,
   SessionSummary,
   TransferCommitResult,
   TransferPrepareResult,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
@@ -25,7 +28,6 @@ const DEFAULT_SESSION_LIMIT = 200;
 const MAX_SESSION_LIMIT = 500;
 const DEFAULT_MESSAGE_LIMIT = 50;
 const MAX_MESSAGE_LIMIT = 200;
-const MAX_TRANSFER_CHARS = 200_000;
 const TRANSFER_TTL_MS = 120_000;
 
 interface PreparedTransfer {
@@ -129,6 +131,24 @@ export class SessionAdapters {
     return adapter.rail(sessionId);
   }
 
+  async models(sessionId: string): Promise<SessionModelsResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
+    if (!adapter.models) {
+      return { models: [], canSwitch: false, note: "这个客户端没有模型信息" };
+    }
+    return adapter.models(sessionId);
+  }
+
+  async compact(sessionId: string): Promise<SessionCompactResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
+    if (!adapter.compact) {
+      throw new RpcError("unsupported", "这个客户端不支持从 Bridge 压缩上下文");
+    }
+    return adapter.compact(sessionId);
+  }
+
   async taskMessages(
     sessionId: string,
     taskId: string,
@@ -210,7 +230,11 @@ export class SessionAdapters {
     return result;
   }
 
-  async commitTransfer(deviceId: string, transferId: string): Promise<TransferCommitResult> {
+  async commitTransfer(
+    deviceId: string,
+    transferId: string,
+    edited?: string,
+  ): Promise<TransferCommitResult> {
     this.pruneTransfers();
     const prepared = this.transfers.get(transferId);
     if (!prepared) {
@@ -218,6 +242,15 @@ export class SessionAdapters {
     }
     if (prepared.deviceId !== deviceId) {
       throw new RpcError("invalid_params", "转发不属于当前设备，请重新预览");
+    }
+    // 预览里改过的正文以这次提交的内容为准，长度与空白的限制和 prepare 保持一致。
+    const text = edited ?? prepared.text;
+    if (!text.trim()) throw new RpcError("invalid_params", "消息不能为空");
+    if (text.length > MAX_TRANSFER_CHARS) {
+      throw new RpcError(
+        "invalid_params",
+        `消息过长（${text.length} 字符，上限 ${MAX_TRANSFER_CHARS}）`,
+      );
     }
     // Consume before sending so a double click cannot submit twice.
     this.transfers.delete(transferId);
@@ -230,12 +263,12 @@ export class SessionAdapters {
         target.sendBlockedReason ?? "目标会话当前不可发送",
       );
     }
-    const sent = await this.send(prepared.targetSessionId, prepared.text);
+    const sent = await this.send(prepared.targetSessionId, text);
     return {
       ...sent,
       transferId,
       targetSessionId: prepared.targetSessionId,
-      textLength: prepared.text.length,
+      textLength: text.length,
     };
   }
 

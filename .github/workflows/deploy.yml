@@ -21,8 +21,9 @@ jobs:
       changed: ${{ steps.detect.outputs.changed }}
       version: ${{ steps.detect.outputs.version }}
       on_main: ${{ steps.maincheck.outputs.on_main }}
+      tag_ok: ${{ steps.maincheck.outputs.tag_ok }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Full history, so the pre-push tip can always be inspected.
           fetch-depth: 0
@@ -70,6 +71,14 @@ jobs:
           fi
           echo "on_main=$on_main" >> "$GITHUB_OUTPUT"
           echo "提交 $GITHUB_SHA 在 main 上：$on_main"
+          # 推送 tag 的人不一定走过 PR、也不一定 bump 过版本号。tag 必须与
+          # package.json 的版本一致，否则任何人都能给 main 上的旧提交打 tag 触发生产部署。
+          tag_ok=true
+          if [ "${{ github.ref_type }}" = "tag" ] && [ "${GITHUB_REF#refs/tags/v}" != "${{ steps.detect.outputs.version }}" ]; then
+            tag_ok=false
+          fi
+          echo "tag_ok=$tag_ok" >> "$GITHUB_OUTPUT"
+          echo "tag 与版本号匹配：$tag_ok（ref ${GITHUB_REF}，版本 ${{ steps.detect.outputs.version }}）"
 
   preview:
     needs: version
@@ -82,9 +91,9 @@ jobs:
       group: deploy-preview
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -93,15 +102,17 @@ jobs:
 
       - run: rustup target add wasm32-unknown-unknown
 
-      - run: npm run build:wasm -w @agent-bridge/crypto
+      - run: npm run build:wasm -w @craftstead/crypto
 
       - run: npm run check
 
-      - run: npm run build -w @agent-bridge/web
+      - run: npm run build -w @craftstead/web
 
-      - uses: cloudflare/wrangler-action@v3
+      - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # 优先用 preview 环境自己的 token：develop 的改动不需要生产部署权限。
+          # 回退到共享 token 只是为了让尚未配置环境级 token 的仓库继续能部署。
+          apiToken: ${{ secrets.PREVIEW_CLOUDFLARE_API_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/relay
           wranglerVersion: "4.92.0"
@@ -110,17 +121,18 @@ jobs:
   production:
     needs: version
     # Tags deploy only when they point at a commit already merged into main;
-    # main itself deploys when the version moves.
-    if: (startsWith(github.ref, 'refs/tags/v') && needs.version.outputs.on_main == 'true') || (github.ref == 'refs/heads/main' && needs.version.outputs.changed == 'true')
+    # main itself deploys when the version moves. A tag must also carry the
+    # package.json version, so an arbitrary tag cannot re-deploy an old commit.
+    if: (startsWith(github.ref, 'refs/tags/v') && needs.version.outputs.on_main == 'true' && needs.version.outputs.tag_ok == 'true') || (github.ref == 'refs/heads/main' && needs.version.outputs.changed == 'true')
     runs-on: ubuntu-latest
     environment: production
     concurrency:
       group: deploy-production
       cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24
           cache: npm
@@ -129,15 +141,16 @@ jobs:
 
       - run: rustup target add wasm32-unknown-unknown
 
-      - run: npm run build:wasm -w @agent-bridge/crypto
+      - run: npm run build:wasm -w @craftstead/crypto
 
       - run: npm run check
 
-      - run: npm run build -w @agent-bridge/web
+      - run: npm run build -w @craftstead/web
 
-      - uses: cloudflare/wrangler-action@v3
+      - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:
-          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # 生产用 production 环境自己的 token，与 preview 的权限分开。
+          apiToken: ${{ secrets.PRODUCTION_CLOUDFLARE_API_TOKEN || secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: apps/relay
           wranglerVersion: "4.92.0"

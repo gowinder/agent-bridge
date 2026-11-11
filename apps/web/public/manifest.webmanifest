@@ -1,0 +1,19 @@
+{
+  "name": "Agent Bridge",
+  "short_name": "Agent Bridge",
+  "description": "在浏览器里浏览并继续 Mac 上的 AI 代理会话。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#14120f",
+  "theme_color": "#14120f",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

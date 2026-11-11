@@ -19,14 +19,19 @@ import type {
   ContextUsage,
   MessageBlock,
   MessageListResult,
+  MessageQuestion,
+  MessageQuestionOption,
   MessageRecord,
   MessageSendResult,
+  ModelOption,
+  NextStepAction,
   ProjectInfo,
   RailRow,
   RailTask,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
@@ -50,6 +55,8 @@ interface DesktopSession {
   cliSessionId: string;
   priorCliSessionIds: string[];
   cwd: string;
+  /** 会话所属项目目录；工作树里的会话归到原项目，而不是单独成一个项目。 */
+  projectCwd: string;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -104,6 +111,87 @@ function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/** 桌面端回合结束时的「下一步」盒子就是这一次工具调用。 */
+const WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up";
+
+/** 桌面端给应用动作按钮的默认文案；工具输入里可能只给了 action。 */
+const APP_ACTION_LABELS: Record<string, string> = {
+  commit: "提交",
+  create_pr: "创建 PR",
+  merge: "合并 PR",
+  fix_ci: "修复 CI",
+  address_comments: "处理评审意见",
+  resolve_conflicts: "解决冲突",
+  verify: "验证改动",
+  archive: "归档会话",
+};
+
+/** 把 wrap_up 的输入转成带按钮的消息块；没有可点的东西时不显示。 */
+function nextStepBlock(input: unknown): MessageBlock | null {
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  const ask = typeof raw["ask"] === "string" ? raw["ask"].trim() : "";
+  const actions: NextStepAction[] = [];
+  if (Array.isArray(raw["actions"])) {
+    for (const item of raw["actions"]) {
+      if (typeof item !== "object" || item === null) continue;
+      const entry = item as Record<string, unknown>;
+      const action = typeof entry["action"] === "string" ? entry["action"] : undefined;
+      const label = (typeof entry["label"] === "string" ? entry["label"] : "").trim()
+        || (action ? APP_ACTION_LABELS[action] : undefined);
+      if (!label) continue;
+      actions.push(action ? { action, label } : { label });
+    }
+  }
+  if (!ask && actions.length === 0) return null;
+  const block: MessageBlock = { type: "next-step", text: ask || "下一步" };
+  if (ask) block.ask = ask;
+  if (actions.length > 0) block.actions = actions;
+  return block;
+}
+
+/** 桌面端弹给用户选的提问工具；网页只展示，不在网页里回答。 */
+const ASK_TOOL = "AskUserQuestion";
+
+/** 把 AskUserQuestion 的输入转成一行行可读的问题与选项。 */
+function askBlock(input: unknown, max: number): MessageBlock | null {
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (!Array.isArray(raw["questions"])) return null;
+  const questions: MessageQuestion[] = [];
+  const lines: string[] = [];
+  for (const item of raw["questions"]) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const question = (typeof entry["question"] === "string" ? entry["question"] : "").trim();
+    if (!question) continue;
+    const header = (typeof entry["header"] === "string" ? entry["header"] : "").trim();
+    const options: MessageQuestionOption[] = [];
+    if (Array.isArray(entry["options"])) {
+      for (const option of entry["options"]) {
+        if (typeof option !== "object" || option === null) continue;
+        const value = option as Record<string, unknown>;
+        const label = (typeof value["label"] === "string" ? value["label"] : "").trim();
+        if (!label) continue;
+        const description = (typeof value["description"] === "string" ? value["description"] : "").trim();
+        options.push(description ? { label, description } : { label });
+      }
+    }
+    questions.push({
+      ...(header ? { header } : {}),
+      question,
+      ...(typeof entry["multiSelect"] === "boolean" ? { multiSelect: entry["multiSelect"] } : {}),
+      options,
+    });
+    lines.push(`${header ? `${header}：` : ""}${question}`);
+    for (const option of options) {
+      lines.push(option.description ? `- ${option.label}：${option.description}` : `- ${option.label}`);
+    }
+  }
+  if (questions.length === 0) return null;
+  return { type: "ask", ...truncate(lines.join("\n"), max), questions };
+}
+
 /**
  * 信封里的发送者名。所有设备共用同一个进程和同一个名字时，接收方无法分辨消息来自
  * 哪个客户端；带上配对设备名即可区分，同时避免设备名里的引号破坏信封结构。
@@ -118,6 +206,25 @@ function asNumber(value: unknown): number {
 }
 
 /** Models advertised with a 1M token context window (e.g. `claude-sonnet-4-5[1m]`). */
+/** 桌面记录的模型值可能是路由别名（`a.b.claude-opus-5-5`）或带 `[1m]` 后缀。 */
+function normalizeModelId(raw: string): string {
+  let value = raw.replace(/\[1m\]$/i, "").trim();
+  const dot = value.lastIndexOf(".");
+  if (dot >= 0) value = value.slice(dot + 1);
+  return value;
+}
+
+/** 取最长匹配，避免 `claude-opus-4-8` 抢走 `claude-opus-4-8-20261210`。 */
+function matchCatalogModel(raw: string, catalog: ModelOption[]): ModelOption | undefined {
+  const value = normalizeModelId(raw);
+  let best: ModelOption | undefined;
+  for (const item of catalog) {
+    if (value !== item.id && !value.startsWith(`${item.id}-`)) continue;
+    if (!best || item.id.length > best.id.length) best = item;
+  }
+  return best;
+}
+
 function isMillionTokenModel(model: string): boolean {
   const name = model.toLowerCase();
   return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
@@ -255,15 +362,15 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   projects(): ProjectInfo[] {
     const map = new Map<string, ProjectInfo>();
     for (const session of this.records()) {
-      const projectId = this.projectIdFor(session.cwd);
+      const projectId = this.projectIdFor(session.projectCwd);
       const entry = map.get(projectId);
       if (entry) entry.sessionCount += 1;
       else {
         map.set(projectId, {
           projectId,
           appId: this.key,
-          name: session.cwd ? basename(session.cwd) : "未分组会话",
-          cwd: session.cwd || undefined,
+          name: session.projectCwd ? basename(session.projectCwd) : "未分组会话",
+          cwd: session.projectCwd || undefined,
           sessionCount: 1,
         });
       }
@@ -289,7 +396,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       out.push({
         sessionId,
         appId: this.key,
-        projectId: this.projectIdFor(session.cwd),
+        projectId: this.projectIdFor(session.projectCwd),
         kind: "code",
         title: (session.title || "未命名会话").slice(0, 120),
         createdAt: session.createdAt,
@@ -298,6 +405,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         live,
         ...(busy ? { busy: true } : {}),
         canSend,
+        ...(session.cwd ? { cwd: session.cwd } : {}),
         sendBlockedReason: canSend
           ? undefined
           : scan.error ??
@@ -380,6 +488,69 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const context = this.contextFor(record);
     if (context) result.context = context;
     return result;
+  }
+
+  /**
+   * 桌面端把模型目录缓存在 ~/.claude/cache/model-catalog，取最新的 ccd 表面那份；
+   * 目录只用于展示名称与可选项，切换模型仍然只能在桌面里做。
+   */
+  models(sessionId: string): SessionModelsResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知会话");
+    const catalog = this.modelCatalog();
+    // 桌面记录里可能是路由别名或带 [1m] 后缀，能对上目录时以目录里的 id 为准。
+    const raw = record.model || undefined;
+    const matched = raw ? matchCatalogModel(raw, catalog) : undefined;
+    const current = matched?.id ?? raw;
+    const currentName = matched?.name ?? raw;
+    return {
+      ...(current ? { current } : {}),
+      ...(currentName ? { currentName } : {}),
+      models: catalog,
+      canSwitch: false,
+      note: "模型需要在 Claude 桌面里切换；这里只展示当前会话可用的模型。",
+    };
+  }
+
+  private modelCatalogCache: { at: number; models: ModelOption[] } | null = null;
+
+  private modelCatalog(): ModelOption[] {
+    const now = Date.now();
+    if (this.modelCatalogCache && now - this.modelCatalogCache.at < 60_000) {
+      return this.modelCatalogCache.models;
+    }
+    const models: ModelOption[] = [];
+    try {
+      const dir = join(homedir(), ".claude", "cache", "model-catalog");
+      const files = readdirSync(dir)
+        .filter((name) => name.endsWith("-ccd.json"))
+        .map((name) => {
+          const path = join(dir, name);
+          try {
+            return { path, mtimeMs: statSync(path).mtimeMs };
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is { path: string; mtimeMs: number } => item !== null)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      const raw = files[0] ? JSON.parse(readFileSync(files[0].path, "utf8")) : null;
+      const list = raw?.catalog?.config?.models;
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          if (typeof item?.id !== "string" || typeof item?.name !== "string") continue;
+          models.push({
+            id: item.id,
+            name: item.name,
+            ...(item.section === "main" || item.section === "overflow" ? { section: item.section } : {}),
+          });
+        }
+      }
+    } catch {
+      // 没有缓存或格式变了：只展示当前模型名。
+    }
+    this.modelCatalogCache = { at: now, models };
+    return models;
   }
 
   taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
@@ -638,6 +809,16 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return task;
   }
 
+  /**
+   * 桌面端为工作树会话写了 originCwd；没有这个字段的旧记录按路径推断，
+   * 否则每个工作树都会变成一个独立项目，会话在原项目里就找不到了。
+   */
+  private projectCwdOf(cwd: string, originCwd: string): string {
+    if (originCwd) return originCwd;
+    const at = cwd.indexOf("/.claude/worktrees/");
+    return at > 0 ? cwd.slice(0, at) : cwd;
+  }
+
   private projectIdFor(cwd: string): string {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
@@ -682,6 +863,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       const localId = asString(raw["sessionId"]) || basename(path).replace(/\.json$/, "");
       const createdAt = asNumber(raw["createdAt"]);
+      const cwd = asString(raw["cwd"]);
       return {
         localId,
         cliSessionId: asString(raw["cliSessionId"]),
@@ -690,7 +872,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
               .filter((item): item is string => typeof item === "string" && item !== "")
               .slice(-20)
           : [],
-        cwd: asString(raw["cwd"]),
+        cwd,
+        projectCwd: this.projectCwdOf(cwd, asString(raw["originCwd"])),
         title: asString(raw["title"]),
         createdAt,
         updatedAt:
@@ -1037,6 +1220,16 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         if (clean) blocks.push({ type: "text", ...truncate(clean, MAX_BLOCK_CHARS) });
       } else if (block["type"] === "tool_use") {
         const name = asString(block["name"]) || "tool";
+        const nextStep = name === WRAP_UP_TOOL ? nextStepBlock(block["input"]) : null;
+        if (nextStep) {
+          blocks.push(nextStep);
+          continue;
+        }
+        const ask = name === ASK_TOOL ? askBlock(block["input"], MAX_BLOCK_CHARS) : null;
+        if (ask) {
+          blocks.push(ask);
+          continue;
+        }
         const input = block["input"] === undefined ? "" : JSON.stringify(block["input"]);
         blocks.push({ type: "tool", ...truncate(`调用 ${name} ${input}`.trim(), 300) });
       }

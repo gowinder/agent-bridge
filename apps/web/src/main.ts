@@ -1,3 +1,4 @@
+import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -14,15 +15,20 @@ import type {
   FsRootsResult,
   HostInfoResult,
   MessageAttachment,
+  MessageBlock,
   MessageListResult,
+  MessageQuestion,
   MessageRecord,
   MessageSendResult,
   Method,
+  NextStepAction,
   ProjectInfo,
   ProjectListResult,
   RailRow,
   RailTask,
+  SessionCompactResult,
   SessionListResult,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
   ShellCancelResult,
@@ -30,8 +36,23 @@ import type {
   ShellExecResult,
   TransferCommitResult,
   TransferPrepareResult,
-} from "@agent-bridge/protocol";
-import { expireLabel, listDevices, removeDevice, type StoredDevice } from "./credentials.js";
+} from "@craftstead/protocol";
+import {
+  expireLabel,
+  getDeviceSecrets,
+  hasVault,
+  isExpiringSoon,
+  listDevices,
+  LockedError,
+  needsUnlock,
+  removeDevice,
+  renameDevice,
+  resetCredentials,
+  setupPassword,
+  unlock,
+  type DeviceMeta,
+  type DeviceSecrets,
+} from "./credentials.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
 import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
@@ -187,6 +208,8 @@ const app: HTMLDivElement = root;
 
 let active: PeerClient | null = null;
 let generation = 0;
+/** 刚配对完回到首页时提示一句回落地页的入口；只影响一次渲染。 */
+let justPaired = false;
 let retryTimer: number | null = null;
 let pollTimer: number | null = null;
 let renderToken = 0;
@@ -233,7 +256,7 @@ function setReconnecting(message: string | null): void {
 }
 
 interface ConnectedState {
-  device: StoredDevice;
+  device: DeviceMeta;
   info: HostInfoResult;
   devices: DeviceSummary[];
 }
@@ -512,6 +535,12 @@ function showPairError(message: string): void {
   );
 }
 
+function flashNotice(message: string): void {
+  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" }, text: message });
+  document.body.append(box);
+  window.setTimeout(() => box.remove(), 5000);
+}
+
 function renderHome(): HTMLElement {
   const devices = listDevices();
   const page = el("main", { className: "page narrow" }, [
@@ -526,6 +555,15 @@ function renderHome(): HTMLElement {
   ]);
 
   const section = el("section", { className: "panel" });
+  const expiring = devices.filter((device) => isExpiringSoon(device.expiresAt));
+  if (expiring.length > 0) {
+    section.append(
+      el("p", {
+        className: "notice warn",
+        text: `${expiring.length === 1 ? "有一台设备" : `有 ${expiring.length} 台设备`}的凭据将在 3 天内过期。到期后会无法连接，请在 Mac 上重新生成配对链接并重新配对。`,
+      }),
+    );
+  }
   section.append(el("h2", { className: "panel-title", text: "已配对设备" }));
   if (devices.length === 0) {
     section.append(
@@ -574,12 +612,30 @@ function renderHome(): HTMLElement {
       status.textContent = messageOf(error);
     });
   }
+
+  page.append(
+    el("p", { className: "hint bookmark-hint" }, [
+      el("a", { attrs: { href: location.origin + "/" }, text: location.host }),
+      " 可以收藏或添加到主屏幕，下次直接打开，不必再粘贴配对链接。",
+    ]),
+  );
+  if (justPaired) {
+    justPaired = false;
+    page.append(
+      el("p", { className: "hint bookmark-hint" }, [
+        "配对完成，",
+        el("a", { attrs: { href: craftsteadLanding(true) }, text: "回到 Craftstead 落地页" }),
+        " 查看已配对状态。",
+      ]),
+    );
+  }
   return page;
 }
 
-function renderDeviceRow(device: StoredDevice): HTMLElement {
-  const status = el("span", { className: "pill", text: expireLabel(device.expiresAt) });
-  return el("li", { className: "device-row" }, [
+function renderDeviceRow(device: DeviceMeta): HTMLElement {
+  const soon = isExpiringSoon(device.expiresAt);
+  const status = el("span", { className: soon ? "pill warn" : "pill", text: expireLabel(device.expiresAt) });
+  const row = el("li", { className: "device-row" }, [
     el("div", { className: "row-main" }, [
       el("strong", { text: device.bridge?.name ? `${device.bridge.name}` : device.name }),
       el("span", { className: "meta", text: `${device.name} · ${new URL(device.relayUrl).host}` }),
@@ -593,11 +649,17 @@ function renderDeviceRow(device: StoredDevice): HTMLElement {
         });
       }, "btn small"),
       button("移除", () => {
-        removeDevice(device.relayUrl, device.roomId);
-        showHome();
+        void removeDevice(device.relayUrl, device.roomId).then(() => showHome());
       }, "btn ghost small"),
     ]),
   ]);
+  if (soon) {
+    row.append(el("p", {
+      className: "hint warn",
+      text: "这台设备的凭据即将过期，到期后就无法连接。请在 Mac 上重新生成配对链接并重新配对。",
+    }));
+  }
+  return row;
 }
 
 async function beginPairing(link: PairingLink): Promise<void> {
@@ -632,8 +694,15 @@ function showConfirm(challenge: PairingChallenge): void {
       return;
     }
     confirm.disabled = true;
-    void finishPairing(challenge, name)
-      .then(() => showHome())
+    void (async () => {
+      // 私钥要落盘，必须先有加密口令；用户在对话框里取消就当作放弃配对。
+      await ensureVault();
+      await finishPairing(challenge, name);
+    })()
+      .then(() => {
+        justPaired = true;
+        showHome();
+      })
       .catch((failure: unknown) => {
         confirm.disabled = false;
         error.textContent = messageOf(failure);
@@ -652,18 +721,234 @@ function showConfirm(challenge: PairingChallenge): void {
       el("p", { className: "lede", text: "Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。" }),
       el("div", { className: "code", text: challenge.confirmCode }),
       el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
+      el("p", { className: "hint", text: "浏览器读不到电脑名称和机型，默认值只能按系统、浏览器和屏幕区分；两台设备看起来一样时，改成你认得出的名字。" }),
       error,
       el("div", { className: "actions" }, [confirm, cancel]),
     ]),
   );
 }
 
+/**
+ * 默认名称取设备类型 + 浏览器 + 屏幕逻辑分辨率。浏览器拿不到机型和主机名，
+ * 但同品牌两台设备往往浏览器或屏幕不同，这样列表里至少能分辨。
+ */
 function defaultDeviceName(): string {
-  const agent = navigator.userAgent.match(/(Firefox|Edg|Chrome|Safari)\/[\d.]+/);
-  return agent ? `浏览器 · ${agent[1]}` : "浏览器";
+  const ua = navigator.userAgent;
+  const touch = navigator.maxTouchPoints > 1;
+  let kind: string;
+  if (/iPhone/.test(ua)) kind = "iPhone";
+  else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) kind = "iPad";
+  else if (/Android/.test(ua)) kind = "Android 设备";
+  else if (/Macintosh|Mac OS X/.test(ua)) kind = "Mac";
+  else if (/Windows/.test(ua)) kind = "Windows";
+  else if (/Linux/.test(ua)) kind = "Linux";
+  else kind = "浏览器";
+  const screenSize = `${Math.round(screen.width)}×${Math.round(screen.height)}`;
+  return [kind, browserLabel(), screenSize].filter(Boolean).join(" · ");
 }
 
-async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> {
+/** Chromium 的 UA 里 Chrome/Safari 互相嵌套，顺序不能换。 */
+function browserLabel(): string {
+  const ua = navigator.userAgent;
+  const rules: Array<[RegExp, string]> = [
+    [/Edg\/(\d+)/, "Edge"],
+    [/OPR\/(\d+)/, "Opera"],
+    [/Chrome\/(\d+)/, "Chrome"],
+    [/Firefox\/(\d+)/, "Firefox"],
+    [/Version\/(\d+)[\d.]* Safari\//, "Safari"],
+  ];
+  for (const [pattern, name] of rules) {
+    const match = ua.match(pattern);
+    if (match?.[1]) return `${name} ${match[1]}`;
+  }
+  return "";
+}
+
+/**
+ * Secrets live encrypted on disk; the password is asked once and the derived key is
+ * dropped after 30 minutes without use, so an idle tab cannot reconnect on its own.
+ */
+async function ensureSecrets(device: DeviceMeta): Promise<DeviceSecrets> {
+  if (!hasVault()) {
+    // 还没有口令：先把老版本的明文迁移进加密存储；没有可迁移的凭据就只能重新配对。
+    if (!getDeviceSecrets(device)) throw new Error("本地没有这台设备的凭据，需要重新配对");
+    await ensureVault();
+  } else if (needsUnlock()) {
+    await ensureVault();
+  }
+  const found = getDeviceSecrets(device);
+  if (!found) throw new Error("本地没有这台设备的凭据，需要重新配对");
+  return found;
+}
+
+/** Pairing stores a private key, so a password must exist and be unlocked before saving. */
+async function ensureVault(): Promise<void> {
+  if (!hasVault()) {
+    const created = await passwordDialog({
+      title: "设置凭据密码",
+      hint: "设备私钥会用这个密码加密后保存在本机，密码不会离开浏览器。忘记密码只能重新配对。",
+      confirm: true,
+      submit: async (password) => {
+        try {
+          await setupPassword(password);
+        } catch (error) {
+          // 另一个标签页刚好先设好了口令：不覆盖它，回到解锁流程。
+          if (!(error instanceof LockedError && hasVault())) throw error;
+        }
+      },
+    });
+    if (created === null) throw new LockedError("未设置密码，操作已取消");
+    // 另一个标签页抢先设好了口令：接着走解锁流程，而不是覆盖那份存储。
+    if (needsUnlock()) return ensureVault();
+    return;
+  }
+  if (!needsUnlock()) return;
+  const password = await passwordDialog({
+    title: "解锁设备凭据",
+    hint: "设备私钥已加密保存在本机。输入密码后 30 分钟内不需要再次输入。",
+    submit: unlock,
+    // 密码不可找回，唯一出路是清空本机凭据后重新配对，所以给一个显式出口。
+    forgot: async () => {
+      if (!window.confirm("清除本机保存的所有设备凭据？之后需要重新配对。")) return false;
+      await resetCredentials();
+      return true;
+    },
+  });
+  if (password === null) throw new LockedError();
+}
+
+function passwordDialog(options: {
+  title: string;
+  hint: string;
+  confirm?: boolean;
+  submit: (password: string) => Promise<void>;
+  /** Resolves true once the credentials are gone and the dialog should close. */
+  forgot?: () => Promise<boolean>;
+}): Promise<string | null> {
+  return new Promise((resolve) => {
+    const input = el("input", {
+      className: "input",
+      attrs: {
+        type: "password",
+        autocomplete: options.confirm ? "new-password" : "current-password",
+        placeholder: "密码",
+      },
+    }) as HTMLInputElement;
+    const again = el("input", {
+      className: "input",
+      attrs: { type: "password", autocomplete: "new-password", placeholder: "再输入一次" },
+    }) as HTMLInputElement;
+    const error = el("p", { className: "notice error hidden" });
+    const mask = el("div", { className: "sheet-mask" });
+    let busy = false;
+
+    const finish = (value: string | null): void => {
+      document.removeEventListener("keydown", onKey);
+      mask.remove();
+      resolve(value);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === "Escape") finish(null);
+    };
+    const submit = button("继续", () => {
+      void run();
+    }, "btn primary");
+    const cancel = button("取消", () => finish(null), "btn secondary");
+    const fail = (message: string): void => {
+      error.textContent = message;
+      error.classList.remove("hidden");
+      busy = false;
+      submit.disabled = false;
+    };
+    const run = async (): Promise<void> => {
+      if (busy) return;
+      const value = input.value;
+      if (value.length < 8) return fail("密码至少 8 位");
+      if (options.confirm && again.value !== value) return fail("两次输入的密码不一致");
+      busy = true;
+      submit.disabled = true;
+      try {
+        await options.submit(value);
+        finish(value);
+      } catch (failure) {
+        fail(messageOf(failure));
+      }
+    };
+    for (const field of options.confirm ? [input, again] : [input]) {
+      field.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") void run();
+      });
+    }
+    document.addEventListener("keydown", onKey);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) finish(null);
+    });
+
+    const fields = [el("label", { className: "field" }, [el("span", { text: "密码" }), input])];
+    if (options.confirm) {
+      fields.push(el("label", { className: "field" }, [el("span", { text: "确认密码" }), again]));
+    }
+    const leading = el("div", {});
+    const forgot = options.forgot;
+    if (forgot) {
+      leading.append(
+        button("忘记密码", () => {
+          if (busy) return;
+          busy = true;
+          void (async () => {
+            try {
+              if (await forgot()) finish(null);
+            } finally {
+              busy = false;
+            }
+          })();
+        }, "btn ghost"),
+      );
+    }
+    mask.append(
+      el("aside", { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": options.title } }, [
+        el("header", { className: "sheet-head" }, [
+          el("h2", { className: "sheet-title", text: options.title }),
+        ]),
+        el("p", { className: "sheet-source", text: options.hint }),
+        ...fields,
+        error,
+        el("footer", { className: "sheet-foot" }, [
+          leading,
+          el("div", { className: "actions" }, [cancel, submit]),
+        ]),
+      ]),
+    );
+    document.body.append(mask);
+    input.focus();
+  });
+}
+
+function showLocked(device: DeviceMeta): void {
+  // 锁屏会替换掉聊天 DOM，旧的恢复闭包和连接状态必须一起丢掉，
+  // 否则解锁后会被当成软重连，去恢复已经不存在的界面。
+  stopActive();
+  chatResume = null;
+  chatResumeKey = null;
+  app.replaceChildren(
+    el("main", { className: "page narrow" }, [
+      el("p", { className: "eyebrow", text: "凭据已锁定" }),
+      el("h1", { className: "display", text: "需要解锁" }),
+      el("p", {
+        className: "lede",
+        text: "设备私钥已加密保存在本机，超过 30 分钟没有使用就需要重新输入密码。",
+      }),
+      el("div", { className: "actions" }, [
+        button("输入密码", () => {
+          void connectAndShow(device);
+        }, "btn primary"),
+        button("返回", () => showHome(), "btn secondary"),
+      ]),
+    ]),
+  );
+}
+
+async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   const gen = generation;
   const soft = connected !== null;
   if (soft) {
@@ -680,9 +965,16 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
   }
   let opened: { client: PeerClient; connection: RelayConnection };
   try {
-    opened = await connectDevice(device);
+    opened = await connectDevice({ ...device, ...(await ensureSecrets(device)) });
   } catch (error) {
     if (gen !== generation) return;
+    if (error instanceof LockedError) {
+      progressDone();
+      // 用户可能在解锁框里清空了本机凭据，这时设备已经不存在，回首页重新配对。
+      if (!hasVault() && listDevices().length === 0) showHome();
+      else showLocked(device);
+      return;
+    }
     if (attempt >= 5) {
       progressDone();
       setReconnecting("重连失败，30 秒后继续重试…");
@@ -731,7 +1023,7 @@ async function connectAndShow(device: StoredDevice, attempt = 0): Promise<void> 
   });
 }
 
-function scheduleRetry(device: StoredDevice, attempt: number, message?: string): void {
+function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): void {
   const gen = generation;
   const delay = Math.min(1000 * 2 ** (attempt - 1), 30_000);
   if (connected) {
@@ -1015,14 +1307,17 @@ function recentSessionsButton(): HTMLElement | null {
   const titles = sessions.slice(0, 6).map((item) => item.title);
   const run = el("span", { className: "recents-run" });
   for (const title of titles) run.append(el("span", { className: "recents-item", text: title }));
+  // 滚动放在内层：外层只负责裁剪和渐隐，内层平移动画才不会盖到左侧图标上。
   const track = el("span", { className: "recents-track" });
-  track.append(run);
+  const marquee = el("span", { className: "recents-marquee" });
+  marquee.append(run);
   if (titles.length > 1) {
     const clone = el("span", { className: "recents-run" });
     for (const title of titles) clone.append(el("span", { className: "recents-item", text: title }));
-    track.append(clone);
-    track.classList.add("is-scrolling");
+    marquee.append(clone);
+    marquee.classList.add("is-scrolling");
   }
+  track.append(marquee);
   trigger.append(icon("clock"), track);
 
   const menu = el("div", { className: "recent-menu", attrs: { role: "menu" } });
@@ -1167,7 +1462,19 @@ function agentSwitcher(route: Route): HTMLElement | null {
   return wrap;
 }
 
+/**
+ * 落地页地址。预览客户端在 workers.dev 上，写不到 pages.dev 的 cookie，
+ * 所以回链用非敏感的 ?ab_paired=1 标记让落地页切到已配对状态；生产仍只靠 cookie。
+ */
+function craftsteadLanding(paired: boolean): string {
+  if (!location.hostname.endsWith(".workers.dev")) return "https://craftstead.app/agent-bridge";
+  const base = "https://develop.craftstead.pages.dev/agent-bridge";
+  return paired ? base + "?ab_paired=1" : base;
+}
+
 function renderTopbar(crumbs: Crumb[]): HTMLElement {
+  // 预览部署在 workers.dev 上，回链也停在预览官网，别把试用的人送去生产。
+  const landing = craftsteadLanding(true);
   const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
   crumbs.forEach((crumb, index) => {
     if (index > 0) nav.append(el("span", { className: "crumb-sep", text: "/" }));
@@ -1207,6 +1514,21 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
       el("span", { className: "brand-mark", text: "AB" }),
       el("span", { className: "brand-name", text: "Agent Bridge" }),
     ]),
+    el(
+      "a",
+      {
+        className: "craftstead-mark",
+        attrs: {
+          href: landing,
+          "aria-label": "Built by Craftstead",
+          title: "Built by Craftstead",
+        },
+      },
+      [
+        el("span", { className: "craftstead-dot", attrs: { "aria-hidden": "true" } }),
+        el("span", { className: "craftstead-name", text: "Craftstead" }),
+      ],
+    ),
     nav,
     right,
   ]);
@@ -1266,6 +1588,8 @@ async function renderRoute(soft = false): Promise<void> {
   const route = parseRoute();
   if (soft && chatResume && chatResumeKey === hashFor(route)) {
     chatResume();
+    // 重连会清空快照；这里补拉一次，分享等依赖全局数据的操作才不会静默失效。
+    if (!snapshot) void ensureSnapshot().catch(() => {});
     return;
   }
   const token = ++renderToken;
@@ -1540,15 +1864,21 @@ function renderDevices(): void {
   for (const item of state.devices) {
     const revoked = item.revokedAt !== null;
     const self = item.deviceId === state.device.deviceId;
+    const label = el("div", { className: "row-main" }, [
+      el("strong", { text: item.name }),
+      el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString()}` }),
+    ]);
     list.append(
       el("li", { className: "device-row" }, [
-        el("div", { className: "row-main" }, [
-          el("strong", { text: item.name }),
-          el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString()}` }),
-        ]),
-        self || revoked
-          ? el("span", { className: "pill", text: revoked ? "已撤销" : "本机" })
-          : el("span", { className: "meta", text: "在 Mac 上撤销" }),
+        label,
+        el("div", { className: "row-actions" }, revoked
+          ? [el("span", { className: "pill", text: "已撤销" })]
+          : self
+            ? [
+              el("span", { className: "pill", text: "本机" }),
+              button("重命名", () => beginRename(item, label), "btn ghost small"),
+            ]
+            : [el("span", { className: "meta", text: "在 Mac 上撤销" })]),
       ]),
     );
   }
@@ -1576,6 +1906,49 @@ function renderDevices(): void {
     ]),
     crumbsFor({ level: "devices" }),
   );
+}
+
+/** 只改当前设备自己的名字，改完同步本地记录，首页列表不用重连就能看到新名字。 */
+function beginRename(item: DeviceSummary, label: HTMLElement): void {
+  const input = el("input", {
+    className: "input",
+    attrs: { type: "text", value: item.name, maxlength: "64" },
+  });
+  const error = el("p", { className: "notice error hidden" });
+  const save = button("保存", () => {
+    const name = input.value.trim();
+    if (!name) {
+      error.textContent = "请输入设备名称";
+      error.classList.remove("hidden");
+      return;
+    }
+    save.disabled = true;
+    cancel.disabled = true;
+    void call<{ ok: boolean }>("device.rename", { deviceId: item.deviceId, name })
+      .then(async () => {
+        item.name = name;
+        const local = connected?.device;
+        if (local?.deviceId === item.deviceId) {
+          local.name = name;
+          await renameDevice(local.relayUrl, local.roomId, name).catch(() => undefined);
+        }
+        renderDevices();
+      })
+      .catch((failure: unknown) => {
+        save.disabled = false;
+        cancel.disabled = false;
+        error.textContent = messageOf(failure);
+        error.classList.remove("hidden");
+      });
+  }, "btn small");
+  const cancel = button("取消", () => renderDevices(), "btn ghost small");
+  label.replaceChildren(
+    input,
+    el("div", { className: "actions" }, [save, cancel]),
+    error,
+  );
+  input.focus();
+  input.select();
 }
 
 function initials(name: string): string {
@@ -1631,6 +2004,12 @@ interface ChatState {
   /** The latest turn was stopped by the user. */
   interrupted: boolean;
   context?: ContextUsage;
+  /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
+  compact?: { pending: boolean; error?: string; note?: string };
+  /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
+  compactSince?: number;
+  /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
+  answers?: Map<string, string[]>;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -1901,6 +2280,102 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const back = backButton(() => navigate({ level: "sessions", appId: route.appId, projectId: route.projectId }));
 
+  const modelButton = el("button", {
+    className: "model-chip",
+    attrs: {
+      type: "button",
+      "aria-label": "当前模型",
+      "aria-expanded": "false",
+      "aria-haspopup": "true",
+    },
+  });
+  modelButton.hidden = true;
+  const modelPop = el("div", { className: "model-pop" });
+  modelPop.hidden = true;
+  const modelWrap = el("div", { className: "model-wrap" }, [modelButton, modelPop]);
+
+  function onModelKey(event: KeyboardEvent): void {
+    if (event.key === "Escape") closeModels();
+  }
+  function onModelOutside(event: Event): void {
+    const target = event.target as Node | null;
+    if (!target) return;
+    if (modelPop.contains(target) || modelButton.contains(target)) return;
+    closeModels();
+  }
+  function closeModels(): void {
+    modelPop.hidden = true;
+    modelButton.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onModelOutside);
+    document.removeEventListener("keydown", onModelKey);
+  }
+
+  const paintModels = (info: SessionModelsResult): void => {
+    const label = info.currentName ?? info.current;
+    if (!label && info.models.length === 0) {
+      modelButton.hidden = true;
+      modelPop.hidden = true;
+      return;
+    }
+    modelButton.hidden = false;
+    modelButton.replaceChildren(
+      el("span", { className: "model-chip-label", text: "模型" }),
+      el("span", { className: "model-chip-value", text: label ?? "未知" }),
+      icon("chevron", "icon model-chev"),
+    );
+    modelButton.title = `当前模型：${label ?? "未知"}`;
+    const rows: HTMLElement[] = [];
+    for (const section of ["main", "overflow"] as const) {
+      const items = info.models.filter((item) => (item.section ?? "main") === section);
+      if (items.length === 0) continue;
+      rows.push(
+        el("p", { className: "model-pop-group", text: section === "main" ? "常用" : "更多" }),
+      );
+      for (const item of items) {
+        const current = item.id === info.current;
+        rows.push(
+          el("div", { className: `model-item${current ? " is-current" : ""}` }, [
+            el("div", { className: "model-item-main" }, [
+              el("span", { className: "model-item-name", text: item.name }),
+              el("span", { className: "model-item-id", text: item.id }),
+            ]),
+            ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+          ]),
+        );
+      }
+    }
+    if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
+    modelPop.replaceChildren(...rows);
+  };
+
+  /** 上一次画出来的模型信息；轮询时没变化就不重绘。 */
+  let modelsKey = "";
+  const loadModels = async (): Promise<void> => {
+    try {
+      const info = await call<SessionModelsResult>("session.models", { sessionId: summary.sessionId });
+      if (token !== renderToken) return;
+      const key = JSON.stringify(info);
+      if (key === modelsKey) return;
+      modelsKey = key;
+      paintModels(info);
+    } catch {
+      // 拿不到模型信息就不显示这块，不影响聊天。
+    }
+  };
+
+  modelButton.addEventListener("click", () => {
+    if (!modelPop.hidden) {
+      closeModels();
+      return;
+    }
+    modelPop.hidden = false;
+    modelButton.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onModelOutside);
+    document.addEventListener("keydown", onModelKey);
+    void loadModels();
+  });
+  void loadModels();
+
   const collapsed = window.matchMedia("(max-width: 720px)").matches;
   const head = el("section", { className: `view-head chat-head${collapsed ? " is-collapsed" : ""}` });
   const headToggle = button("", () => {
@@ -1932,14 +2407,17 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
     ]),
     el("div", { className: "chat-head-side" }, [
+      modelWrap,
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
       railToggle,
       headToggle,
     ]),
   );
 
-  previewRoot = project?.cwd;
-  const rail = createRail(summary.sessionId, summary.appId, project?.cwd);
+  // 工作树会话的项目是原仓库，但远程工具要落在它真正工作的目录。
+  const cwd = summary.cwd ?? project?.cwd;
+  previewRoot = cwd;
+  const rail = createRail(summary.sessionId, summary.appId, cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
   const main = el("main", { className: `main chat${rail.root.classList.contains("is-open") ? " has-rail" : ""}` }, [
@@ -1973,6 +2451,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       if (token !== renderToken) return;
       if (document.visibilityState !== "visible" || state.loading) return;
       void refreshTail(state);
+      void loadModels();
     }, 5_000);
   };
 
@@ -1983,6 +2462,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   chatResumeKey = hashFor(route);
   chatResume = () => {
     void refreshTail(state);
+    void loadModels();
     startPolling();
   };
 
@@ -2457,7 +2937,10 @@ async function loadFileRoots(state: RailState): Promise<void> {
   paintFiles(state, "正在读取项目目录…");
   try {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
-    const result = await call<FsRootsResult>("fs.roots", { root: state.projectRoot });
+    const result = await call<FsRootsResult>("fs.roots", {
+      sessionId: state.sessionId,
+      root: state.projectRoot,
+    });
     files.roots = result.roots;
     files.error = result.roots.length === 0 ? "没有可浏览的项目目录" : null;
   } catch (error) {
@@ -2481,7 +2964,11 @@ async function listFiles(state: RailState, path: string): Promise<void> {
   paintFiles(state, "正在读取…");
   try {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
-    const result = await call<FsListResult>("fs.list", { root: state.projectRoot, path });
+    const result = await call<FsListResult>("fs.list", {
+      sessionId: state.sessionId,
+      root: state.projectRoot,
+      path,
+    });
     files.path = result.path;
     files.parent = result.parent;
     files.entries = result.entries;
@@ -2500,7 +2987,11 @@ async function openFile(state: RailState, path: string): Promise<void> {
   paintFiles(state, "正在读取文件…");
   try {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
-    files.preview = await call<FsReadResult>("fs.read", { root: state.projectRoot, path });
+    files.preview = await call<FsReadResult>("fs.read", {
+      sessionId: state.sessionId,
+      root: state.projectRoot,
+      path,
+    });
     files.error = null;
   } catch (error) {
     files.error = messageOf(error);
@@ -2839,7 +3330,7 @@ async function runShell(state: RailState): Promise<void> {
     if (!state.projectRoot) throw new Error("这个会话没有项目目录");
     const result = await call<ShellExecResult>(
       "shell.exec",
-      { root: state.projectRoot, command, cwd: shell.cwd },
+      { sessionId: state.sessionId, root: state.projectRoot, command, cwd: shell.cwd },
       20_000,
     );
     const run: ShellRun = {
@@ -2985,6 +3476,7 @@ function railTaskMeta(task: RailTask): string {
 
 async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
   if (state.loading) return null;
+  const startedAt = Date.now();
   state.loading = true;
   try {
     const result = await call<MessageListResult>("message.list", {
@@ -3016,10 +3508,23 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     // The adapter's completeness note ("仅主链文本与工具调用摘要…") is noise in the
     // chat view; only surface it when there is nothing else to show.
     state.note.textContent = state.messages.length === 0 ? (result.note ?? "") : "";
-    if (result.context) {
-      state.context = result.context;
-      paintContext(state);
+    let compactChanged = false;
+    // 点击压缩之前发出的轮询可能在压缩请求之后才返回，它看不到 pending，不能据此判定完成。
+    if (state.compactSince === undefined || startedAt >= state.compactSince) {
+      if (result.compact) {
+        state.compact = result.compact.pending
+          ? { pending: true }
+          : { pending: false, error: result.compact.error };
+        compactChanged = true;
+      } else if (state.compact?.pending) {
+        // 先前确认的压缩请求已经不在客户端的待办里：完成或失效，按完成提示。
+        state.compact = { pending: false, note: "已压缩上下文" };
+        state.status.textContent = "客户端已完成上下文压缩";
+        compactChanged = true;
+      }
     }
+    if (result.context) state.context = result.context;
+    if (result.context || compactChanged) paintContext(state);
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
@@ -3119,7 +3624,87 @@ function paintContext(state: ChatState): void {
           el("dd", { text: detail.value }),
         ]))]
       : []),
+    ...(percent >= 50 ? [contextCompactActions(state)] : []),
   );
+}
+
+/** 上下文过半时在弹层里给出压缩入口：客户端能自己压就调用，否则复制命令让用户粘贴。 */
+function contextCompactActions(state: ChatState): HTMLElement {
+  const row = el("div", { className: "context-actions" });
+  const hint = el("p", { className: "context-hint" });
+  if (state.session.canCompact) {
+    const pending = state.compact?.pending === true;
+    const btn = el("button", {
+      className: "context-action",
+      text: pending ? "压缩中…" : "压缩上下文",
+      attrs: { type: "button" },
+    });
+    btn.disabled = pending;
+    if (state.compact?.error) {
+      hint.textContent = state.compact.error;
+      hint.classList.add("is-error");
+    } else if (state.compact?.note) {
+      hint.textContent = state.compact.note;
+    } else {
+      hint.textContent = "由桌面客户端自己压缩，摘要会写回该会话。";
+    }
+    btn.addEventListener("click", () => {
+      void runCompact(state);
+    });
+    row.append(btn, hint);
+    return row;
+  }
+  const btn = el("button", {
+    className: "context-action",
+    text: "复制 /compact",
+    attrs: { type: "button" },
+  });
+  hint.textContent = "浏览器无法直接操作客户端输入框；复制后粘贴到输入框发送。";
+  btn.addEventListener("click", () => {
+    if (!navigator.clipboard) {
+      hint.textContent = "当前页面不能写剪贴板，请在客户端输入框手动输入 /compact";
+      hint.classList.add("is-error");
+      return;
+    }
+    void navigator.clipboard.writeText("/compact").then(
+      () => {
+        btn.textContent = "已复制";
+        setTimeout(() => {
+          btn.textContent = "复制 /compact";
+        }, 1_500);
+      },
+      () => {
+        hint.textContent = "复制失败，请在客户端输入框手动输入 /compact";
+        hint.classList.add("is-error");
+      },
+    );
+  });
+  row.append(btn, hint);
+  return row;
+}
+
+async function runCompact(state: ChatState): Promise<void> {
+  if (state.compact?.pending) return;
+  state.compactSince = Date.now();
+  state.compact = { pending: true };
+  paintContext(state);
+  try {
+    const result = await call<SessionCompactResult>(
+      "session.compact",
+      { sessionId: state.session.sessionId },
+      130_000,
+    );
+    if (result.compacted) {
+      state.compact = { pending: false, note: result.detail ?? "已压缩上下文" };
+      state.status.textContent = result.detail ?? "已在客户端压缩上下文";
+      void refreshTail(state);
+    } else {
+      state.compact = { pending: false, error: result.detail ?? "客户端没有执行压缩" };
+    }
+  } catch (error) {
+    state.compact = { pending: false, error: messageOf(error) };
+  }
+  paintContext(state);
 }
 
 function queuedBubble(item: QueuedMessage): HTMLElement {
@@ -3149,10 +3734,229 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     bubble.append(
       block.type === "tool"
         ? el("div", { className: "message-tool", text: block.truncated ? `${block.text}\n…（已截断）` : block.text })
-        : markdownBlock(block.text, block.truncated),
+        : block.type === "next-step"
+          ? nextStepBox(block, null)
+          : block.type === "ask"
+            ? askBox(block)
+            : markdownBlock(block.text, block.truncated),
     );
   }
   return bubble;
+}
+
+/** 提问块里的一个问题在作答记录里的键；同一块里的多个问题各自独立。 */
+function askKey(block: MessageBlock, question: MessageQuestion): string {
+  return `${block.text}｜${question.question}`;
+}
+
+/** 桌面端弹出的结构化提问：点选后把选项文本作为一条消息发给会话。 */
+function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElement {
+  const box = el("div", { className: "message-ask" });
+  const questions = block.questions ?? [];
+  if (questions.length === 0) {
+    box.append(el("p", { className: "ask-question-text", text: block.text }));
+    return box;
+  }
+  const answered = questions
+    .map((question) => state?.answers?.get(askKey(block, question)))
+    .filter((labels): labels is string[] => labels !== undefined);
+  // 提问在等答案时回合仍在跑；回合结束后的旧提问不能再点，否则会当新消息重发。
+  const canAnswer = state !== null && state.session.canSend && state.busy;
+  for (const question of questions) {
+    const sent = state?.answers?.get(askKey(block, question));
+    const selectable = canAnswer && sent === undefined;
+    const card = el("div", { className: "ask-question" });
+    card.append(
+      el("div", { className: "ask-question-head" }, [
+        ...(question.header ? [el("span", { className: "ask-header", text: question.header })] : []),
+        el("span", { className: "ask-question-text", text: question.question }),
+        ...(question.multiSelect ? [el("span", { className: "ask-multi", text: "多选" })] : []),
+      ]),
+    );
+    if (question.options.length > 0) {
+      const row = el("div", { className: "ask-options" });
+      const picked = new Set<string>();
+      const choices: HTMLButtonElement[] = [];
+      const submit = selectable && question.multiSelect
+        ? el("button", { className: "ask-submit", text: "提交选择", attrs: { type: "button" } })
+        : null;
+      for (const option of question.options) {
+        const children = [
+          el("span", { className: "ask-option-label", text: option.label }),
+          ...(option.description
+            ? [el("span", { className: "ask-option-desc", text: option.description })]
+            : []),
+        ];
+        if (!selectable) {
+          row.append(el("div", { className: "ask-option" }, children));
+          continue;
+        }
+        const choice = el(
+          "button",
+          {
+            className: "ask-option is-selectable",
+            attrs: { type: "button", "aria-pressed": "false" },
+          },
+          children,
+        );
+        choice.addEventListener("click", () => {
+          if (!question.multiSelect) {
+            void submitAskAnswer(state, askKey(block, question), [option.label], choices);
+            return;
+          }
+          if (picked.has(option.label)) picked.delete(option.label);
+          else picked.add(option.label);
+          choice.setAttribute("aria-pressed", picked.has(option.label) ? "true" : "false");
+          if (submit) submit.disabled = picked.size === 0;
+        });
+        choices.push(choice);
+        row.append(choice);
+      }
+      if (submit) {
+        submit.disabled = true;
+        submit.addEventListener("click", () => {
+          // 按选项原本的顺序发出，避免跟点选顺序绑在一起。
+          const labels = question.options
+            .map((option) => option.label)
+            .filter((label) => picked.has(label));
+          if (labels.length === 0) return;
+          void submitAskAnswer(state, askKey(block, question), labels, [...choices, submit]);
+        });
+        row.append(submit);
+      }
+      card.append(row);
+    }
+    box.append(card);
+  }
+  box.append(
+    el("p", {
+      className: "ask-note",
+      text:
+        answered.length > 0
+          ? `已发送：${answered.flat().join("、")}`
+          : canAnswer
+            ? "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
+            : "请在桌面端回答这个提问",
+    }),
+  );
+  return box;
+}
+
+/** 选项就是一句话：原样发出去，桌面端的提问对话框仍由桌面收尾。 */
+async function submitAskAnswer(
+  state: ChatState | null,
+  key: string,
+  labels: string[],
+  buttons: HTMLButtonElement[],
+): Promise<void> {
+  if (!state) return;
+  const text = labels.join("、");
+  for (const item of buttons) item.disabled = true;
+  state.status.classList.remove("error");
+  state.status.textContent = "正在发送选择…";
+  try {
+    const result = await call<MessageSendResult>("message.send", {
+      sessionId: state.session.sessionId,
+      text,
+    }, 60_000);
+    if (!result.accepted) {
+      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.classList.add("error");
+      for (const item of buttons) item.disabled = false;
+      return;
+    }
+    (state.answers ??= new Map<string, string[]>()).set(key, labels);
+    state.queued.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      match: text,
+      display: text,
+      at: Date.now(),
+      held: !result.delivered && (result.detail ?? "").includes("排队"),
+    });
+    state.busy = true;
+    state.interrupted = false;
+    renderMessages(state);
+    state.status.textContent = result.delivered
+      ? "已发送选择"
+      : (result.detail ?? "已提交，等待桌面执行");
+    window.setTimeout(() => {
+      void refreshTail(state);
+    }, 800);
+  } catch (error) {
+    state.status.textContent = messageOf(error);
+    state.status.classList.add("error");
+    for (const item of buttons) item.disabled = false;
+  }
+}
+
+/** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
+function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement {
+  const box = el("div", { className: "next-step" });
+  box.append(el("p", { className: "next-step-ask", text: block.ask ?? block.text }));
+  const actions = block.actions ?? [];
+  if (!state || actions.length === 0) return box;
+  const row = el("div", { className: "next-step-actions" });
+  for (const action of actions) {
+    const btn = el("button", {
+      className: "next-step-btn",
+      attrs: {
+        type: "button",
+        ...(action.action ? { title: "桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步" } : {}),
+      },
+      text: action.label,
+    });
+    btn.addEventListener("click", () => {
+      const buttons = [...row.querySelectorAll<HTMLButtonElement>("button")];
+      for (const item of buttons) item.disabled = true;
+      void sendNextStep(state, action, buttons);
+    });
+    row.append(btn);
+  }
+  box.append(row);
+  return box;
+}
+
+/** 回复型按钮就是一句话，原样发出；应用动作（合并、提交…）只能作为指令发过去。 */
+async function sendNextStep(
+  state: ChatState,
+  action: NextStepAction,
+  buttons: HTMLButtonElement[],
+): Promise<void> {
+  const text = action.action ? `点击了「${action.label}」，请执行这一步。` : action.label;
+  state.status.classList.remove("error");
+  state.status.textContent = "正在发送…";
+  try {
+    const result = await call<MessageSendResult>("message.send", {
+      sessionId: state.session.sessionId,
+      text,
+    }, 60_000);
+    if (!result.accepted) {
+      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.classList.add("error");
+      for (const item of buttons) item.disabled = false;
+      return;
+    }
+    state.queued.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      match: text,
+      display: text,
+      at: Date.now(),
+      held: !result.delivered && (result.detail ?? "").includes("排队"),
+    });
+    state.busy = true;
+    state.interrupted = false;
+    renderMessages(state);
+    state.status.textContent = result.delivered
+      ? "已投递到桌面会话"
+      : (result.detail ?? "已提交，等待桌面执行");
+    window.setTimeout(() => {
+      void refreshTail(state);
+    }, 800);
+  } catch (error) {
+    state.status.textContent = messageOf(error);
+    state.status.classList.add("error");
+    for (const item of buttons) item.disabled = false;
+  }
 }
 
 // ---- local files referenced by a transcript ----
@@ -3368,9 +4172,16 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
   return share;
 }
 
-function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]): HTMLElement {
+function assistantTurn(
+  session: SessionSummary | null,
+  messages: MessageRecord[],
+  state: ChatState | null = null,
+  /** 最新一回合才有；提问在等答案时回合是忙的，不能和下一步按钮共用同一个门槛。 */
+  askState: ChatState | null = null,
+): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: string[] = [];
+  const nextSteps: MessageBlock[] = [];
   let peer = false;
   let lastText: MessageRecord | undefined;
   for (const message of messages) {
@@ -3379,6 +4190,10 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     for (const block of message.blocks) {
       if (block.type === "text") {
         hasText = true;
+      } else if (block.type === "next-step") {
+        nextSteps.push(block);
+      } else if (block.type === "ask") {
+        continue;
       } else {
         steps.push(block.truncated ? `${block.text}\n…（已截断）` : block.text);
       }
@@ -3398,6 +4213,10 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     for (const block of message.blocks) {
       if (block.type === "text") {
         bubble.append(markdownBlock(block.text, block.truncated));
+      } else if (block.type === "next-step") {
+        continue;
+      } else if (block.type === "ask") {
+        bubble.append(askBox(block, askState));
       } else if (!folded) {
         bubble.append(processFold(steps));
         folded = true;
@@ -3405,6 +4224,9 @@ function assistantTurn(session: SessionSummary | null, messages: MessageRecord[]
     }
   }
   if (!folded) bubble.append(processFold(steps));
+  // 只有最新一回合的盒子可以点；历史回合保留文字说明。
+  const latest = nextSteps[nextSteps.length - 1];
+  if (latest) bubble.append(nextStepBox(latest, state));
   return bubble;
 }
 
@@ -3460,9 +4282,19 @@ function renderMessages(state: ChatState): void {
     return;
   }
   let turn: MessageRecord[] = [];
+  const lastMessage = state.messages[state.messages.length - 1];
+  const canAct = state.session.canSend && !state.busy && !state.interrupted && state.queued.length === 0;
   const flush = (): void => {
     if (turn.length === 0) return;
-    list.append(assistantTurn(state.session, turn));
+    const isLastTurn = turn[turn.length - 1] === lastMessage;
+    list.append(
+      assistantTurn(
+        state.session,
+        turn,
+        isLastTurn && canAct ? state : null,
+        isLastTurn ? state : null,
+      ),
+    );
     turn = [];
   };
   for (const message of state.messages) {
@@ -3574,11 +4406,22 @@ interface SharePick {
 }
 
 async function openShare(source: SessionSummary, message: MessageRecord): Promise<void> {
-  if (!snapshot) return;
-  const data: Snapshot = snapshot;
+  // 重连会清空快照；点分享时补拉一次，别让按钮静默失效。
+  let data: Snapshot;
+  if (snapshot) {
+    data = snapshot;
+  } else {
+    try {
+      data = await ensureSnapshot();
+    } catch (error) {
+      flashNotice(`读取会话列表失败：${messageOf(error)}`);
+      return;
+    }
+  }
   const exclude = new Set([source.sessionId]);
   const pick: SharePick = { appId: null, projectId: null, sessionId: null };
   let prepared: TransferPrepareResult | null = null;
+  let shareEditor: HTMLTextAreaElement | null = null;
   let sending = false;
   let done = false;
 
@@ -3679,6 +4522,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   async function render(): Promise<void> {
     renderSteps();
     body.replaceChildren();
+    shareEditor = null;
     note.textContent = "";
     status.classList.remove("error");
     status.textContent = "";
@@ -3771,15 +4615,21 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
     const target = sessionOf(pick.sessionId);
     note.textContent = `目标：${appName(pick.appId)} / ${projectName(pick.projectId)} / ${target?.title ?? "会话"}`;
-    const preview = el("pre", { className: "preview", text: "正在生成预览…" });
-    body.append(preview);
-    await prepare(preview);
+    const editor = el("textarea", {
+      className: "preview preview-editor",
+      attrs: { spellcheck: "false", "aria-label": "待发送内容，可直接编辑", placeholder: "正在生成预览…" },
+    });
+    editor.readOnly = true;
+    shareEditor = editor;
+    body.append(editor);
+    await prepare(editor);
   }
 
-  async function prepare(preview: HTMLElement): Promise<void> {
+  async function prepare(editor: HTMLTextAreaElement): Promise<void> {
     prepared = null;
     if (!pick.sessionId) return;
     send.disabled = true;
+    editor.readOnly = true;
     status.classList.remove("error");
     status.textContent = "正在校验目标会话…";
     try {
@@ -3792,12 +4642,26 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
         },
         60_000,
       );
-      preview.textContent = prepared.text;
-      status.textContent = `${prepared.textLength} 字符 · 发送内容与预览完全一致${prepared.note ? ` · ${prepared.note}` : ""}`;
-      send.disabled = !prepared.target.canSend || sending || done;
-      if (!prepared.target.canSend) status.classList.add("error");
+      editor.value = prepared.text;
+      editor.readOnly = false;
+      const sync = (): void => {
+        const text = editor.value;
+        const tooLong = text.length > MAX_TRANSFER_CHARS;
+        const blocked = !prepared?.target.canSend;
+        // 超长和空内容在本地就拦住：服务端拒绝时会清掉 prepared，编辑内容也会一起丢。
+        status.textContent = !text.trim()
+          ? "内容为空，无法发送"
+          : tooLong
+            ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
+            : `${text.length} 字符 · ${text === prepared?.text ? "发送内容与预览一致" : "已编辑，将发送当前内容"}${prepared?.note ? ` · ${prepared.note}` : ""}`;
+        status.classList.toggle("error", tooLong || !text.trim() || blocked);
+        send.disabled = blocked || sending || done || tooLong || !text.trim();
+      };
+      editor.addEventListener("input", sync);
+      sync();
     } catch (error) {
-      preview.textContent = "无法生成预览";
+      editor.placeholder = "无法生成预览";
+      editor.readOnly = true;
       status.classList.add("error");
       status.textContent = messageOf(error);
     }
@@ -3805,14 +4669,23 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
   async function commit(): Promise<void> {
     if (!prepared || sending || done || !prepared.target.canSend) return;
+    const text = shareEditor?.value ?? prepared.text;
+    if (!text.trim() || text.length > MAX_TRANSFER_CHARS) {
+      status.classList.add("error");
+      status.textContent = text.trim()
+        ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
+        : "消息不能为空";
+      return;
+    }
     sending = true;
     send.disabled = true;
+    if (shareEditor) shareEditor.readOnly = true;
     status.classList.remove("error");
     status.textContent = "正在发送…";
     try {
       const result = await call<TransferCommitResult>(
         "transfer.commit",
-        { transferId: prepared.transferId },
+        text === prepared.text ? { transferId: prepared.transferId } : { transferId: prepared.transferId, text },
         60_000,
       );
       done = true;
@@ -3826,6 +4699,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
       back.classList.add("hidden");
     } catch (error) {
       prepared = null;
+      if (shareEditor) shareEditor.readOnly = false;
       status.classList.add("error");
       status.textContent = `${messageOf(error)}；重新选择会话可再试`;
       send.disabled = true;
