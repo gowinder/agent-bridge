@@ -17,6 +17,7 @@ import type {
   MessageAttachment,
   MessageBlock,
   MessageListResult,
+  MessageQuestion,
   MessageRecord,
   MessageSendResult,
   Method,
@@ -2007,6 +2008,8 @@ interface ChatState {
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
   compactSince?: number;
+  /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
+  answers?: Map<string, string[]>;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -3738,15 +3741,27 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
   return bubble;
 }
 
-/** 桌面端弹出的结构化提问：展示问题与选项，回答仍然在桌面里做。 */
-function askBox(block: MessageBlock): HTMLElement {
+/** 提问块里的一个问题在作答记录里的键；同一块里的多个问题各自独立。 */
+function askKey(block: MessageBlock, question: MessageQuestion): string {
+  return `${block.text}｜${question.question}`;
+}
+
+/** 桌面端弹出的结构化提问：点选后把选项文本作为一条消息发给会话。 */
+function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElement {
   const box = el("div", { className: "message-ask" });
   const questions = block.questions ?? [];
   if (questions.length === 0) {
     box.append(el("p", { className: "ask-question-text", text: block.text }));
     return box;
   }
+  const answered = questions
+    .map((question) => state?.answers?.get(askKey(block, question)))
+    .filter((labels): labels is string[] => labels !== undefined);
+  // 提问在等答案时回合仍在跑；回合结束后的旧提问不能再点，否则会当新消息重发。
+  const canAnswer = state !== null && state.session.canSend && state.busy;
   for (const question of questions) {
+    const sent = state?.answers?.get(askKey(block, question));
+    const selectable = canAnswer && sent === undefined;
     const card = el("div", { className: "ask-question" });
     card.append(
       el("div", { className: "ask-question-head" }, [
@@ -3756,25 +3771,119 @@ function askBox(block: MessageBlock): HTMLElement {
       ]),
     );
     if (question.options.length > 0) {
-      card.append(
-        el(
-          "div",
-          { className: "ask-options" },
-          question.options.map((option) =>
-            el("div", { className: "ask-option" }, [
-              el("span", { className: "ask-option-label", text: option.label }),
-              ...(option.description
-                ? [el("span", { className: "ask-option-desc", text: option.description })]
-                : []),
-            ]),
-          ),
-        ),
-      );
+      const row = el("div", { className: "ask-options" });
+      const picked = new Set<string>();
+      const choices: HTMLButtonElement[] = [];
+      const submit = selectable && question.multiSelect
+        ? el("button", { className: "ask-submit", text: "提交选择", attrs: { type: "button" } })
+        : null;
+      for (const option of question.options) {
+        const children = [
+          el("span", { className: "ask-option-label", text: option.label }),
+          ...(option.description
+            ? [el("span", { className: "ask-option-desc", text: option.description })]
+            : []),
+        ];
+        if (!selectable) {
+          row.append(el("div", { className: "ask-option" }, children));
+          continue;
+        }
+        const choice = el(
+          "button",
+          {
+            className: "ask-option is-selectable",
+            attrs: { type: "button", "aria-pressed": "false" },
+          },
+          children,
+        );
+        choice.addEventListener("click", () => {
+          if (!question.multiSelect) {
+            void submitAskAnswer(state, askKey(block, question), [option.label], choices);
+            return;
+          }
+          if (picked.has(option.label)) picked.delete(option.label);
+          else picked.add(option.label);
+          choice.setAttribute("aria-pressed", picked.has(option.label) ? "true" : "false");
+          if (submit) submit.disabled = picked.size === 0;
+        });
+        choices.push(choice);
+        row.append(choice);
+      }
+      if (submit) {
+        submit.disabled = true;
+        submit.addEventListener("click", () => {
+          // 按选项原本的顺序发出，避免跟点选顺序绑在一起。
+          const labels = question.options
+            .map((option) => option.label)
+            .filter((label) => picked.has(label));
+          if (labels.length === 0) return;
+          void submitAskAnswer(state, askKey(block, question), labels, [...choices, submit]);
+        });
+        row.append(submit);
+      }
+      card.append(row);
     }
     box.append(card);
   }
-  box.append(el("p", { className: "ask-note", text: "请在桌面端回答这个提问" }));
+  box.append(
+    el("p", {
+      className: "ask-note",
+      text:
+        answered.length > 0
+          ? `已发送：${answered.flat().join("、")}`
+          : canAnswer
+            ? "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
+            : "请在桌面端回答这个提问",
+    }),
+  );
   return box;
+}
+
+/** 选项就是一句话：原样发出去，桌面端的提问对话框仍由桌面收尾。 */
+async function submitAskAnswer(
+  state: ChatState | null,
+  key: string,
+  labels: string[],
+  buttons: HTMLButtonElement[],
+): Promise<void> {
+  if (!state) return;
+  const text = labels.join("、");
+  for (const item of buttons) item.disabled = true;
+  state.status.classList.remove("error");
+  state.status.textContent = "正在发送选择…";
+  try {
+    const result = await call<MessageSendResult>("message.send", {
+      sessionId: state.session.sessionId,
+      text,
+    }, 60_000);
+    if (!result.accepted) {
+      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.classList.add("error");
+      for (const item of buttons) item.disabled = false;
+      return;
+    }
+    (state.answers ??= new Map<string, string[]>()).set(key, labels);
+    state.queued.push({
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      match: text,
+      display: text,
+      at: Date.now(),
+      held: !result.delivered && (result.detail ?? "").includes("排队"),
+    });
+    state.busy = true;
+    state.interrupted = false;
+    renderMessages(state);
+    state.status.textContent = result.delivered
+      ? "已发送选择"
+      : (result.detail ?? "已提交，等待桌面执行");
+    window.setTimeout(() => {
+      void refreshTail(state);
+    }, 800);
+  } catch (error) {
+    state.status.textContent = messageOf(error);
+    state.status.classList.add("error");
+    for (const item of buttons) item.disabled = false;
+  }
 }
 
 /** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
@@ -3875,6 +3984,8 @@ function assistantTurn(
   session: SessionSummary | null,
   messages: MessageRecord[],
   state: ChatState | null = null,
+  /** 最新一回合才有；提问在等答案时回合是忙的，不能和下一步按钮共用同一个门槛。 */
+  askState: ChatState | null = null,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: string[] = [];
@@ -3913,7 +4024,7 @@ function assistantTurn(
       } else if (block.type === "next-step") {
         continue;
       } else if (block.type === "ask") {
-        bubble.append(askBox(block));
+        bubble.append(askBox(block, askState));
       } else if (!folded) {
         bubble.append(processFold(steps));
         folded = true;
@@ -3984,7 +4095,14 @@ function renderMessages(state: ChatState): void {
   const flush = (): void => {
     if (turn.length === 0) return;
     const isLastTurn = turn[turn.length - 1] === lastMessage;
-    list.append(assistantTurn(state.session, turn, isLastTurn && canAct ? state : null));
+    list.append(
+      assistantTurn(
+        state.session,
+        turn,
+        isLastTurn && canAct ? state : null,
+        isLastTurn ? state : null,
+      ),
+    );
     turn = [];
   };
   for (const message of state.messages) {
