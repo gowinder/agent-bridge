@@ -2293,6 +2293,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const modelPop = el("div", { className: "model-pop" });
   modelPop.hidden = true;
   const modelWrap = el("div", { className: "model-wrap" }, [modelButton, modelPop]);
+  // 模型选择属于输入区：放在输入框工具栏里，和上下文用量同一行。
+  contextButton.before(modelWrap);
 
   function onModelKey(event: KeyboardEvent): void {
     if (event.key === "Escape") closeModels();
@@ -2407,7 +2409,6 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
     ]),
     el("div", { className: "chat-head-side" }, [
-      modelWrap,
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
       railToggle,
       headToggle,
