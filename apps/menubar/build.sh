@@ -17,7 +17,8 @@ contents="$app/Contents"
 version="$(node -p "require('$repo/package.json').version" 2>/dev/null \
   || sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' "$repo/package.json" | head -1)"
 short_version="${version%%-*}"
-build_number="$(git -C "$repo" rev-list --count HEAD 2>/dev/null || echo 1)"
+# CFBundleVersion 与 CFBundleShortVersionString 同源，都是根 package.json 的 x.y.z。
+build_number="$short_version"
 
 rm -rf "$app"
 mkdir -p "$contents/MacOS" "$contents/Resources"
