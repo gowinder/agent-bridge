@@ -25,6 +25,9 @@ run_worker_first = ["/v1/*"]
 
 [env.preview]
 name = "agent-bridge-preview"
+# routes 是可继承键：不显式清空，preview 部署会把这台 Worker 也绑到生产域名上。
+routes = []
+workers_dev = true
 
 [env.preview.durable_objects]
 bindings = [{ name = "ROOMS", class_name = "Room" }]
