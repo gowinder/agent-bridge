@@ -1991,10 +1991,15 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     modelPop.replaceChildren(...rows);
   };
 
+  /** 上一次画出来的模型信息；轮询时没变化就不重绘。 */
+  let modelsKey = "";
   const loadModels = async (): Promise<void> => {
     try {
       const info = await call<SessionModelsResult>("session.models", { sessionId: summary.sessionId });
       if (token !== renderToken) return;
+      const key = JSON.stringify(info);
+      if (key === modelsKey) return;
+      modelsKey = key;
       paintModels(info);
     } catch {
       // 拿不到模型信息就不显示这块，不影响聊天。
@@ -2087,6 +2092,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       if (token !== renderToken) return;
       if (document.visibilityState !== "visible" || state.loading) return;
       void refreshTail(state);
+      void loadModels();
     }, 5_000);
   };
 
@@ -2097,6 +2103,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   chatResumeKey = hashFor(route);
   chatResume = () => {
     void refreshTail(state);
+    void loadModels();
     startPolling();
   };
 
