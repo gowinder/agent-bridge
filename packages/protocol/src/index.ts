@@ -103,6 +103,7 @@ export const METHODS = [
   "session.get",
   "session.rail",
   "session.models",
+  "session.compact",
   "task.messages",
   "message.list",
   "session.subscribe",
@@ -411,6 +412,8 @@ export interface SessionSummary {
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;
+  /** The client exposes a native "compact this conversation" action to the bridge. */
+  canCompact?: boolean;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
@@ -513,12 +516,20 @@ export interface MessageListResult {
   busy?: boolean;
   /** The latest turn was stopped by the user before it finished. */
   interrupted?: boolean;
+  /** An on-demand compaction that is still running in the client, or how it failed. */
+  compact?: { pending: boolean; error?: string };
 }
 
 export interface MessageSendResult {
   accepted: boolean;
   /** True only when the target confirmed delivery. */
   delivered: boolean;
+  detail?: string;
+}
+
+/** Outcome of asking a client to compact the conversation on demand. */
+export interface SessionCompactResult {
+  compacted: boolean;
   detail?: string;
 }
 

@@ -25,6 +25,7 @@ import type {
   ProjectInfo,
   RailRow,
   SessionModelsResult,
+  SessionCompactResult,
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
@@ -37,14 +38,18 @@ const IPC_SOCKET = join(CODEX_DIR, "ipc", "ipc.sock");
 const MAX_BLOCK_CHARS = 4_000;
 const MAX_SESSIONS = 500;
 const SEND_WAIT_MS = 8_000;
+/** 只等这么久；压缩本身可能更久，确认请求已发出就返回，避免占住设备通道。 */
+const COMPACT_WAIT_MS = 5_000;
 const DISCOVERY_WAIT_MS = 15_000;
 const SEND_TIMEOUT_MS = 180_000;
+const COMPACT_TIMEOUT_MS = 120_000;
 const UNSET_CLIENT_ID = "00000000-0000-0000-0000-000000000000";
 
 /** Wire versions expected by Codex desktop IPC handlers (from ChatGPT app bundle). */
 const IPC_METHOD_VERSIONS: Record<string, number> = {
   "thread-owner-discovery": 1,
   "thread-follower-start-turn": 2,
+  "thread-follower-compact-thread": 1,
 };
 
 function frameVersion(method: string, hostId: string | undefined): number {
@@ -481,6 +486,8 @@ export class CodexAdapter implements SessionAdapter {
   private rolloutCache = new Map<string, { path: string; compressed: boolean }>();
   private settingsCache = new Map<string, { mtimeMs: number; size: number; settings: ThreadSettings | null }>();
   private busyTail = new Map<string, BusyTail>();
+  /** 已确认提交、但客户端还没回复的压缩请求；跟随 message.list 一起上报。 */
+  private compactStates = new Map<string, { pending: boolean; error?: string }>();
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
@@ -543,6 +550,7 @@ export class CodexAdapter implements SessionAdapter {
         ...(recent && this.threadBusy(thread) ? { busy: true } : {}),
         canSend: ipc,
         sendBlockedReason: ipc ? undefined : "Codex 桌面未运行（未找到本地 IPC 通道）",
+        canCompact: ipc,
       };
     });
   }
@@ -662,6 +670,8 @@ export class CodexAdapter implements SessionAdapter {
     if (parsed.context) result.context = parsed.context;
     if (parsed.busy) result.busy = true;
     if (parsed.interrupted) result.interrupted = true;
+    const compact = this.compactStates.get(thread.id);
+    if (compact) result.compact = compact;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
   }
@@ -813,37 +823,11 @@ export class CodexAdapter implements SessionAdapter {
   async send(sessionId: string, text: string): Promise<MessageSendResult> {
     const threadId = String(sessionId).slice(this.key.length + 1);
     if (!this.thread(threadId)) throw new RpcError("not_found", "未知线程");
-    if (!existsSync(IPC_SOCKET)) {
-      throw new RpcError("adapter_unavailable", "Codex 桌面未运行（未找到本地 IPC 通道）");
-    }
 
-    const client = await IpcClient.connect().catch(() => {
-      throw new RpcError(
-        "adapter_unavailable",
-        "无法连接 Codex 本地 IPC 通道（Codex 桌面可能未在运行）",
-      );
-    });
+    const client = await this.desktopClient();
     try {
       await client.initialize();
-
-      const discovery = await client.request({
-        method: "thread-owner-discovery",
-        params: { hostId: "local", conversationId: threadId },
-        timeoutMs: DISCOVERY_WAIT_MS,
-      });
-      const owner = discovery["handledByClientId"];
-      if (discovery["resultType"] !== "success" || typeof owner !== "string") {
-        if (discovery["error"] === "no-client-found") {
-          throw new RpcError(
-            "adapter_unavailable",
-            "该线程未在 Codex 桌面中打开；先在桌面打开该线程再发送",
-          );
-        }
-        throw new RpcError(
-          "adapter_unavailable",
-          `无法定位承接该线程的 Codex 桌面客户端（${String(discovery["error"] ?? "unknown")}）`,
-        );
-      }
+      const owner = await this.threadOwner(client, threadId, "发送");
 
       const sendPromise = client.request({
         method: "thread-follower-start-turn",
@@ -892,6 +876,110 @@ export class CodexAdapter implements SessionAdapter {
       }
       throw error;
     }
+  }
+
+  /**
+   * 让 Codex 桌面自己压缩线程上下文。桌面端的 IPC 处理器直接调用客户端本地的
+   * compactThread，所以这里只负责定位承接线程的客户端并转发请求。
+   */
+  async compact(sessionId: string): Promise<SessionCompactResult> {
+    const threadId = String(sessionId).slice(this.key.length + 1);
+    if (!this.thread(threadId)) throw new RpcError("not_found", "未知线程");
+    // 同一线程一次只跑一个压缩，重复点击不再向桌面发第二个请求。
+    if (this.compactStates.get(threadId)?.pending) {
+      return { compacted: true, detail: "已有压缩请求在执行，稍后刷新查看" };
+    }
+
+    const client = await this.desktopClient();
+    try {
+      await client.initialize();
+      const owner = await this.threadOwner(client, threadId, "压缩");
+      const compactPromise = client.request({
+        method: "thread-follower-compact-thread",
+        targetClientId: owner,
+        timeoutMs: COMPACT_TIMEOUT_MS,
+        params: { conversationId: threadId },
+      });
+      // 压缩可能要几十秒，不能一直占着设备通道；请求发出去后先把连接留给结果。
+      // 结果晚于确认到达时就记在线程上，跟随 message.list 一起上报给网页。
+      compactPromise.then(
+        (response) => {
+          if (response["resultType"] === "success") {
+            this.compactStates.delete(threadId);
+          } else {
+            this.compactStates.set(threadId, {
+              pending: false,
+              error: `Codex 拒绝压缩：${String(response["error"] ?? response["resultType"] ?? "unknown")}`,
+            });
+          }
+          client.close();
+        },
+        (error: unknown) => {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.compactStates.set(threadId, { pending: false, error: `Codex 桌面未响应（${reason}）` });
+          client.close();
+        },
+      );
+      this.compactStates.set(threadId, { pending: true });
+      const early = await Promise.race([
+        compactPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), COMPACT_WAIT_MS)),
+      ]);
+      if (early === null) {
+        return { compacted: true, detail: "已请求 Codex 压缩上下文，仍在执行；稍后刷新查看" };
+      }
+      if (early["resultType"] !== "success") {
+        this.compactStates.delete(threadId);
+        throw new RpcError(
+          "adapter_unavailable",
+          `Codex 拒绝压缩：${String(early["error"] ?? early["resultType"] ?? "unknown")}`,
+        );
+      }
+      return { compacted: true };
+    } catch (error) {
+      this.compactStates.delete(threadId);
+      client.close();
+      if (
+        error instanceof Error &&
+        (error.message === "IPC 请求超时" || error.message === "IPC 连接已关闭")
+      ) {
+        throw new RpcError("adapter_unavailable", `Codex 桌面未响应（${error.message}）`);
+      }
+      throw error;
+    }
+  }
+
+  private async desktopClient(): Promise<IpcClient> {
+    if (!existsSync(IPC_SOCKET)) {
+      throw new RpcError("adapter_unavailable", "Codex 桌面未运行（未找到本地 IPC 通道）");
+    }
+    return IpcClient.connect().catch(() => {
+      throw new RpcError(
+        "adapter_unavailable",
+        "无法连接 Codex 本地 IPC 通道（Codex 桌面可能未在运行）",
+      );
+    });
+  }
+
+  /** 找到承接线程的桌面客户端；找不到时给出让用户下一步怎么做的提示。 */
+  private async threadOwner(client: IpcClient, threadId: string, action: string): Promise<string> {
+    const discovery = await client.request({
+      method: "thread-owner-discovery",
+      params: { hostId: "local", conversationId: threadId },
+      timeoutMs: DISCOVERY_WAIT_MS,
+    });
+    const owner = discovery["handledByClientId"];
+    if (discovery["resultType"] === "success" && typeof owner === "string") return owner;
+    if (discovery["error"] === "no-client-found") {
+      throw new RpcError(
+        "adapter_unavailable",
+        `该线程未在 Codex 桌面中打开；先在桌面打开该线程再${action}`,
+      );
+    }
+    throw new RpcError(
+      "adapter_unavailable",
+      `无法定位承接该线程的 Codex 桌面客户端（${String(discovery["error"] ?? "unknown")}）`,
+    );
   }
 
   private projectIdFor(cwd: string | null): string {

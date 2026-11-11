@@ -25,6 +25,7 @@ import type {
   ProjectListResult,
   RailRow,
   RailTask,
+  SessionCompactResult,
   SessionListResult,
   SessionModelsResult,
   SessionRailResult,
@@ -1979,6 +1980,10 @@ interface ChatState {
   /** The latest turn was stopped by the user. */
   interrupted: boolean;
   context?: ContextUsage;
+  /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
+  compact?: { pending: boolean; error?: string; note?: string };
+  /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
+  compactSince?: number;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -3442,6 +3447,7 @@ function railTaskMeta(task: RailTask): string {
 
 async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
   if (state.loading) return null;
+  const startedAt = Date.now();
   state.loading = true;
   try {
     const result = await call<MessageListResult>("message.list", {
@@ -3473,10 +3479,23 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     // The adapter's completeness note ("仅主链文本与工具调用摘要…") is noise in the
     // chat view; only surface it when there is nothing else to show.
     state.note.textContent = state.messages.length === 0 ? (result.note ?? "") : "";
-    if (result.context) {
-      state.context = result.context;
-      paintContext(state);
+    let compactChanged = false;
+    // 点击压缩之前发出的轮询可能在压缩请求之后才返回，它看不到 pending，不能据此判定完成。
+    if (state.compactSince === undefined || startedAt >= state.compactSince) {
+      if (result.compact) {
+        state.compact = result.compact.pending
+          ? { pending: true }
+          : { pending: false, error: result.compact.error };
+        compactChanged = true;
+      } else if (state.compact?.pending) {
+        // 先前确认的压缩请求已经不在客户端的待办里：完成或失效，按完成提示。
+        state.compact = { pending: false, note: "已压缩上下文" };
+        state.status.textContent = "客户端已完成上下文压缩";
+        compactChanged = true;
+      }
     }
+    if (result.context) state.context = result.context;
+    if (result.context || compactChanged) paintContext(state);
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
@@ -3576,7 +3595,87 @@ function paintContext(state: ChatState): void {
           el("dd", { text: detail.value }),
         ]))]
       : []),
+    ...(percent >= 50 ? [contextCompactActions(state)] : []),
   );
+}
+
+/** 上下文过半时在弹层里给出压缩入口：客户端能自己压就调用，否则复制命令让用户粘贴。 */
+function contextCompactActions(state: ChatState): HTMLElement {
+  const row = el("div", { className: "context-actions" });
+  const hint = el("p", { className: "context-hint" });
+  if (state.session.canCompact) {
+    const pending = state.compact?.pending === true;
+    const btn = el("button", {
+      className: "context-action",
+      text: pending ? "压缩中…" : "压缩上下文",
+      attrs: { type: "button" },
+    });
+    btn.disabled = pending;
+    if (state.compact?.error) {
+      hint.textContent = state.compact.error;
+      hint.classList.add("is-error");
+    } else if (state.compact?.note) {
+      hint.textContent = state.compact.note;
+    } else {
+      hint.textContent = "由桌面客户端自己压缩，摘要会写回该会话。";
+    }
+    btn.addEventListener("click", () => {
+      void runCompact(state);
+    });
+    row.append(btn, hint);
+    return row;
+  }
+  const btn = el("button", {
+    className: "context-action",
+    text: "复制 /compact",
+    attrs: { type: "button" },
+  });
+  hint.textContent = "浏览器无法直接操作客户端输入框；复制后粘贴到输入框发送。";
+  btn.addEventListener("click", () => {
+    if (!navigator.clipboard) {
+      hint.textContent = "当前页面不能写剪贴板，请在客户端输入框手动输入 /compact";
+      hint.classList.add("is-error");
+      return;
+    }
+    void navigator.clipboard.writeText("/compact").then(
+      () => {
+        btn.textContent = "已复制";
+        setTimeout(() => {
+          btn.textContent = "复制 /compact";
+        }, 1_500);
+      },
+      () => {
+        hint.textContent = "复制失败，请在客户端输入框手动输入 /compact";
+        hint.classList.add("is-error");
+      },
+    );
+  });
+  row.append(btn, hint);
+  return row;
+}
+
+async function runCompact(state: ChatState): Promise<void> {
+  if (state.compact?.pending) return;
+  state.compactSince = Date.now();
+  state.compact = { pending: true };
+  paintContext(state);
+  try {
+    const result = await call<SessionCompactResult>(
+      "session.compact",
+      { sessionId: state.session.sessionId },
+      130_000,
+    );
+    if (result.compacted) {
+      state.compact = { pending: false, note: result.detail ?? "已压缩上下文" };
+      state.status.textContent = result.detail ?? "已在客户端压缩上下文";
+      void refreshTail(state);
+    } else {
+      state.compact = { pending: false, error: result.detail ?? "客户端没有执行压缩" };
+    }
+  } catch (error) {
+    state.compact = { pending: false, error: messageOf(error) };
+  }
+  paintContext(state);
 }
 
 function queuedBubble(item: QueuedMessage): HTMLElement {

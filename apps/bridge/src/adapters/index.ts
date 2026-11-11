@@ -11,6 +11,7 @@ import type {
   SessionListParams,
   SessionListResult,
   SessionModelsResult,
+  SessionCompactResult,
   SessionRailResult,
   SessionSummary,
   TransferCommitResult,
@@ -137,6 +138,15 @@ export class SessionAdapters {
       return { models: [], canSwitch: false, note: "这个客户端没有模型信息" };
     }
     return adapter.models(sessionId);
+  }
+
+  async compact(sessionId: string): Promise<SessionCompactResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
+    if (!adapter.compact) {
+      throw new RpcError("unsupported", "这个客户端不支持从 Bridge 压缩上下文");
+    }
+    return adapter.compact(sessionId);
   }
 
   async taskMessages(

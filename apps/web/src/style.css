@@ -2674,6 +2674,44 @@ h6.md-h {
   font-variant-numeric: tabular-nums;
 }
 
+.context-actions {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+}
+
+.context-action {
+  width: 100%;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.context-action:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.context-action:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.context-hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.context-hint.is-error {
+  color: var(--danger);
+}
+
 .composer-restore {
   display: none;
 }
