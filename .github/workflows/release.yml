@@ -63,7 +63,7 @@ jobs:
           lipo -create "$root/arm64/bin/node" "$root/x64/bin/node" -output "$root/bin/node"
           chmod +x "$root/bin/node"
           file "$root/bin/node"
-          "$root/bin/node" -p "node runtime ok: " + process.version + " " + process.arch
+          "$root/bin/node" -p "'node runtime ok: ' + process.version + ' ' + process.arch"
 
       - name: 构建 AgentBridge.app
         env:
