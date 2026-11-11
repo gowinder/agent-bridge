@@ -11,7 +11,7 @@ import {
   writeSync,
 } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
-import type { FileUploadBeginResult, FileUploadFinishResult } from "@agent-bridge/protocol";
+import type { FileUploadBeginResult, FileUploadFinishResult } from "@craftstead/protocol";
 import { RpcError } from "./adapters/types.js";
 
 /** Raw bytes per chunk; base64 keeps the frame under the relay's 64 KiB limit. */

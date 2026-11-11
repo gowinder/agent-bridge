@@ -8,7 +8,7 @@ import {
   type RelayErrorCode,
   type RelayHello,
   type RelayServerMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { Env } from "./env.js";
 
 interface Attachment {

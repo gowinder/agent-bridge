@@ -102,11 +102,11 @@ jobs:
 
       - run: rustup target add wasm32-unknown-unknown
 
-      - run: npm run build:wasm -w @agent-bridge/crypto
+      - run: npm run build:wasm -w @craftstead/crypto
 
       - run: npm run check
 
-      - run: npm run build -w @agent-bridge/web
+      - run: npm run build -w @craftstead/web
 
       - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:
@@ -141,11 +141,11 @@ jobs:
 
       - run: rustup target add wasm32-unknown-unknown
 
-      - run: npm run build:wasm -w @agent-bridge/crypto
+      - run: npm run build:wasm -w @craftstead/crypto
 
       - run: npm run check
 
-      - run: npm run build -w @agent-bridge/web
+      - run: npm run build -w @craftstead/web
 
       - uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd # v3
         with:

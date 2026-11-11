@@ -1,4 +1,4 @@
-import type { DeviceListResponse, InviteResponse } from "@agent-bridge/protocol";
+import type { DeviceListResponse, InviteResponse } from "@craftstead/protocol";
 import type { Env } from "./env.js";
 import { clientIp, rateLimit } from "./rate-limit.js";
 import { Room } from "./room.js";

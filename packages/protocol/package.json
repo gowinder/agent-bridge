@@ -1,5 +1,5 @@
 {
-  "name": "@agent-bridge/protocol",
+  "name": "@craftstead/protocol",
   "version": "0.1.0",
   "private": true,
   "type": "module",

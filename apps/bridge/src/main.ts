@@ -3,9 +3,9 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { toHex, type KeyPair, type Noise } from "@agent-bridge/crypto";
-import { loadNoiseNode } from "@agent-bridge/crypto/node";
-import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from "@agent-bridge/protocol";
+import { toHex, type KeyPair, type Noise } from "@craftstead/crypto";
+import { loadNoiseNode } from "@craftstead/crypto/node";
+import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from "@craftstead/protocol";
 import { SessionAdapters } from "./adapters/index.js";
 import {
   ADMIN_HOST,

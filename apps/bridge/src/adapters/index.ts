@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { MAX_TRANSFER_CHARS } from "@agent-bridge/protocol";
+import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -15,7 +15,7 @@ import type {
   SessionSummary,
   TransferCommitResult,
   TransferPrepareResult,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";

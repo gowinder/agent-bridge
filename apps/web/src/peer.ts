@@ -1,11 +1,11 @@
-import type { SecureChannel } from "@agent-bridge/crypto";
+import type { SecureChannel } from "@craftstead/crypto";
 import type {
   EventMessage,
   Method,
   RequestMessage,
   ResponseMessage,
   WireMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { RelayConnection } from "./relay.js";
 
 function requestId(): string {

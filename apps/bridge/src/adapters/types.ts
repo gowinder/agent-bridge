@@ -8,7 +8,7 @@ import type {
   SessionRailResult,
   SessionModelsResult,
   SessionSummary,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 
 export class RpcError extends Error {
   constructor(

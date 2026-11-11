@@ -3,7 +3,7 @@ import {
   RELAY_WS_PATH,
   type RelayHello,
   type RelayServerMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 
 type Control = RelayServerMessage;
 type Waiter =

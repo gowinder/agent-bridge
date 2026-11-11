@@ -1,5 +1,5 @@
 {
-  "name": "@agent-bridge/relay",
+  "name": "@craftstead/relay",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,6 +8,6 @@
     "deploy": "wrangler deploy"
   },
   "dependencies": {
-    "@agent-bridge/protocol": "*"
+    "@craftstead/protocol": "*"
   }
 }
