@@ -13,6 +13,8 @@ import type {
   FsReadResult,
   FsRoot,
   FsRootsResult,
+  HostedDirsResult,
+  HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
   MessageBlock,
@@ -29,6 +31,7 @@ import type {
   RailRow,
   RailTask,
   SessionCompactResult,
+  SessionGetResult,
   SessionListResult,
   SessionModelsResult,
   SessionRailResult,
@@ -1934,10 +1937,24 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     .filter((session) => session.projectId === route.projectId)
     .sort((a, b) => b.updatedAt - a.updatedAt);
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
+  const isHosted = appInfo?.appId === "hosted";
+  const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
+  const panelHost = isHosted ? el("div", { className: "hosted-create-host" }) : null;
+  const openCreate = (): void => {
+    if (!panelHost || !project) return;
+    panelHost.replaceChildren(hostedCreatePanel(project));
+    panelHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
 
   const list = el("ul", { className: "list" });
   if (sessions.length === 0) {
-    list.append(el("li", {}, [emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。")]));
+    list.append(
+      el("li", {}, [
+        isHosted
+          ? emptyState("还没有托管会话", "点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 进程。")
+          : emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。"),
+      ]),
+    );
   }
   for (const session of sessions) {
     const busy = session.busy === true;
@@ -1956,7 +1973,19 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           className: "meta",
           text: busy
             ? `${timeLabel(session.updatedAt)} · 正在执行`
-            : `${timeLabel(session.updatedAt)} · ${session.canSend ? (session.live ? "桌面运行中，可发送" : sendStateLabel(session)) : (session.sendBlockedReason ?? "只读")}`,
+            : `${timeLabel(session.updatedAt)} · ${
+                session.hosted
+                  ? session.canSend
+                    ? session.live
+                      ? "Bridge 托管进程运行中"
+                      : "Bridge 托管，发送时自动恢复"
+                    : (session.sendBlockedReason ?? "只读")
+                  : session.canSend
+                    ? session.live
+                      ? "桌面运行中，可发送"
+                      : sendStateLabel(session)
+                    : (session.sendBlockedReason ?? "只读")
+              }`,
         }),
       ]),
       busy
@@ -1983,10 +2012,13 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           el("h1", { className: "display", text: project?.name ?? "会话" }),
           el("p", {
             className: "meta",
-            text: `${sessions.length} 个会话 · 最近更新在前${createDetail ? " · 无法新建对话" : ""}`,
+            text: isHosted
+              ? `${sessions.length} 个会话 · 由这台 Mac 上的 Bridge 托管，不出现在桌面应用`
+              : `${sessions.length} 个会话 · 最近更新在前${createDetail ? " · 无法新建对话" : ""}`,
           }),
         ]),
-        ...(createDetail
+        ...(canCreateHosted ? [button("新建托管会话", openCreate, "btn small create-btn")] : []),
+        ...(createDetail && !isHosted
           ? [
               el("button", {
                 className: "btn ghost small create-btn",
@@ -2005,10 +2037,77 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         ),
       ]),
       ...(data.note ? [el("p", { className: "hint", text: data.note })] : []),
+      ...(panelHost ? [panelHost] : []),
       list,
     ]),
     crumbsFor(route),
   );
+}
+
+function hostedCreatePanel(project: ProjectInfo): HTMLElement {
+  const form = el("form", { className: "panel hosted-create" });
+  const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
+  const mode = el("select", { className: "input" });
+  const title = el("input", {
+    className: "input",
+    attrs: { type: "text", placeholder: "标题（可选）", maxlength: "60" },
+  });
+  const submit = button("创建", () => {
+    const cwd = project.cwd;
+    if (!cwd) return;
+    submit.disabled = true;
+    status.classList.remove("error");
+    status.textContent = "正在启动 Claude Code…";
+    const permissionMode = (mode.value || "manual") as HostedPermissionMode;
+    void call<SessionGetResult>("hosted.create", {
+      path: cwd,
+      permissionMode,
+      ...(title.value.trim() ? { title: title.value.trim() } : {}),
+    }, 30_000)
+      .then((result) => {
+        navigate({
+          level: "chat",
+          appId: "hosted",
+          projectId: result.session.projectId,
+          sessionId: result.session.sessionId,
+        });
+      })
+      .catch((error) => {
+        submit.disabled = false;
+        status.classList.add("error");
+        status.textContent = messageOf(error);
+      });
+  }, "btn small");
+  form.addEventListener("submit", (event) => event.preventDefault());
+  form.append(
+    el("p", { className: "panel-title", text: "新建 Bridge 托管会话" }),
+    el("label", { className: "field" }, [
+      el("span", { text: "工作目录（仅限 Mac 上的允许列表）" }),
+      el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
+    ]),
+    el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]),
+    el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
+    status,
+    el("div", { className: "row-actions" }, [submit]),
+  );
+  void call<HostedDirsResult>("hosted.dirs")
+    .then((config) => {
+      mode.replaceChildren(
+        ...config.permissionModes.map((item) => el("option", { text: item, attrs: { value: item } })),
+      );
+      mode.value = "manual";
+      const idle = Math.round(config.idleTimeoutMs / 60_000);
+      status.textContent = config.enabled
+        ? `只在 ${project.cwd ?? ""} 中运行；网页断开不会结束进程，空闲 ${idle} 分钟后自动停止，再发消息时 resume。`
+        : (config.note ?? "Bridge 还没有配置可托管的目录。");
+      submit.disabled = !config.enabled;
+    })
+    .catch((error) => {
+      status.classList.add("error");
+      status.textContent = messageOf(error);
+      submit.disabled = true;
+    });
+  return form;
 }
 
 function renderDevices(): void {
@@ -2121,7 +2220,35 @@ function statusLabel(status: AppInfo["status"]): string {
   return status === "ready" ? "可用" : status === "needs_permission" ? "需要授权" : "不可用";
 }
 
+function hostedControlButton(summary: SessionSummary): HTMLButtonElement {
+  const node = button(
+    summary.live ? "停止进程" : "恢复进程",
+    () => {
+      node.disabled = true;
+      const method: Method = summary.live ? "hosted.stop" : "hosted.resume";
+      void call<unknown>(method, { sessionId: summary.sessionId }, 30_000)
+        .then(() => {
+          snapshot = null;
+          void renderRoute();
+        })
+        .catch((error) => {
+          node.disabled = false;
+          node.textContent = messageOf(error);
+        });
+    },
+    "btn ghost small",
+  );
+  node.title = summary.live
+    ? "结束这台 Mac 上的托管进程；会话记录保留，之后可恢复"
+    : "在这台 Mac 上 resume 这个托管会话";
+  return node;
+}
+
 function sendStateLabel(session: SessionSummary): string {
+  if (session.hosted) {
+    if (!session.canSend) return "只读";
+    return session.live ? "托管运行中" : "可恢复";
+  }
   if (session.live) return "桌面运行中";
   if (!session.canSend) return "只读";
   return "可发送";
@@ -2561,10 +2688,18 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     el("div", { className: "view-head-main" }, [
       el("p", { className: "eyebrow", text: `${data.apps.find((item) => item.appId === route.appId)?.name ?? "客户端"} · ${project?.name ?? "工程"}` }),
       el("h1", { className: "display chat-title", text: summary.title }),
-      el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
+      el("p", {
+        className: "meta",
+        text: summary.hosted
+          ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · ${
+              summary.live ? `进程运行中（${summary.permissionMode ?? "manual"}）` : "进程已停止，发送时自动恢复"
+            }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
+          : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`,
+      }),
     ]),
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
+      ...(summary.hosted ? [hostedControlButton(summary)] : []),
       railToggle,
       headToggle,
     ]),
@@ -4102,9 +4237,13 @@ async function sendNextStep(
     state.busy = true;
     state.interrupted = false;
     renderMessages(state);
-    state.status.textContent = result.delivered
-      ? "已投递到桌面会话"
-      : (result.detail ?? "已提交，等待桌面执行");
+    state.status.textContent = state.session.hosted
+      ? result.delivered
+        ? "已写入托管会话"
+        : (result.detail ?? "已提交")
+      : result.delivered
+        ? "已投递到桌面会话"
+        : (result.detail ?? "已提交，等待桌面执行");
     window.setTimeout(() => {
       void refreshTail(state);
     }, 800);
@@ -4489,7 +4628,13 @@ async function sendMessage(
   if (!text && attachments.length === 0) return;
   sendButton.disabled = true;
   status.classList.remove("error");
-  status.textContent = state.session.live ? "正在发送…" : "正在请求桌面打开该会话…";
+  status.textContent = state.session.hosted
+    ? state.session.live
+      ? "正在写入托管会话…"
+      : "正在恢复托管进程…"
+    : state.session.live
+      ? "正在发送…"
+      : "正在请求桌面打开该会话…";
   try {
     const result = await call<MessageSendResult>("message.send", {
       sessionId: state.session.sessionId,
@@ -4514,11 +4659,15 @@ async function sendMessage(
       state.interrupted = false;
       renderMessages(state);
     }
-    status.textContent = result.delivered
-      ? "已投递到桌面会话"
-      : result.accepted
-        ? (result.detail ?? "已提交，等待桌面执行")
-        : (result.detail ?? "未确认投递");
+    status.textContent = state.session.hosted
+      ? result.delivered
+        ? "已写入托管会话"
+        : (result.detail ?? "已提交")
+      : result.delivered
+        ? "已投递到桌面会话"
+        : result.accepted
+          ? (result.detail ?? "已提交，等待桌面执行")
+          : (result.detail ?? "未确认投递");
     // 发送落地后收起输入区，把空间让给对话；需要时点「写消息…」再展开。
     if (result.accepted) onSent();
     window.setTimeout(() => {

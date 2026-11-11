@@ -3,6 +3,10 @@ import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
+  HostedCreateParams,
+  HostedDirsResult,
+  HostedResumeResult,
+  HostedStopResult,
   MessageListResult,
   MessageSendResult,
   ProjectInfo,
@@ -17,11 +21,13 @@ import type {
   TransferCommitResult,
   TransferPrepareResult,
 } from "@craftstead/protocol";
+import { HostedSessionManager } from "../hosted/manager.js";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
 import { CodexAdapter } from "./codex.js";
 import { DshAdapter } from "./dsh.js";
+import { HostedAdapter } from "./hosted.js";
 import { RpcError, type SessionAdapter } from "./types.js";
 
 const DEFAULT_SESSION_LIMIT = 200;
@@ -38,14 +44,32 @@ interface PreparedTransfer {
 }
 
 export class SessionAdapters {
+  private readonly hostedManager = new HostedSessionManager();
   private readonly adapters: SessionAdapter[] = [
     new ClaudeCodeAdapter(),
     new CodexAdapter(),
     new AntigravityAdapter(),
     new AntigravityDesktopAdapter(),
     new DshAdapter(),
+    new HostedAdapter(this.hostedManager),
   ];
   private readonly transfers = new Map<string, PreparedTransfer>();
+
+  hostedDirs(): HostedDirsResult {
+    return this.hostedManager.configForClient();
+  }
+
+  hostedCreate(params: HostedCreateParams): SessionGetResult {
+    return { session: this.hostedManager.create(params) };
+  }
+
+  hostedStop(sessionId: string): HostedStopResult {
+    return this.hostedManager.stop(sessionId);
+  }
+
+  hostedResume(sessionId: string): HostedResumeResult {
+    return { session: this.hostedManager.resume(sessionId) };
+  }
 
   hostAdapters(): Array<{ id: string; status: "ready" | "unavailable" | "needs_permission"; label: string; detail?: string }> {
     return this.adapters.map((adapter) => {
