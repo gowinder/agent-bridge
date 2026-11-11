@@ -1982,6 +1982,8 @@ interface ChatState {
   context?: ContextUsage;
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
+  /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
+  compactSince?: number;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -3445,6 +3447,7 @@ function railTaskMeta(task: RailTask): string {
 
 async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
   if (state.loading) return null;
+  const startedAt = Date.now();
   state.loading = true;
   try {
     const result = await call<MessageListResult>("message.list", {
@@ -3477,16 +3480,19 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     // chat view; only surface it when there is nothing else to show.
     state.note.textContent = state.messages.length === 0 ? (result.note ?? "") : "";
     let compactChanged = false;
-    if (result.compact) {
-      state.compact = result.compact.pending
-        ? { pending: true }
-        : { pending: false, error: result.compact.error };
-      compactChanged = true;
-    } else if (state.compact?.pending) {
-      // 先前确认的压缩请求已经不在客户端的待办里：完成或失效，按完成提示。
-      state.compact = { pending: false, note: "已压缩上下文" };
-      state.status.textContent = "客户端已完成上下文压缩";
-      compactChanged = true;
+    // 点击压缩之前发出的轮询可能在压缩请求之后才返回，它看不到 pending，不能据此判定完成。
+    if (state.compactSince === undefined || startedAt >= state.compactSince) {
+      if (result.compact) {
+        state.compact = result.compact.pending
+          ? { pending: true }
+          : { pending: false, error: result.compact.error };
+        compactChanged = true;
+      } else if (state.compact?.pending) {
+        // 先前确认的压缩请求已经不在客户端的待办里：完成或失效，按完成提示。
+        state.compact = { pending: false, note: "已压缩上下文" };
+        state.status.textContent = "客户端已完成上下文压缩";
+        compactChanged = true;
+      }
     }
     if (result.context) state.context = result.context;
     if (result.context || compactChanged) paintContext(state);
@@ -3650,6 +3656,7 @@ function contextCompactActions(state: ChatState): HTMLElement {
 
 async function runCompact(state: ChatState): Promise<void> {
   if (state.compact?.pending) return;
+  state.compactSince = Date.now();
   state.compact = { pending: true };
   paintContext(state);
   try {

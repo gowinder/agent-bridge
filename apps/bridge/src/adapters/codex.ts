@@ -885,6 +885,10 @@ export class CodexAdapter implements SessionAdapter {
   async compact(sessionId: string): Promise<SessionCompactResult> {
     const threadId = String(sessionId).slice(this.key.length + 1);
     if (!this.thread(threadId)) throw new RpcError("not_found", "未知线程");
+    // 同一线程一次只跑一个压缩，重复点击不再向桌面发第二个请求。
+    if (this.compactStates.get(threadId)?.pending) {
+      return { compacted: true, detail: "已有压缩请求在执行，稍后刷新查看" };
+    }
 
     const client = await this.desktopClient();
     try {
