@@ -3529,6 +3529,7 @@ function askBox(block: MessageBlock): HTMLElement {
       el("div", { className: "ask-question-head" }, [
         ...(question.header ? [el("span", { className: "ask-header", text: question.header })] : []),
         el("span", { className: "ask-question-text", text: question.question }),
+        ...(question.multiSelect ? [el("span", { className: "ask-multi", text: "多选" })] : []),
       ]),
     );
     if (question.options.length > 0) {
