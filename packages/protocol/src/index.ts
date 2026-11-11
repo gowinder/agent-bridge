@@ -119,6 +119,7 @@ export const METHODS = [
   "operation.get",
   "device.list",
   "device.revoke",
+  "device.rename",
   "fs.roots",
   "fs.list",
   "fs.read",

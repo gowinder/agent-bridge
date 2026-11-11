@@ -45,6 +45,7 @@ import {
   needsUnlock,
   removeDevice,
   resetCredentials,
+  saveDevice as saveStoredDevice,
   setupPassword,
   unlock,
   type DeviceMeta,
@@ -696,22 +697,47 @@ function showConfirm(challenge: PairingChallenge): void {
       el("p", { className: "lede", text: "Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。" }),
       el("div", { className: "code", text: challenge.confirmCode }),
       el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
+      el("p", { className: "hint", text: "浏览器读不到电脑名称和机型，默认值只能按系统、浏览器和屏幕区分；两台设备看起来一样时，改成你认得出的名字。" }),
       error,
       el("div", { className: "actions" }, [confirm, cancel]),
     ]),
   );
 }
 
-/** 默认名称取设备类型：配对列表里看到的是设备，而不是浏览器。 */
+/**
+ * 默认名称取设备类型 + 浏览器 + 屏幕逻辑分辨率。浏览器拿不到机型和主机名，
+ * 但同品牌两台设备往往浏览器或屏幕不同，这样列表里至少能分辨。
+ */
 function defaultDeviceName(): string {
   const ua = navigator.userAgent;
-  if (/iPhone/.test(ua)) return "iPhone";
-  if (/iPad/.test(ua)) return "iPad";
-  if (/Android/.test(ua)) return "Android 设备";
-  if (/Macintosh|Mac OS X/.test(ua)) return "Mac";
-  if (/Windows/.test(ua)) return "Windows";
-  if (/Linux/.test(ua)) return "Linux";
-  return "浏览器";
+  const touch = navigator.maxTouchPoints > 1;
+  let kind: string;
+  if (/iPhone/.test(ua)) kind = "iPhone";
+  else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) kind = "iPad";
+  else if (/Android/.test(ua)) kind = "Android 设备";
+  else if (/Macintosh|Mac OS X/.test(ua)) kind = "Mac";
+  else if (/Windows/.test(ua)) kind = "Windows";
+  else if (/Linux/.test(ua)) kind = "Linux";
+  else kind = "浏览器";
+  const screenSize = `${Math.round(screen.width)}×${Math.round(screen.height)}`;
+  return [kind, browserLabel(), screenSize].filter(Boolean).join(" · ");
+}
+
+/** Chromium 的 UA 里 Chrome/Safari 互相嵌套，顺序不能换。 */
+function browserLabel(): string {
+  const ua = navigator.userAgent;
+  const rules: Array<[RegExp, string]> = [
+    [/Edg\/(\d+)/, "Edge"],
+    [/OPR\/(\d+)/, "Opera"],
+    [/Chrome\/(\d+)/, "Chrome"],
+    [/Firefox\/(\d+)/, "Firefox"],
+    [/Version\/(\d+)[\d.]* Safari\//, "Safari"],
+  ];
+  for (const [pattern, name] of rules) {
+    const match = ua.match(pattern);
+    if (match?.[1]) return `${name} ${match[1]}`;
+  }
+  return "";
 }
 
 /**
@@ -1787,15 +1813,21 @@ function renderDevices(): void {
   for (const item of state.devices) {
     const revoked = item.revokedAt !== null;
     const self = item.deviceId === state.device.deviceId;
+    const label = el("div", { className: "row-main" }, [
+      el("strong", { text: item.name }),
+      el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString()}` }),
+    ]);
     list.append(
       el("li", { className: "device-row" }, [
-        el("div", { className: "row-main" }, [
-          el("strong", { text: item.name }),
-          el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString()}` }),
-        ]),
-        self || revoked
-          ? el("span", { className: "pill", text: revoked ? "已撤销" : "本机" })
-          : el("span", { className: "meta", text: "在 Mac 上撤销" }),
+        label,
+        el("div", { className: "row-actions" }, revoked
+          ? [el("span", { className: "pill", text: "已撤销" })]
+          : self
+            ? [
+              el("span", { className: "pill", text: "本机" }),
+              button("重命名", () => beginRename(item, label), "btn ghost small"),
+            ]
+            : [el("span", { className: "meta", text: "在 Mac 上撤销" })]),
       ]),
     );
   }
@@ -1823,6 +1855,52 @@ function renderDevices(): void {
     ]),
     crumbsFor({ level: "devices" }),
   );
+}
+
+/** 只改当前设备自己的名字，改完同步本地记录，首页列表不用重连就能看到新名字。 */
+function beginRename(item: DeviceSummary, label: HTMLElement): void {
+  const input = el("input", {
+    className: "input",
+    attrs: { type: "text", value: item.name, maxlength: "64" },
+  });
+  const error = el("p", { className: "notice error hidden" });
+  const save = button("保存", () => {
+    const name = input.value.trim();
+    if (!name) {
+      error.textContent = "请输入设备名称";
+      error.classList.remove("hidden");
+      return;
+    }
+    save.disabled = true;
+    cancel.disabled = true;
+    void call<{ ok: boolean }>("device.rename", { deviceId: item.deviceId, name })
+      .then(async () => {
+        item.name = name;
+        const local = connected?.device;
+        if (local && local.deviceId === item.deviceId) {
+          local.name = name;
+          const secrets = getDeviceSecrets(local);
+          if (secrets) {
+            await saveStoredDevice({ ...local, ...secrets, name }).catch(() => undefined);
+          }
+        }
+        renderDevices();
+      })
+      .catch((failure: unknown) => {
+        save.disabled = false;
+        cancel.disabled = false;
+        error.textContent = messageOf(failure);
+        error.classList.remove("hidden");
+      });
+  }, "btn small");
+  const cancel = button("取消", () => renderDevices(), "btn ghost small");
+  label.replaceChildren(
+    input,
+    el("div", { className: "actions" }, [save, cancel]),
+    error,
+  );
+  input.focus();
+  input.select();
 }
 
 function initials(name: string): string {

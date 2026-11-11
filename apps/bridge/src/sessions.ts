@@ -453,6 +453,20 @@ export class DeviceSession implements ChannelSession {
         this.options.store.revokeDevice(deviceId);
         return { ok: true };
       }
+      case "device.rename": {
+        const deviceId = params["deviceId"];
+        if (typeof deviceId !== "string") throw new RpcError("invalid_params", "deviceId required");
+        // 同撤销一样只允许改自己，其他设备的名称由 Mac 上的持有者管理。
+        if (deviceId !== this.options.device.id) {
+          throw new RpcError("unauthorized", "只能重命名当前设备");
+        }
+        const name = stringParam(params, "name")?.trim();
+        if (!name || name.length > 64) throw new RpcError("invalid_params", "invalid device name");
+        const target = this.options.store.device(deviceId);
+        if (!target) throw new Error("unknown device");
+        this.options.store.saveDevice({ ...target, name });
+        return { ok: true, name };
+      }
       case "fs.roots": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
