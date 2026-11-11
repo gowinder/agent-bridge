@@ -44,8 +44,8 @@ import {
   LockedError,
   needsUnlock,
   removeDevice,
+  renameDevice,
   resetCredentials,
-  saveDevice as saveStoredDevice,
   setupPassword,
   unlock,
   type DeviceMeta,
@@ -1877,12 +1877,9 @@ function beginRename(item: DeviceSummary, label: HTMLElement): void {
       .then(async () => {
         item.name = name;
         const local = connected?.device;
-        if (local && local.deviceId === item.deviceId) {
+        if (local?.deviceId === item.deviceId) {
           local.name = name;
-          const secrets = getDeviceSecrets(local);
-          if (secrets) {
-            await saveStoredDevice({ ...local, ...secrets, name }).catch(() => undefined);
-          }
+          await renameDevice(local.relayUrl, local.roomId, name).catch(() => undefined);
         }
         renderDevices();
       })

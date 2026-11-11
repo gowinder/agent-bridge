@@ -465,6 +465,8 @@ export class DeviceSession implements ChannelSession {
         const target = this.options.store.device(deviceId);
         if (!target) throw new Error("unknown device");
         this.options.store.saveDevice({ ...target, name });
+        // 通道打开时读的那份记录也要跟着改，否则后续 message.send 仍用旧名字。
+        this.options.device.name = name;
         return { ok: true, name };
       }
       case "fs.roots": {
