@@ -300,6 +300,8 @@ claude --resume 2222… -p "请把 feature.txt 加入 git 并提交，提交信�
 | 不在 tmux 里 | 找不到匹配 pane 时原型直接拒绝，应回退现有 peer 通道并在 UI 说明「该会话不在 tmux 中，批准需回桌面」 |
 | 原型 | `scripts/spike/tmux-approval.mjs <pid> <text>`：校验目标确实是交互式 `claude`、tty 唯一匹配 pane、pid 是 pane 子进程，然后 `send-keys -l` + `Enter`；实测投递 `reply PROTOTYPE_OK` 成功，对非 tmux 会话（ttys006）按预期拒绝 |
 
+另跑一轮合并场景：同一 tmux 会话里 `send-keys` 发送「把 feature 分支合并到 main（本地 merge，不推送）」，会话执行并生成合并提交 `f8fd838 merge: feature into main`，无冲突、无拒绝措辞。
+
 安全：tmux 的 socket 属于当前用户，同用户的任何进程本来就能 `send-keys` 到任意 pane，因此 Bridge 侧能做的是「只允许 Noise 认证的配对设备触发」，并且 pane **只能**由服务端从已发现的会话 pid/tty 推导，不能接受网页传来的 pane id。仍要承认：这条通道的可信度上限是「本机同用户进程」，不比 peer 通道高，只是它到达的是会话自己的输入。
 
 ### 方案 C：Claude Desktop App（只评估，未实测）
