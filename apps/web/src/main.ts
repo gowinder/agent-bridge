@@ -1446,6 +1446,10 @@ function agentSwitcher(route: Route): HTMLElement | null {
 }
 
 function renderTopbar(crumbs: Crumb[]): HTMLElement {
+  // 预览部署在 workers.dev 上，回链也停在预览官网，别把试用的人送去生产。
+  const landing = location.hostname.endsWith(".workers.dev")
+    ? "https://develop.craftstead.pages.dev/agent-bridge"
+    : "https://craftstead.app/agent-bridge";
   const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
   crumbs.forEach((crumb, index) => {
     if (index > 0) nav.append(el("span", { className: "crumb-sep", text: "/" }));
@@ -1490,7 +1494,7 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
       {
         className: "craftstead-mark",
         attrs: {
-          href: "https://craftstead.app/agent-bridge",
+          href: landing,
           "aria-label": "Built by Craftstead",
           title: "Built by Craftstead",
         },
