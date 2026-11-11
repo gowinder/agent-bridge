@@ -151,6 +151,33 @@ a {
   font-size: 14px;
 }
 
+.craftstead-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  padding-left: 12px;
+  border-left: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  transition: color 180ms ease;
+}
+
+.craftstead-mark:hover {
+  color: var(--text);
+}
+
+.craftstead-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  background: currentColor;
+  border-radius: 1px;
+  transform: rotate(45deg);
+}
+
 .crumbs {
   display: flex;
   align-items: center;
@@ -517,6 +544,17 @@ a.crumb:hover {
 
 .hint.error {
   color: var(--danger);
+}
+
+.bookmark-hint {
+  margin-top: -10px;
+  text-align: center;
+}
+
+.bookmark-hint a {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .mono {
@@ -2932,6 +2970,7 @@ h6.md-h {
 
 @media (max-width: 720px) {
   .brand-name,
+  .craftstead-name,
   .conn {
     display: none;
   }

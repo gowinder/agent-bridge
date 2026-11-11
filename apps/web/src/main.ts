@@ -608,6 +608,13 @@ function renderHome(): HTMLElement {
       status.textContent = messageOf(error);
     });
   }
+
+  page.append(
+    el("p", { className: "hint bookmark-hint" }, [
+      el("a", { attrs: { href: location.origin + "/" }, text: location.host }),
+      " 可以收藏或添加到主屏幕，下次直接打开，不必再粘贴配对链接。",
+    ]),
+  );
   return page;
 }
 
@@ -1478,6 +1485,21 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
       el("span", { className: "brand-mark", text: "AB" }),
       el("span", { className: "brand-name", text: "Agent Bridge" }),
     ]),
+    el(
+      "a",
+      {
+        className: "craftstead-mark",
+        attrs: {
+          href: "https://craftstead.app/agent-bridge",
+          "aria-label": "Built by Craftstead",
+          title: "Built by Craftstead",
+        },
+      },
+      [
+        el("span", { className: "craftstead-dot", attrs: { "aria-hidden": "true" } }),
+        el("span", { className: "craftstead-name", text: "Craftstead" }),
+      ],
+    ),
     nav,
     right,
   ]);

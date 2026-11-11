@@ -125,6 +125,7 @@ function readStore(): Store | null {
 
 function writeStore(store: Store): void {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  syncPairedCookie(store.devices);
 }
 
 /** 老格式：整份设备（含私钥）明文存在 v1 里。 */
@@ -142,6 +143,39 @@ function readLegacy(): StoredDevice[] {
 
 export function hasVault(): boolean {
   return readStore()?.vault != null;
+}
+
+const PAIRED_COOKIE = "ab_paired";
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
+
+/** 落地页只读取这个标记；它不含房间号、令牌、密钥或桥的名字。 */
+function pairedCookieAttributes(): string {
+  let attrs = "; Path=/; SameSite=Lax";
+  if (location.protocol === "https:") attrs += "; Secure";
+  const host = location.hostname;
+  if (host === "craftstead.app" || host.endsWith(".craftstead.app")) {
+    attrs += "; Domain=.craftstead.app";
+  }
+  return attrs;
+}
+
+/** 只在真有未过期设备时置 1；否则清除，免得落地页一直显示已配对。 */
+function syncPairedCookie(devices: ReadonlyArray<{ expiresAt: number | null }>): void {
+  if (typeof document === "undefined") return;
+  const now = Date.now();
+  const live = devices.filter((device) => device.expiresAt === null || device.expiresAt > now);
+  if (live.length === 0) {
+    document.cookie = `${PAIRED_COOKIE}=; Max-Age=0${pairedCookieAttributes()}`;
+    return;
+  }
+  const perpetual = live.some((device) => device.expiresAt === null);
+  const latest = perpetual
+    ? Number.POSITIVE_INFINITY
+    : Math.max(...live.map((device) => device.expiresAt as number));
+  const maxAge = perpetual
+    ? COOKIE_MAX_AGE_SECONDS
+    : Math.max(60, Math.min(COOKIE_MAX_AGE_SECONDS, Math.round((latest - now) / 1000)));
+  document.cookie = `${PAIRED_COOKIE}=1; Max-Age=${maxAge}${pairedCookieAttributes()}`;
 }
 
 /** Reading the list never needs the password: only metadata is stored in the clear. */
@@ -281,6 +315,7 @@ export function resetCredentials(): Promise<void> {
   return withVaultLock(async () => {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(LEGACY_KEY);
+    syncPairedCookie([]);
     lock();
   });
 }
@@ -385,6 +420,7 @@ async function deleteDevice(relayUrl: string, roomId: string): Promise<void> {
       (item) => !(item.relayUrl === relayUrl && item.roomId === roomId),
     );
     localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
+    syncPairedCookie(legacy);
     return;
   }
   const devices = store.devices.filter(
@@ -414,6 +450,7 @@ async function updateDeviceName(relayUrl: string, roomId: string, name: string):
       item.relayUrl === relayUrl && item.roomId === roomId ? { ...item, name } : item,
     );
     localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
+    syncPairedCookie(legacy);
     return;
   }
   const devices = store.devices.map((item) =>
