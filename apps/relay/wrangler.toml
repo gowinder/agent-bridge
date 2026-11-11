@@ -2,6 +2,11 @@ name = "agent-bridge-relay"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
 
+# 生产环境走品牌子域：前端静态资源与 /v1/* 由同一个 Worker 提供，保持同源。
+[[routes]]
+pattern = "agent-bridge.craftstead.app"
+custom_domain = true
+
 [dev]
 port = 8787
 
@@ -20,6 +25,9 @@ run_worker_first = ["/v1/*"]
 
 [env.preview]
 name = "agent-bridge-preview"
+# routes 是可继承键：不显式清空，preview 部署会把这台 Worker 也绑到生产域名上。
+routes = []
+workers_dev = true
 
 [env.preview.durable_objects]
 bindings = [{ name = "ROOMS", class_name = "Room" }]
