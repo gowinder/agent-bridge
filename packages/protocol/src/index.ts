@@ -102,6 +102,7 @@ export const METHODS = [
   "session.list",
   "session.get",
   "session.rail",
+  "session.models",
   "task.messages",
   "message.list",
   "session.subscribe",
@@ -535,6 +536,30 @@ export interface SessionRailResult {
 
 export interface SessionRailParams {
   sessionId: string;
+}
+
+export interface SessionModelsParams {
+  sessionId: string;
+}
+
+/** 会话所属客户端提供的一个模型。 */
+export interface ModelOption {
+  id: string;
+  name: string;
+  /** 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。 */
+  section?: "main" | "overflow";
+}
+
+/** 当前会话的模型信息；各 agent 能给出的内容不一样，缺字段就是不知道。 */
+export interface SessionModelsResult {
+  /** 客户端报告的模型标识。 */
+  current?: string;
+  /** 模型的可读名称。 */
+  currentName?: string;
+  models: ModelOption[];
+  /** 能否从网页切换模型；false 时看 note。 */
+  canSwitch: boolean;
+  note?: string;
 }
 
 export interface TaskMessagesParams {

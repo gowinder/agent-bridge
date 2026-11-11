@@ -26,6 +26,7 @@ import type {
   RailRow,
   RailTask,
   SessionListResult,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
   ShellCancelResult,
@@ -1922,6 +1923,102 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const back = backButton(() => navigate({ level: "sessions", appId: route.appId, projectId: route.projectId }));
 
+  const modelButton = el("button", {
+    className: "model-chip",
+    attrs: {
+      type: "button",
+      "aria-label": "当前模型",
+      "aria-expanded": "false",
+      "aria-haspopup": "true",
+    },
+  });
+  modelButton.hidden = true;
+  const modelPop = el("div", { className: "model-pop" });
+  modelPop.hidden = true;
+  const modelWrap = el("div", { className: "model-wrap" }, [modelButton, modelPop]);
+
+  function onModelKey(event: KeyboardEvent): void {
+    if (event.key === "Escape") closeModels();
+  }
+  function onModelOutside(event: Event): void {
+    const target = event.target as Node | null;
+    if (!target) return;
+    if (modelPop.contains(target) || modelButton.contains(target)) return;
+    closeModels();
+  }
+  function closeModels(): void {
+    modelPop.hidden = true;
+    modelButton.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onModelOutside);
+    document.removeEventListener("keydown", onModelKey);
+  }
+
+  const paintModels = (info: SessionModelsResult): void => {
+    const label = info.currentName ?? info.current;
+    if (!label && info.models.length === 0) {
+      modelButton.hidden = true;
+      modelPop.hidden = true;
+      return;
+    }
+    modelButton.hidden = false;
+    modelButton.replaceChildren(
+      el("span", { className: "model-chip-label", text: "模型" }),
+      el("span", { className: "model-chip-value", text: label ?? "未知" }),
+      icon("chevron", "icon model-chev"),
+    );
+    modelButton.title = `当前模型：${label ?? "未知"}`;
+    const rows: HTMLElement[] = [];
+    for (const section of ["main", "overflow"] as const) {
+      const items = info.models.filter((item) => (item.section ?? "main") === section);
+      if (items.length === 0) continue;
+      rows.push(
+        el("p", { className: "model-pop-group", text: section === "main" ? "常用" : "更多" }),
+      );
+      for (const item of items) {
+        const current = item.id === info.current;
+        rows.push(
+          el("div", { className: `model-item${current ? " is-current" : ""}` }, [
+            el("div", { className: "model-item-main" }, [
+              el("span", { className: "model-item-name", text: item.name }),
+              el("span", { className: "model-item-id", text: item.id }),
+            ]),
+            ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+          ]),
+        );
+      }
+    }
+    if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
+    modelPop.replaceChildren(...rows);
+  };
+
+  /** 上一次画出来的模型信息；轮询时没变化就不重绘。 */
+  let modelsKey = "";
+  const loadModels = async (): Promise<void> => {
+    try {
+      const info = await call<SessionModelsResult>("session.models", { sessionId: summary.sessionId });
+      if (token !== renderToken) return;
+      const key = JSON.stringify(info);
+      if (key === modelsKey) return;
+      modelsKey = key;
+      paintModels(info);
+    } catch {
+      // 拿不到模型信息就不显示这块，不影响聊天。
+    }
+  };
+
+  modelButton.addEventListener("click", () => {
+    if (!modelPop.hidden) {
+      closeModels();
+      return;
+    }
+    modelPop.hidden = false;
+    modelButton.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onModelOutside);
+    document.addEventListener("keydown", onModelKey);
+    void loadModels();
+  });
+  void loadModels();
+
   const collapsed = window.matchMedia("(max-width: 720px)").matches;
   const head = el("section", { className: `view-head chat-head${collapsed ? " is-collapsed" : ""}` });
   const headToggle = button("", () => {
@@ -1953,6 +2050,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
     ]),
     el("div", { className: "chat-head-side" }, [
+      modelWrap,
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
       railToggle,
       headToggle,
@@ -1994,6 +2092,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       if (token !== renderToken) return;
       if (document.visibilityState !== "visible" || state.loading) return;
       void refreshTail(state);
+      void loadModels();
     }, 5_000);
   };
 
@@ -2004,6 +2103,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   chatResumeKey = hashFor(route);
   chatResume = () => {
     void refreshTail(state);
+    void loadModels();
     startPolling();
   };
 
