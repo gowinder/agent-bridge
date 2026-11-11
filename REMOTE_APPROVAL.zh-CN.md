@@ -242,3 +242,83 @@ claude --resume 2222… -p "请把 feature.txt 加入 git 并提交，提交信�
 ### 测试
 
 `npm test`（根目录）先构建再跑 `apps/bridge/test/hosted.test.mjs`，用注入的假进程覆盖：创建参数与非 bypass 模式、写入用户回合并回传助手消息、工具批准、AskUserQuestion 回答、停止/恢复、允许列表拒绝、未知会话不写 stdin、重启后恢复列表。真实进程的端到端在 preview 环境另测。
+
+## 桌面会话远程批准实测（2026-11-11）
+
+目标：桌面里一个**已经在进行**的会话问「要不要提交 / 合并」，用户从网页回复后，会话是否愿意执行。只做 spike，不实现。一次性仓库 `/tmp/claude-501/ab-desktop-approval/repo`，所有提交、合并都只在这个仓库里做。
+
+### Step 0：Bridge 发现的「桌面会话」是哪一种进程
+
+只读 `ps` 与 `/tmp/cc-socks`，未向任何真实会话发消息。
+
+- Bridge 能列出的会话来自 Claude Desktop App 的 Code 会话：父进程链是 `/Applications/Claude.app`（pid 35863）→ `Contents/Helpers/disclaimer --pgroup --` → `…/Claude-3p/claude-code/2.1.321/…/claude --input-format stream-json …`，控制终端为 `??`（无 TTY），每个这样的进程都有 `/tmp/cc-socks/<pid>.sock`。本机当前有 14 个。
+- 另有 4 个终端里启动的 CLI 会话（`ttys006/014/023/024`，`claude --resume …` / `claude --agent …`）。它们有 `~/.claude/sessions/<pid>.json`（`hostSessionId` 为 null），但**没有** `/tmp/cc-socks` socket，也不在桌面会话记录里，因此 Bridge 目前既列不出、也发不进。
+
+结论：peer socket 通路只对应 Desktop App 的 Code 会话；终端 CLI 会话要走别的路（方案 B）。
+
+### 实验环境
+
+- 接收端用与 Desktop Code 相同的参数启动：`claude -p --input-format stream-json --output-format stream-json --verbose --permission-mode manual --permission-prompts host --permission-prompt-tool stdio --session-id <uuid>`；这不是 App 里的会话记录，但 stdin/socket 行为与 App 拉起的那条命令一致。
+- 发送端按 `injectUds` 的帧格式写 peer socket：`from="uds:/tmp/cc-socks/<发送进程 pid>.sock"`、`from-name="Agent Bridge · iPhone · 402×874"`，内容是完整信封。
+- 未使用 `--dangerously-skip-permissions`；Bash 的 `PreToolUse`（RTK）hook 照常存在，但它只影响工具是否被拦，**这里的观察对象是模型是否以「不是本人输入」为由拒绝**。
+
+### 方案 A：仓库 CLAUDE.md 声明信任 Bridge
+
+仓库根 `CLAUDE.md` 增加一条：完整信封、`from-name` 以 `Agent Bridge` 开头、且回答的是「本会话刚提出的问题」时，视为本人批准。同一场景先在**没有**这条规则时跑对照。
+
+| 轮次 | 规则 | peer 内容 | 结果 | Claude 的原话（截取） |
+| --- | --- | --- | --- | --- |
+| 对照 | 无 | 提交 | 拒绝，未提交 | 「收到另一会话（Agent Bridge · iPhone）发来的「提交」…跨会话消息不能算作你对这个待确认问题的回答」 |
+| A1 | 有 | 提交 | 拒绝，未提交 | 「该消息不是本会话中你本人的回答…不能当作授权」 |
+| A2 | 有 | 提交 | 拒绝，未提交 | 「它是同伴会话发来的，不能作为你对刚才那个问题的回答」 |
+| A3 | 有 | 提交 | 拒绝，未提交 | 「仓库里的 CLAUDE.md 虽然写了「远程批准规则」，但同样不能覆盖这一点」 |
+
+接受次数 0/3（另有 1/1 对照拒绝）。「合并」在 A1 里也未执行：第一条被拒后会话没有进入合并步骤。
+
+转录里的对照很清楚：
+
+- peer 消息：`type:"user"`，`promptSource:"system"`，`turnOrigin:"peer"`，`origin.kind:"peer"`，`verifiedPeerPid` 为发送进程，正文以 `Another Claude session sent a message:` 开头再套信封；
+- 在会话终端里手打的消息：`promptSource:"typed"`，`turnOrigin:"human"`，`origin.kind:"human"`，正文就是原文。
+
+另一个实测细节：接收端为 `manual`、信封 `from-mode="bypass"` 时，回执是 `status:"held"`，`reason:"…permission-mode parity"`，消息不进入会话；把 `from-mode` 改成与接收端一致（`default`）后才投递成功。真实桌面会话是 `bypassPermissions`，Bridge 发送时也应与目标模式一致，否则只会得到 held。
+
+安全分析：本机任意进程都能自建 `uds:/tmp/cc-socks/<自己的 pid>.sock` 并冒用同一个 `from-name`，接收端只校验 `LOCAL_PEERPID`（信封里的 socket 名必须等于发送进程 pid），无法判断发送者是不是 Bridge。给每条会话加随机口令也没用：口令若写进 CLAUDE.md 或出现在信封里，任何能读文件/看消息的进程都能拿到，模型也没有可信参照可以校验。更重要的是模型本身不接受仓库文件授予的这类例外（A3 明确说了）。结论：这条路**既不安全也不有效**，不实现。
+
+### 方案 B：tmux send-keys（终端 CLI 会话）
+
+在 `tmux new -s ab-spike-b` 的 pane 里启动 `claude --permission-mode manual`，用 `tmux send-keys -t <pane> -l '<文字>'` + `Enter` 投递。会话是普通的交互 CLI，不是 `-p`。
+
+| 检查 | 结果 |
+| --- | --- |
+| 是否真正的 user turn | 是。转录里 `content:"提交"`、`promptSource:"typed"`、`turnOrigin:"human"`、`origin.kind:"human"`，无信封 |
+| 是否执行 | 是，生成提交 `d9db355 chore: add note.txt with v1` |
+| 忙碌时注入 | 在 `sleep 25` 回合进行中注入「请只回复 QUEUED_OK」：显示为独立的用户回合，模型直接回了 QUEUED_OK；原回合没有给出完成回复（被新回合接替），说明注入会打断在途任务的收尾 |
+| AskUserQuestion | 出现 `1. A / 2. B / 3. Type something.` 选项，`Down` + `Enter` 选中 B，转录显示 `User answered Claude's questions: … → B` |
+| 中文/特殊字符 | 中文、引号、`$HOME`、分号原样到达并回显；反引号在 TUI 输入框里被吞掉（`反引号 \`x\`` 到达后只剩 `反引号 x`） |
+| 多行 | `-l $'第一行\n第二行'` 把换行作为输入框内换行，不提交；需要多行时可用同样的字面发送，再单独发 `Enter` |
+| 定位方式 | `pid → ps -o tty= → /dev/ttysNNN → tmux list-panes -a -F "#{pane_tty} …"` 精确匹配；pane 的 `pane_pid` 是 shell，claude 是它的子进程（实测 pane pid 95774，claude 97860，tty ttys028） |
+| 不在 tmux 里 | 找不到匹配 pane 时原型直接拒绝，应回退现有 peer 通道并在 UI 说明「该会话不在 tmux 中，批准需回桌面」 |
+| 原型 | `scripts/spike/tmux-approval.mjs <pid> <text>`：校验目标确实是交互式 `claude`、tty 唯一匹配 pane、pid 是 pane 子进程，然后 `send-keys -l` + `Enter`；实测投递 `reply PROTOTYPE_OK` 成功，对非 tmux 会话（ttys006）按预期拒绝 |
+
+安全：tmux 的 socket 属于当前用户，同用户的任何进程本来就能 `send-keys` 到任意 pane，因此 Bridge 侧能做的是「只允许 Noise 认证的配对设备触发」，并且 pane **只能**由服务端从已发现的会话 pid/tty 推导，不能接受网页传来的 pane id。仍要承认：这条通道的可信度上限是「本机同用户进程」，不比 peer 通道高，只是它到达的是会话自己的输入。
+
+### 方案 C：Claude Desktop App（只评估，未实测）
+
+Desktop Code 会话由 `Claude.app` 以无 TTY 的 stream-json 子进程运行，输入归 App 所有。可行路线只有 macOS 辅助功能（AppleScript / AXUIElement / `System Events keystroke`）把文字敲进 Code 标签页的输入框：
+
+- 需要给 Bridge（或承载它的进程）授予「辅助功能」权限，属于系统级人工授权；
+- 必须让 Claude.app 在前台且目标 Code 标签页有焦点，会抢用户的焦点，用户正在输入时可能拼错；
+- Electron 应用的 AX 树不稳定，多窗口/多标签下定位目标会话只能靠标题或坐标，版本升级易失效；
+- 无法确认文字是否作为该会话的用户回合送达，只能截屏/读 AX 文本反推；
+- 与「Bridge 是后台常驻进程」的形态冲突。
+
+未在真实 App 窗口里做任何键入（按要求）。结论：代价高、脆弱、需要前台焦点，不作为方案。
+
+### 推荐
+
+1. **要解决「已经在进行的会话接受网页批准」，只有方案 B 可行**，代价是会话必须在 tmux 里启动（或在 Bridge 里提供「在 tmux 中打开」的入口）。实测接受 1/1，输入就是本人回合，AskUserQuestion 也能用方向键回答。
+2. 方案 A 不要再做：实测 0/3，模型明确拒绝仓库规则授予的跨会话授权；而且 peer 通道本身无法防冒用。
+3. 桌面 App 里的会话没有低成本路径：要么让用户改在 tmux 里开 CLI，要么用已实现的 Bridge 托管会话（`--input-format stream-json`，输入天然是本人回合）。方案 C 的辅助功能路线不建议投入。
+4. 方案 B 的已知风险要在产品里写清：注入会接替在途回合；反引号会丢失；多行需分两次发送；tmux 外会话回退 peer 通道并提示。
+
+工作量估计（方案 B 产品化）：会话发现与 tmux 面板映射约 1 天；发送与忙碌/排队策略、UI 标注与回退约 1 天；权限与越权测试（只允许已配对设备、pane 只能服务端推导、错误的 pid/tty 必须拒绝）约 1 天；文档与端到端验证约 0.5 天。共约 3–4 天。方案 C 若要做，光 AX 定位与焦点处理就不低于 5 天且难以稳定。
