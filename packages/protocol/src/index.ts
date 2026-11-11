@@ -104,6 +104,9 @@ export const METHODS = [
   "session.rail",
   "session.models",
   "session.compact",
+  "push.info",
+  "push.subscribe",
+  "push.unsubscribe",
   "task.messages",
   "message.list",
   "session.subscribe",
@@ -409,6 +412,8 @@ export interface SessionSummary {
   live: boolean;
   /** The session process is actively running a turn right now. */
   busy?: boolean;
+  /** The client is blocked on a question only the user can answer (AskUserQuestion). */
+  needsDecision?: boolean;
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;
@@ -589,6 +594,22 @@ export interface SessionModelsResult {
   /** 能否从网页切换模型；false 时看 note。 */
   canSwitch: boolean;
   note?: string;
+}
+
+/** 网页订阅系统推送需要 VAPID 公钥；私钥只留在 Bridge 里，不出这台机器。 */
+export interface PushInfoResult {
+  publicKey: string;
+  /** 当前设备已经登记过的订阅数；0 表示这台设备的浏览器还没订阅。 */
+  subscriptions: number;
+}
+
+export interface PushSubscribeParams {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+export interface PushSubscribeResult {
+  subscriptions: number;
 }
 
 export interface TaskMessagesParams {

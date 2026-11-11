@@ -105,6 +105,8 @@ interface CachedMessages {
   context?: ContextUsage;
   busy?: BusyState;
   interrupted?: boolean;
+  /** 还有 AskUserQuestion 没有对应的 tool_result：客户端正等着用户选。 */
+  pendingAsk?: boolean;
 }
 
 function asString(value: unknown): string {
@@ -276,6 +278,26 @@ function trackBusy(busy: BusyState, entry: RawEntry): void {
   }
 }
 
+/**
+ * An AskUserQuestion tool_use without its tool_result means the client is waiting on the user:
+ * the turn is still open and the desktop shows a question box. Answers land as a tool_result,
+ * so the set empties as soon as either side replies.
+ */
+function trackAsks(pending: Set<string>, content: unknown): void {
+  if (!Array.isArray(content)) return;
+  for (const raw of content) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const block = raw as Record<string, unknown>;
+    if (block["type"] === "tool_use" && block["name"] === ASK_TOOL) {
+      const id = asString(block["id"]);
+      if (id) pending.add(id);
+    } else if (block["type"] === "tool_result") {
+      const id = asString(block["tool_use_id"]);
+      if (id) pending.delete(id);
+    }
+  }
+}
+
 const BUSY_IDLE_MS = 30 * 60_000;
 
 /**
@@ -410,6 +432,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       // 所以只按「能否唤醒」判断可发送，不再要求进程已经在跑。
       const canWake = !session.archived && session.cliSessionId !== "" && scan.error === null;
       const canSend = live ? this.socketFor(pid) !== null : canWake;
+      const needsDecision = busy && session.cliSessionId !== "" ? this.pendingAsk(session) : false;
       out.push({
         sessionId,
         appId: this.key,
@@ -421,6 +444,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         archived: session.archived,
         live,
         ...(busy ? { busy: true } : {}),
+        ...(needsDecision ? { needsDecision: true } : {}),
         canSend,
         ...(session.cwd ? { cwd: session.cwd } : {}),
         sendBlockedReason: canSend
@@ -541,6 +565,18 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       return this.readTranscript(path, `${this.key}:${record.localId}`).context?.model;
     } catch {
       return undefined;
+    }
+  }
+
+  /** 正在运行的会话是否停在一个没人回答的提问上；读不到 transcript 就当没有。 */
+  private pendingAsk(record: DesktopSession): boolean {
+    if (!record.cliSessionId) return false;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return false;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).needsDecision;
+    } catch {
+      return false;
     }
   }
 
@@ -1133,7 +1169,13 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   private readTranscript(
     path: string,
     sessionId: string,
-  ): { messages: MessageRecord[]; context?: ContextUsage; busy: boolean; interrupted: boolean } {
+  ): {
+    messages: MessageRecord[];
+    context?: ContextUsage;
+    busy: boolean;
+    interrupted: boolean;
+    needsDecision: boolean;
+  } {
     let mtimeMs = 0;
     let size = 0;
     try {
@@ -1146,17 +1188,21 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const cached = this.messageCache.get(path);
     if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
       const interrupted = cached.interrupted === true;
+      const running = isBusy(cached.busy) && !interrupted;
       return {
         messages: cached.messages,
         ...(cached.context ? { context: cached.context } : {}),
-        busy: isBusy(cached.busy) && !interrupted,
+        busy: running,
         interrupted,
+        needsDecision: running && cached.pendingAsk === true,
       };
     }
 
     const messages: MessageRecord[] = [];
     let context: ContextUsage | undefined;
     const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, lastActivityAt: 0 };
+    /** 已发出、还没有结果的提问工具调用；有剩的就是客户端正等着用户选。 */
+    const pendingAsks = new Set<string>();
     let lastContentOrder = -1;
     let lastInterruptOrder = -1;
     let order = 0;
@@ -1187,8 +1233,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const usage = this.contextOf(entry);
       if (usage) context = usage;
       trackBusy(busy, entry);
+      if (!entry.isSidechain) trackAsks(pendingAsks, entry.message?.content);
     }
     const interrupted = lastInterruptOrder > lastContentOrder;
+    const running = isBusy(busy) && !interrupted;
+    const pendingAsk = pendingAsks.size > 0;
     this.messageCache.set(path, {
       mtimeMs,
       size,
@@ -1196,12 +1245,14 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       ...(context ? { context } : {}),
       busy,
       interrupted,
+      pendingAsk,
     });
     return {
       messages,
       ...(context ? { context } : {}),
-      busy: isBusy(busy) && !interrupted,
+      busy: running,
       interrupted,
+      needsDecision: running && pendingAsk,
     };
   }
 

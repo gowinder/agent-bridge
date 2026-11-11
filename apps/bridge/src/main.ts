@@ -16,6 +16,8 @@ import {
   type AdminDevice,
 } from "./admin.js";
 import { Devtools, isDevtoolsCapability } from "./devtools.js";
+import { SessionNotifier } from "./notify.js";
+import { Pusher } from "./push.js";
 import {
   RelayApi,
   RelayClient,
@@ -375,6 +377,8 @@ async function commandServe(): Promise<void> {
   const adapters = new SessionAdapters();
   const uploads = new UploadStore(store.dir);
   const devtools = new Devtools(store, adapters, log);
+  const pusher = new Pusher(store, log);
+  const notifier = new SessionNotifier(adapters, pusher, log);
 
   let stopping = false;
   let relay: RelayClient | null = null;
@@ -553,6 +557,7 @@ async function commandServe(): Promise<void> {
           adapters,
           uploads,
           devtools,
+          pusher,
         }),
         kind: "device",
         deviceId: device.id,
@@ -576,6 +581,7 @@ async function commandServe(): Promise<void> {
     if (stopping) return;
     stopping = true;
     log("正在退出…");
+    notifier.stop();
     for (const entry of sessions.values()) entry.session.dispose();
     sessions.clear();
     relay?.close(1000, "shutdown");
@@ -584,6 +590,7 @@ async function commandServe(): Promise<void> {
   process.on("SIGTERM", shutdown);
 
   log(`Bridge ${VERSION} 启动，房间 ${config.roomId}`);
+  notifier.start();
   for (const app of adapters.apps().apps) {
     if (app.capabilities.send || app.status === "unavailable") continue;
     log(`发送不可用（${app.name}）：${app.capabilities.sendDetail ?? app.capabilities.reason ?? "原因未知"}`);

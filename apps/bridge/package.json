@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@craftstead/crypto": "*",
-    "@craftstead/protocol": "*"
+    "@craftstead/protocol": "*",
+    "web-push": "^4.0.0"
   }
 }

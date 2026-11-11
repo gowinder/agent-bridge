@@ -18,6 +18,8 @@ import type {
   HostInfoResult,
   MessageAttachment,
   PairResult,
+  PushInfoResult,
+  PushSubscribeResult,
   RequestMessage,
   ResponseMessage,
   SessionListParams,
@@ -27,6 +29,7 @@ import type {
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";
+import type { Pusher } from "./push.js";
 import type { RelayApi } from "./relay-client.js";
 import type { DeviceRecord, InviteRecord, Store } from "./store.js";
 import type { UploadStore } from "./uploads.js";
@@ -231,6 +234,7 @@ export interface DeviceSessionOptions extends SessionOptions {
   adapters: SessionAdapters;
   uploads: UploadStore;
   devtools: Devtools;
+  pusher: Pusher;
 }
 
 export class DeviceSession implements ChannelSession {
@@ -358,6 +362,36 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.compact(sessionId);
+      }
+      case "push.info": {
+        const info: PushInfoResult = {
+          publicKey: this.options.pusher.publicKey(),
+          subscriptions: this.options.pusher.count(this.options.device.id),
+        };
+        return info;
+      }
+      case "push.subscribe": {
+        const endpoint = stringParam(params, "endpoint") ?? "";
+        const keys = params["keys"];
+        const p256dh = isObject(keys) ? stringParam(keys, "p256dh") : undefined;
+        const auth = isObject(keys) ? stringParam(keys, "auth") : undefined;
+        if (!p256dh || !auth) throw new RpcError("invalid_params", "订阅缺少密钥");
+        if (!/^https:\/\//i.test(endpoint)) throw new RpcError("invalid_params", "订阅地址必须是 https");
+        const result: PushSubscribeResult = {
+          subscriptions: this.options.pusher.subscribe(this.options.device.id, {
+            endpoint,
+            keys: { p256dh, auth },
+          }),
+        };
+        return result;
+      }
+      case "push.unsubscribe": {
+        const endpoint = stringParam(params, "endpoint");
+        if (!endpoint) throw new RpcError("invalid_params", "endpoint required");
+        const result: PushSubscribeResult = {
+          subscriptions: this.options.pusher.unsubscribe(this.options.device.id, endpoint),
+        };
+        return result;
       }
       case "task.messages": {
         const sessionId = stringParam(params, "sessionId");
