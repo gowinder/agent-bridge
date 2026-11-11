@@ -195,8 +195,17 @@ export class Room {
       const idleAt = Math.max(lastSeen, now) + IDLE_ROOM_MS;
       next = next === null ? idleAt : Math.min(next, idleAt);
     } else {
-      // 没有连接也没有 bridge 用这份凭据登录过：整间清空，房间号回到可认领状态。
+      // 没有连接也没有 bridge 用这份凭据登录过：清空房间数据，但保留认领凭据。
+      // 保留是必要的：认领是 TOFU（谁先连上谁就是桥），如果整间清空让房间回到
+      // 可认领状态，任何还知道旧 roomId 的人都能在原 Mac 离线时把它抢注走。
+      // 代价是每个废弃房间永久留下几个字节的认领锚点。
+      const anchors: Array<[string, string | null]> = [
+        ["room_id", await this.meta("room_id")],
+        ["bridge_hash", await this.meta("bridge_hash")],
+        ["created_at", await this.meta("created_at")],
+      ];
       await this.ctx.storage.deleteAll();
+      for (const [key, value] of anchors) if (value !== null) await this.ctx.storage.put(key, value);
       this.schemaReady = false;
       this.lastTouchAt = 0;
       return;

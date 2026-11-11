@@ -1003,6 +1003,16 @@ a.crumb:hover {
   border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
 }
 
+.notice.warn {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent);
+}
+
+.hint.warn {
+  color: var(--warn);
+}
+
 /* 浮在最上层的临时提示，操作失败时给一句看得见的反馈。 */
 .float-notice {
   position: fixed;

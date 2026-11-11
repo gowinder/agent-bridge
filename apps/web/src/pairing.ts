@@ -102,7 +102,7 @@ export async function finishPairing(
     pairedAt: Date.now(),
     bridge: result.bridge,
   };
-  saveDevice(device);
+  await saveDevice(device);
   client.stop();
   return { device, result };
 }
