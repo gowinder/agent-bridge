@@ -58,7 +58,7 @@ jobs:
             if [ "$previous" != "$version" ]; then changed=true; fi
           fi
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
-          echo "版本号：$version（对比 $base），变化：$changed"
+          echo "版本号：${version}（对比 ${base}），变化：${changed}"
 
       - id: maincheck
         name: 检查提交是否已合入 main
@@ -79,7 +79,7 @@ jobs:
             tag_ok=false
           fi
           echo "tag_ok=$tag_ok" >> "$GITHUB_OUTPUT"
-          echo "tag 与版本号匹配：$tag_ok（ref ${GITHUB_REF}，版本 ${{ steps.detect.outputs.version }}）"
+          echo "tag 与版本号匹配：${tag_ok}（ref ${GITHUB_REF}，版本 ${{ steps.detect.outputs.version }}）"
           # 预发布 tag（v0.1.5-rc.1）只用来发 DMG，绝不碰生产。正式版 tag 必须
           # 是干净的 v<major>.<minor>.<patch>，多一段预发布后缀就不算正式发布。
           release_tag=false
@@ -87,7 +87,7 @@ jobs:
             release_tag=true
           fi
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
-          echo "正式发布 tag：$release_tag（${GITHUB_REF}）"
+          echo "正式发布 tag：${release_tag}（${GITHUB_REF}）"
 
   preview:
     needs: version

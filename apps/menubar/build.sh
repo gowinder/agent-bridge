@@ -66,7 +66,7 @@ if [ -n "${AGENT_BRIDGE_NODE:-}" ]; then
     > "$contents/Resources/bridge/package.json"
 
   repo_key=""
-  echo "已打包 bridge CLI 与 Node 运行时（$AGENT_BRIDGE_NODE）"
+  echo "已打包 bridge CLI 与 Node 运行时（${AGENT_BRIDGE_NODE}）"
 else
   # 开发构建：用源码树里的 apps/bridge/dist，需要本机 Node。
   repo_key="<key>AgentBridgeRepo</key><string>$repo</string>"
