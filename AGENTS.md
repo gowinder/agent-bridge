@@ -28,8 +28,8 @@
 
 - `npm run check`（`tsc -b` + web `tsc --noEmit`）必须通过。
 - 改动涉及 wasm 或 web 构建时，本地也跑一遍部署链路：
-  - `npm run build:wasm -w @agent-bridge/crypto`
-  - `npm run build -w @agent-bridge/web`
+  - `npm run build:wasm -w @craftstead/crypto`
+  - `npm run build -w @craftstead/web`
 - 仓库当前没有 lint / test 脚本，不要声称跑过。
 
 ## 约定

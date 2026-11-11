@@ -14,7 +14,7 @@ import type {
   RailTask,
   SessionRailResult,
   SessionSummary,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const ANTIGRAVITY_DIR = join(homedir(), ".gemini", "antigravity-cli");

@@ -1,5 +1,5 @@
 {
-  "name": "@agent-bridge/crypto",
+  "name": "@craftstead/crypto",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -20,6 +20,6 @@
     "build:wasm": "sh scripts/build-wasm.sh"
   },
   "dependencies": {
-    "@agent-bridge/protocol": "*"
+    "@craftstead/protocol": "*"
   }
 }

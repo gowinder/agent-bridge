@@ -10,7 +10,7 @@ import {
   SecureChannel,
   type KeyPair,
   type Noise,
-} from "@agent-bridge/crypto";
+} from "@craftstead/crypto";
 import type {
   DeviceSummary,
   ErrorCode,
@@ -23,7 +23,7 @@ import type {
   SessionListParams,
   ShellEventData,
   WireMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";

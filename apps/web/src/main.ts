@@ -1,4 +1,4 @@
-import { MAX_TRANSFER_CHARS } from "@agent-bridge/protocol";
+import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -34,7 +34,7 @@ import type {
   ShellExecResult,
   TransferCommitResult,
   TransferPrepareResult,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import {
   expireLabel,
   getDeviceSecrets,

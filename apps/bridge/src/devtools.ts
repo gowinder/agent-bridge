@@ -20,7 +20,7 @@ import {
   type ShellCancelResult,
   type ShellEventData,
   type ShellExecResult,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Store } from "./store.js";

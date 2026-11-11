@@ -5,7 +5,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
-import type { DevtoolsCapabilityName, DevtoolsStatus } from "@agent-bridge/protocol";
+import type { DevtoolsCapabilityName, DevtoolsStatus } from "@craftstead/protocol";
 import { isDevtoolsCapability } from "./devtools.js";
 
 export const ADMIN_HOST = "127.0.0.1";

@@ -1,4 +1,4 @@
-import { loadNoise, type Noise } from "@agent-bridge/crypto";
+import { loadNoise, type Noise } from "@craftstead/crypto";
 
 let pending: Promise<Noise> | null = null;
 

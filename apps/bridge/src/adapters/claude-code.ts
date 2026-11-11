@@ -31,7 +31,7 @@ import type {
   SessionModelsResult,
   SessionRailResult,
   SessionSummary,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
