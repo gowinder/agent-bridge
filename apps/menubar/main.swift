@@ -171,10 +171,21 @@ enum BridgeCLI {
         let error: String
     }
 
+    /// DMG 安装版把运行时和 CLI 放在 Contents/Resources 里，源码树和本机 Node 都不需要。
+    static func bundledPath(_ relative: String) -> String? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let path = resources.appendingPathComponent(relative).path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
     static func nodePath() -> String? {
         if let explicit = ProcessInfo.processInfo.environment["AGENT_BRIDGE_NODE"],
            FileManager.default.isExecutableFile(atPath: explicit) {
             return explicit
+        }
+        if let bundled = bundledPath("node/bin/node"),
+           FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
         }
         for candidate in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"] {
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
@@ -200,11 +211,14 @@ enum BridgeCLI {
         return path.isEmpty || !FileManager.default.isExecutableFile(atPath: path) ? nil : path
     }
 
-    /// env override, else the checkout recorded in Info.plist at build time.
+    /// env override, else the CLI bundled into the app, else the source tree in Info.plist.
     static func scriptPath() -> String? {
         if let bin = ProcessInfo.processInfo.environment["AGENT_BRIDGE_BIN"], !bin.isEmpty,
            FileManager.default.fileExists(atPath: bin) {
             return bin
+        }
+        if let bundled = bundledPath("bridge/apps/bridge/dist/main.js") {
+            return bundled
         }
         guard let repo = Bundle.main.object(forInfoDictionaryKey: "AgentBridgeRepo") as? String else {
             return nil

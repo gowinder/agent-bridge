@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev --port 8787 --local",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy --env production",
+    "deploy:preview": "wrangler deploy --env preview"
   },
   "dependencies": {
     "@craftstead/protocol": "*"

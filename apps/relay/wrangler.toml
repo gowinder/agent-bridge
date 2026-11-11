@@ -2,11 +2,6 @@ name = "agent-bridge-relay"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
 
-# 生产环境走品牌子域：前端静态资源与 /v1/* 由同一个 Worker 提供，保持同源。
-[[routes]]
-pattern = "agent-bridge.craftstead.app"
-custom_domain = true
-
 [dev]
 port = 8787
 
@@ -18,6 +13,26 @@ tag = "v1"
 new_sqlite_classes = ["Room"]
 
 [assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*"]
+
+# 生产：品牌子域，前端静态资源与 /v1/* 由同一个 Worker 提供，保持同源。
+# 路由只写在 production 里，预览环境就没有可继承的来源；名字显式写死，
+# `deploy --env production` 才不会变成 agent-bridge-relay-production 这个新 Worker。
+[env.production]
+name = "agent-bridge-relay"
+routes = [{ pattern = "agent-bridge.craftstead.app", custom_domain = true }]
+
+[env.production.durable_objects]
+bindings = [{ name = "ROOMS", class_name = "Room" }]
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[env.production.assets]
 directory = "../web/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
