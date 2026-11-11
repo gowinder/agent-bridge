@@ -34,3 +34,5 @@ apps/menubar/build/
 
 # 本地环境变量（含敏感 token）
 .env*.local
+
+.claude-results/

@@ -207,6 +207,8 @@ const app: HTMLDivElement = root;
 
 let active: PeerClient | null = null;
 let generation = 0;
+/** 刚配对完回到首页时提示一句回落地页的入口；只影响一次渲染。 */
+let justPaired = false;
 let retryTimer: number | null = null;
 let pollTimer: number | null = null;
 let renderToken = 0;
@@ -616,6 +618,16 @@ function renderHome(): HTMLElement {
       " 可以收藏或添加到主屏幕，下次直接打开，不必再粘贴配对链接。",
     ]),
   );
+  if (justPaired) {
+    justPaired = false;
+    page.append(
+      el("p", { className: "hint bookmark-hint" }, [
+        "配对完成，",
+        el("a", { attrs: { href: craftsteadLanding(true) }, text: "回到 Craftstead 落地页" }),
+        " 查看已配对状态。",
+      ]),
+    );
+  }
   return page;
 }
 
@@ -686,7 +698,10 @@ function showConfirm(challenge: PairingChallenge): void {
       await ensureVault();
       await finishPairing(challenge, name);
     })()
-      .then(() => showHome())
+      .then(() => {
+        justPaired = true;
+        showHome();
+      })
       .catch((failure: unknown) => {
         confirm.disabled = false;
         error.textContent = messageOf(failure);
@@ -1446,11 +1461,19 @@ function agentSwitcher(route: Route): HTMLElement | null {
   return wrap;
 }
 
+/**
+ * 落地页地址。预览客户端在 workers.dev 上，写不到 pages.dev 的 cookie，
+ * 所以回链用非敏感的 ?ab_paired=1 标记让落地页切到已配对状态；生产仍只靠 cookie。
+ */
+function craftsteadLanding(paired: boolean): string {
+  if (!location.hostname.endsWith(".workers.dev")) return "https://craftstead.app/agent-bridge";
+  const base = "https://develop.craftstead.pages.dev/agent-bridge";
+  return paired ? base + "?ab_paired=1" : base;
+}
+
 function renderTopbar(crumbs: Crumb[]): HTMLElement {
   // 预览部署在 workers.dev 上，回链也停在预览官网，别把试用的人送去生产。
-  const landing = location.hostname.endsWith(".workers.dev")
-    ? "https://develop.craftstead.pages.dev/agent-bridge"
-    : "https://craftstead.app/agent-bridge";
+  const landing = craftsteadLanding(true);
   const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
   crumbs.forEach((crumb, index) => {
     if (index > 0) nav.append(el("span", { className: "crumb-sep", text: "/" }));
