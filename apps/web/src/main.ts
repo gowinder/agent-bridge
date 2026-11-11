@@ -24,6 +24,8 @@ import type {
   NextStepAction,
   ProjectInfo,
   ProjectListResult,
+  PushInfoResult,
+  PushSubscribeResult,
   RailRow,
   RailTask,
   SessionCompactResult,
@@ -317,13 +319,35 @@ function unreadCount(sessions: SessionSummary[]): number {
   return sessions.filter((session) => unreadAt(session.sessionId) !== undefined).length;
 }
 
+/** 手机浏览器关掉页面后只剩 Service Worker 推送能把提醒送到通知中心。 */
+function pushSupported(): boolean {
+  return "serviceWorker" in navigator && "PushManager" in window && window.isSecureContext;
+}
+
 function notificationsSupported(): boolean {
-  return "Notification" in window;
+  return pushSupported() || "Notification" in window;
+}
+
+/** iPhone / iPad 上的 Safari 只有「添加到主屏幕」后的独立窗口才能收推送。 */
+function iosNeedsInstall(): boolean {
+  if (!/iPhone|iPad|iPod/.test(navigator.userAgent)) return false;
+  const standalone =
+    (navigator as { standalone?: boolean }).standalone === true ||
+    window.matchMedia("(display-mode: standalone)").matches;
+  return !standalone;
+}
+
+const IOS_HINT = "iPhone 需要先在 Safari 里用「添加到主屏幕」，再从主屏幕打开，才能收到后台提醒。";
+
+/** 有的浏览器只提供 Service Worker 推送，没有 Notification 构造器。 */
+function notificationPermission(): NotificationPermission {
+  if (!("Notification" in window)) return "granted";
+  return Notification.permission;
 }
 
 function notificationsOn(): boolean {
   if (!notificationsSupported()) return false;
-  if (Notification.permission !== "granted") return false;
+  if (notificationPermission() !== "granted") return false;
   try {
     return localStorage.getItem(NOTIFY_KEY) !== "0";
   } catch {
@@ -331,8 +355,105 @@ function notificationsOn(): boolean {
   }
 }
 
+const PUSH_KEY = "ab.pushSubscribed";
+
+function pushOn(): boolean {
+  try {
+    return localStorage.getItem(PUSH_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function setPushFlag(on: boolean): void {
+  try {
+    localStorage.setItem(PUSH_KEY, on ? "1" : "0");
+  } catch {
+    // 存储不可用时只影响下次刷新，当前页面仍按内存里的状态走
+  }
+}
+
+let swReady: Promise<ServiceWorkerRegistration> | null = null;
+
+function serviceWorker(): Promise<ServiceWorkerRegistration> {
+  if (!swReady) swReady = navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  return swReady;
+}
+
+function keyBytes(value: string): ArrayBuffer {
+  const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(normalized + "=".repeat((4 - (normalized.length % 4)) % 4));
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) bytes[index] = raw.charCodeAt(index);
+  return bytes.buffer;
+}
+
+function bytesKey(value: ArrayBuffer | null): string {
+  if (!value) return "";
+  let raw = "";
+  for (const byte of new Uint8Array(value)) raw += String.fromCharCode(byte);
+  return btoa(raw).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+/**
+ * 订阅系统推送并把地址交给 Bridge。返回失败原因，成功返回 null：调用方决定要不要
+ * 把原因显示给用户（自动同步时静默）。
+ */
+async function subscribePush(): Promise<string | null> {
+  if (!pushSupported()) return "这个浏览器不支持后台推送";
+  const registration = await serviceWorker();
+  const info = await call<PushInfoResult>("push.info");
+  let subscription = await registration.pushManager.getSubscription();
+  // Bridge 换过 VAPID 密钥（比如重装了数据目录）时，旧订阅在推送服务那端已经失效。
+  if (subscription && bytesKey(subscription.options.applicationServerKey as ArrayBuffer | null) !== info.publicKey) {
+    await subscription.unsubscribe();
+    subscription = null;
+  }
+  if (!subscription) {
+    subscription = await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: keyBytes(info.publicKey),
+    });
+  }
+  const json = subscription.toJSON();
+  const keys = json.keys ?? {};
+  if (!json.endpoint || !keys["p256dh"] || !keys["auth"]) return "浏览器没有给出推送地址";
+  await call<PushSubscribeResult>("push.subscribe", {
+    endpoint: json.endpoint,
+    keys: { p256dh: keys["p256dh"], auth: keys["auth"] },
+  });
+  setPushFlag(true);
+  return null;
+}
+
+async function unsubscribePush(): Promise<void> {
+  setPushFlag(false);
+  if (!pushSupported()) return;
+  try {
+    const registration = await serviceWorker();
+    const subscription = await registration.pushManager.getSubscription();
+    if (!subscription) return;
+    const endpoint = subscription.endpoint;
+    await subscription.unsubscribe();
+    await call("push.unsubscribe", { endpoint });
+  } catch {
+    // 连接已断时也得让按钮关得掉；本地标记已经清了，订阅会随浏览器过期。
+  }
+}
+
+/** 重连后补一次订阅：VAPID 换过或 Bridge 清过订阅都能自动恢复。 */
+async function syncPush(): Promise<void> {
+  if (!notificationsOn() || !pushSupported()) return;
+  try {
+    await subscribePush();
+  } catch {
+    // 自动同步失败不打扰用户，下次重连再试
+  }
+}
+
 function notifyCompletion(session: SessionSummary): void {
-  if (!notificationsOn()) return;
+  // 推送已订阅时由 Bridge 统一发，页面里再弹一次就是重复提醒。
+  if (!notificationsOn() || pushOn()) return;
   const appName = snapshot?.apps.find((item) => item.appId === session.appId)?.name ?? "Agent Bridge";
   try {
     const note = new Notification(session.title || "对话已完成", {
@@ -419,6 +540,7 @@ function startSessionWatch(): void {
   if (watchTimer !== null) return;
   watchTimer = window.setInterval(() => void watchSessions(), 10_000);
   document.addEventListener("visibilitychange", onWatchVisible);
+  void syncPush();
 }
 
 /** Background tabs throttle the timer, so returning to the tab refreshes at once. */
@@ -489,6 +611,16 @@ function navigate(route: Route, replace = false): void {
     return;
   }
   location.hash = hash;
+}
+
+// 点通知时 Service Worker 会让已经开着的页面换到那条会话，而不是再开一个窗口。
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (event: MessageEvent) => {
+    const data = event.data as { type?: unknown; url?: unknown } | null;
+    if (!data || data.type !== "ab.navigate" || typeof data.url !== "string") return;
+    const index = data.url.indexOf("#");
+    if (index !== -1 && data.url.slice(index) !== location.hash) location.hash = data.url.slice(index);
+  });
 }
 
 function stopActive(): void {
@@ -1539,29 +1671,42 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
  * request in Safari; the topbar button is that gesture, and it also switches them off.
  */
 function notifyButton(): HTMLButtonElement | null {
-  if (!notificationsSupported()) return null;
-  const denied = Notification.permission === "denied";
+  // iPhone 的 Safari 窗口里没有推送能力，但按钮留着才能告诉用户先装到主屏幕。
+  if (!notificationsSupported() && !iosNeedsInstall()) return null;
+  const denied = notificationPermission() === "denied";
   const enabled = notificationsOn();
   const node = button("", () => void toggleNotifications(), `btn ghost small notify-btn${enabled ? " is-on" : ""}`);
   node.append(icon(enabled ? "bell" : "bellOff"), el("span", { text: enabled ? "提醒已开" : "开启提醒" }));
-  node.title = denied
-    ? "通知已被浏览器禁止，请在站点设置中允许通知"
-    : enabled
-      ? "关闭对话完成提醒"
-      : "开启浏览器通知，对话完成后弹出提醒";
+  node.title = !notificationsSupported()
+    ? IOS_HINT
+    : denied
+      ? "通知已被浏览器禁止，请在站点设置中允许通知"
+      : enabled
+        ? "关闭完成与待回答提醒"
+        : "开启浏览器提醒：对话完成或等你回答时推送到通知中心";
   return node;
 }
 
 async function toggleNotifications(): Promise<void> {
-  if (!notificationsSupported()) return;
-  if (Notification.permission === "denied") {
-    window.alert("通知已被浏览器禁止。请在浏览器的站点设置中允许通知，然后刷新页面。");
+  if (!notificationsSupported()) {
+    if (iosNeedsInstall()) window.alert(IOS_HINT);
     return;
   }
-  // Read the switch before the prompt: a granted permission alone already makes
-  // notificationsOn() true, so negating it afterwards would save "0" and turn them off.
-  const wasOn = notificationsOn();
-  if (Notification.permission !== "granted") {
+  if (notificationsOn() || pushOn()) {
+    await unsubscribePush();
+    try {
+      localStorage.setItem(NOTIFY_KEY, "0");
+    } catch {
+      // storage unavailable; the choice lasts this page only
+    }
+    void renderRoute(true);
+    return;
+  }
+  if (notificationPermission() === "denied") {
+    window.alert(`通知已被浏览器禁止。请在浏览器的站点设置中允许通知，然后刷新页面。\n\n${IOS_HINT}`);
+    return;
+  }
+  if (notificationPermission() !== "granted") {
     let result: NotificationPermission = "denied";
     try {
       result = await Notification.requestPermission();
@@ -1570,12 +1715,22 @@ async function toggleNotifications(): Promise<void> {
     }
     if (result !== "granted") return;
   }
-  const next = !wasOn;
   try {
-    localStorage.setItem(NOTIFY_KEY, next ? "1" : "0");
+    localStorage.setItem(NOTIFY_KEY, "1");
   } catch {
     // storage unavailable; the choice lasts this page only
   }
+  let problem: string | null = null;
+  if (pushSupported()) {
+    try {
+      problem = await subscribePush();
+    } catch (error) {
+      problem = messageOf(error);
+    }
+  } else {
+    problem = "这个浏览器只能在页面打开时提醒";
+  }
+  if (problem) window.alert(`${problem}。\n\n${IOS_HINT}`);
   void renderRoute(true);
 }
 

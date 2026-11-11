@@ -21,6 +21,15 @@ export interface InviteRecord {
   usedAt: number | null;
 }
 
+/** A browser's Web Push registration; the endpoint is unique per browser profile. */
+export interface PushSubscriptionRecord {
+  endpoint: string;
+  deviceId: string;
+  p256dh: string;
+  auth: string;
+  createdAt: number;
+}
+
 export function defaultStateDir(): string {
   return process.env["AGENT_BRIDGE_HOME"] ?? join(homedir(), "Library", "Application Support", "AgentBridge");
 }
@@ -64,6 +73,15 @@ export class Store {
          created_at INTEGER NOT NULL,
          expires_at INTEGER NOT NULL,
          used_at INTEGER
+       )`,
+    );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS push_subscriptions (
+         endpoint TEXT PRIMARY KEY,
+         device_id TEXT NOT NULL,
+         p256dh TEXT NOT NULL,
+         auth TEXT NOT NULL,
+         created_at INTEGER NOT NULL
        )`,
     );
   }
@@ -156,6 +174,42 @@ export class Store {
 
   markInviteUsed(id: string): void {
     this.db.prepare("UPDATE invites SET used_at = ? WHERE id = ?").run(Date.now(), id);
+  }
+
+  pushSubscriptions(deviceId?: string): PushSubscriptionRecord[] {
+    const rows = deviceId
+      ? this.db.prepare("SELECT * FROM push_subscriptions WHERE device_id = ? ORDER BY created_at DESC").all(deviceId)
+      : this.db.prepare("SELECT * FROM push_subscriptions ORDER BY created_at DESC").all();
+    return rows.map((row) => ({
+      endpoint: String(row["endpoint"]),
+      deviceId: String(row["device_id"]),
+      p256dh: String(row["p256dh"]),
+      auth: String(row["auth"]),
+      createdAt: Number(row["created_at"]),
+    }));
+  }
+
+  savePushSubscription(record: PushSubscriptionRecord): void {
+    this.db
+      .prepare(
+        `INSERT INTO push_subscriptions (endpoint, device_id, p256dh, auth, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+           device_id = excluded.device_id,
+           p256dh = excluded.p256dh,
+           auth = excluded.auth`,
+      )
+      .run(record.endpoint, record.deviceId, record.p256dh, record.auth, record.createdAt);
+  }
+
+  deletePushSubscription(endpoint: string, deviceId?: string): void {
+    if (deviceId) {
+      this.db
+        .prepare("DELETE FROM push_subscriptions WHERE endpoint = ? AND device_id = ?")
+        .run(endpoint, deviceId);
+      return;
+    }
+    this.db.prepare("DELETE FROM push_subscriptions WHERE endpoint = ?").run(endpoint);
   }
 
   clearExpiredInvites(now = Date.now()): void {
