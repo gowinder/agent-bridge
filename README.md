@@ -13,8 +13,10 @@ icon and choose “Invite new device…”. The bundle already contains the brid
 and its Node runtime; nothing else needs to be installed.
 
 Release builds are signed and notarised only when the Apple secrets are
-configured. Without them macOS blocks the first launch: right-click the app →
-Open, or run
+configured. Without them macOS blocks the first launch. On macOS 15 or newer the
+right-click → Open shortcut is gone: dismiss the dialog, then open System
+Settings → Privacy & Security and click “Open Anyway” at the bottom. On macOS 14
+and earlier, right-click the app → Open. Either way this also works:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/AgentBridge.app

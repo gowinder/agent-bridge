@@ -177,7 +177,11 @@ jobs:
             if [ "$SIGNED" != "true" ]; then
               echo "## Gatekeeper"
               echo
-              echo "这是未签名构建。首次打开会被系统拦下：在「应用程序」里右键 AgentBridge → 打开 → 再点「打开」。"
+              echo "这是未签名构建，首次打开会被系统拦下："
+              echo
+              echo "- macOS 15 及以后：关掉拦截弹窗，打开「系统设置 → 隐私与安全性」，在底部点「仍要打开」。（右键 → 打开这条捷径从 15 起被系统去掉了。）"
+              echo "- macOS 14 及更早：在「应用程序」里右键 AgentBridge → 打开 → 再点「打开」。"
+              echo
               echo "也可以在终端里执行："
               echo
               echo '```'
