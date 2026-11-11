@@ -3017,6 +3017,14 @@ h6.md-h {
     gap: 10px;
   }
 
+  /* 只剩菱形时，标识本身只有 6px，触摸根本点不到；给它一个 32px 的可点区域。 */
+  .craftstead-mark {
+    justify-content: center;
+    min-width: 32px;
+    min-height: 32px;
+    padding: 0 8px 0 12px;
+  }
+
   .recents-btn {
     max-width: 118px;
   }
