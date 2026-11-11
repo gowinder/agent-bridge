@@ -1980,6 +1980,8 @@ interface ChatState {
   /** The latest turn was stopped by the user. */
   interrupted: boolean;
   context?: ContextUsage;
+  /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
+  compact?: { pending: boolean; error?: string; note?: string };
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -3586,14 +3588,23 @@ function contextCompactActions(state: ChatState): HTMLElement {
   const row = el("div", { className: "context-actions" });
   const hint = el("p", { className: "context-hint" });
   if (state.session.canCompact) {
+    const pending = state.compact?.pending === true;
     const btn = el("button", {
       className: "context-action",
-      text: "压缩上下文",
+      text: pending ? "压缩中…" : "压缩上下文",
       attrs: { type: "button" },
     });
-    hint.textContent = "由桌面客户端自己压缩，摘要会写回该会话。";
+    btn.disabled = pending;
+    if (state.compact?.error) {
+      hint.textContent = state.compact.error;
+      hint.classList.add("is-error");
+    } else if (state.compact?.note) {
+      hint.textContent = state.compact.note;
+    } else {
+      hint.textContent = "由桌面客户端自己压缩，摘要会写回该会话。";
+    }
     btn.addEventListener("click", () => {
-      void runCompact(state, btn, hint);
+      void runCompact(state);
     });
     row.append(btn, hint);
     return row;
@@ -3627,36 +3638,27 @@ function contextCompactActions(state: ChatState): HTMLElement {
   return row;
 }
 
-async function runCompact(
-  state: ChatState,
-  btn: HTMLButtonElement,
-  hint: HTMLElement,
-): Promise<void> {
-  btn.disabled = true;
-  btn.textContent = "压缩中…";
-  hint.classList.remove("is-error");
+async function runCompact(state: ChatState): Promise<void> {
+  if (state.compact?.pending) return;
+  state.compact = { pending: true };
+  paintContext(state);
   try {
     const result = await call<SessionCompactResult>(
       "session.compact",
       { sessionId: state.session.sessionId },
       130_000,
     );
-    if (!result.compacted) {
-      btn.disabled = false;
-      btn.textContent = "压缩上下文";
-      hint.textContent = result.detail ?? "客户端没有执行压缩";
-      hint.classList.add("is-error");
-      return;
+    if (result.compacted) {
+      state.compact = { pending: false, note: result.detail ?? "已压缩上下文" };
+      state.status.textContent = result.detail ?? "已在客户端压缩上下文";
+      void refreshTail(state);
+    } else {
+      state.compact = { pending: false, error: result.detail ?? "客户端没有执行压缩" };
     }
-    btn.textContent = "已压缩";
-    state.status.textContent = "已在客户端压缩上下文";
-    void refreshTail(state);
   } catch (error) {
-    btn.disabled = false;
-    btn.textContent = "压缩上下文";
-    hint.textContent = messageOf(error);
-    hint.classList.add("is-error");
+    state.compact = { pending: false, error: messageOf(error) };
   }
+  paintContext(state);
 }
 
 function queuedBubble(item: QueuedMessage): HTMLElement {

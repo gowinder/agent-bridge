@@ -38,6 +38,8 @@ const IPC_SOCKET = join(CODEX_DIR, "ipc", "ipc.sock");
 const MAX_BLOCK_CHARS = 4_000;
 const MAX_SESSIONS = 500;
 const SEND_WAIT_MS = 8_000;
+/** 只等这么久；压缩本身可能更久，确认请求已发出就返回，避免占住设备通道。 */
+const COMPACT_WAIT_MS = 5_000;
 const DISCOVERY_WAIT_MS = 15_000;
 const SEND_TIMEOUT_MS = 180_000;
 const COMPACT_TIMEOUT_MS = 120_000;
@@ -884,20 +886,33 @@ export class CodexAdapter implements SessionAdapter {
     try {
       await client.initialize();
       const owner = await this.threadOwner(client, threadId, "压缩");
-      const response = await client.request({
+      const compactPromise = client.request({
         method: "thread-follower-compact-thread",
         targetClientId: owner,
         timeoutMs: COMPACT_TIMEOUT_MS,
         params: { conversationId: threadId },
       });
-      if (response["resultType"] !== "success") {
+      // 压缩可能要几十秒，不能一直占着设备通道；请求发出去后先把连接留给结果。
+      compactPromise.then(
+        () => client.close(),
+        () => client.close(),
+      );
+      const early = await Promise.race([
+        compactPromise,
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), COMPACT_WAIT_MS)),
+      ]);
+      if (early === null) {
+        return { compacted: true, detail: "已请求 Codex 压缩上下文，仍在执行；稍后刷新查看" };
+      }
+      if (early["resultType"] !== "success") {
         throw new RpcError(
           "adapter_unavailable",
-          `Codex 拒绝压缩：${String(response["error"] ?? response["resultType"] ?? "unknown")}`,
+          `Codex 拒绝压缩：${String(early["error"] ?? early["resultType"] ?? "unknown")}`,
         );
       }
       return { compacted: true };
     } catch (error) {
+      client.close();
       if (
         error instanceof Error &&
         (error.message === "IPC 请求超时" || error.message === "IPC 连接已关闭")
@@ -905,8 +920,6 @@ export class CodexAdapter implements SessionAdapter {
         throw new RpcError("adapter_unavailable", `Codex 桌面未响应（${error.message}）`);
       }
       throw error;
-    } finally {
-      client.close();
     }
   }
 
