@@ -104,6 +104,10 @@ export const METHODS = [
   "session.rail",
   "session.models",
   "session.compact",
+  "hosted.dirs",
+  "hosted.create",
+  "hosted.stop",
+  "hosted.resume",
   "push.info",
   "push.subscribe",
   "push.unsubscribe",
@@ -383,7 +387,7 @@ export interface AdapterCapabilities {
 export interface AppInfo {
   appId: string;
   provider: "anthropic" | "openai" | "google" | "deepseek";
-  kind: "claude-code" | "codex" | "antigravity" | "antigravity-desktop" | "dsh";
+  kind: "claude-code" | "codex" | "antigravity" | "antigravity-desktop" | "dsh" | "hosted";
   name: string;
   version?: string;
   mode: AdapterMode;
@@ -419,6 +423,12 @@ export interface SessionSummary {
   sendBlockedReason?: string;
   /** The client exposes a native "compact this conversation" action to the bridge. */
   canCompact?: boolean;
+  /** This session is a Claude Code process held by Bridge, not a desktop session. */
+  hosted?: boolean;
+  /** `hosted` only: whether Bridge currently owns a running process for it. */
+  hostedState?: "running" | "idle" | "stopped";
+  /** `hosted` only: the permission mode Bridge passes to the CLI. */
+  permissionMode?: string;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
@@ -490,6 +500,48 @@ export interface SessionListResult {
 }
 
 export interface SessionGetResult {
+  session: SessionSummary;
+}
+
+// ---- Hosted sessions (Claude Code processes owned by Bridge) ----
+
+/** Permission modes the CLI accepts; `default` is only a UI alias for `manual`. */
+export type HostedPermissionMode = "manual" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan";
+
+/** One directory the local Bridge allowlists for hosted sessions. */
+export interface HostedDirInfo {
+  path: string;
+  name: string;
+  sessionCount: number;
+  /** false when the directory was removed after it was allowlisted. */
+  exists: boolean;
+}
+
+export interface HostedDirsResult {
+  enabled: boolean;
+  dirs: HostedDirInfo[];
+  idleTimeoutMs: number;
+  permissionModes: HostedPermissionMode[];
+  note?: string;
+}
+
+export interface HostedCreateParams {
+  /** Must equal one of `hosted.dirs`; absolute path or one already resolved there. */
+  path: string;
+  permissionMode?: HostedPermissionMode;
+  title?: string;
+}
+
+export interface HostedSessionParams {
+  sessionId: string;
+}
+
+export interface HostedStopResult {
+  stopped: boolean;
+  session?: SessionSummary;
+}
+
+export interface HostedResumeResult {
   session: SessionSummary;
 }
 

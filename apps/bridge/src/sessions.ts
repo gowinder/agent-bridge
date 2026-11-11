@@ -15,6 +15,7 @@ import type {
   DeviceSummary,
   ErrorCode,
   EventMessage,
+  HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
   PairResult,
@@ -362,6 +363,29 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.compact(sessionId);
+      }
+      case "hosted.dirs":
+        return this.options.adapters.hostedDirs();
+      case "hosted.create": {
+        const path = stringParam(params, "path");
+        if (!path) throw new RpcError("invalid_params", "path required");
+        const permissionMode = stringParam(params, "permissionMode");
+        const title = stringParam(params, "title");
+        return this.options.adapters.hostedCreate({
+          path,
+          ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
+          ...(title ? { title } : {}),
+        });
+      }
+      case "hosted.stop": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.hostedStop(sessionId);
+      }
+      case "hosted.resume": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.hostedResume(sessionId);
       }
       case "push.info": {
         const info: PushInfoResult = {

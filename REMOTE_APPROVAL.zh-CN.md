@@ -155,3 +155,90 @@ claude --resume 2222… -p "请把 feature.txt 加入 git 并提交，提交信�
 ### 限制
 
 真正的桌面 Code 会话无法在自动化里创建：`claude --desktop` 要求 Claude 账号登录（本机 CLI 走代理，无 OAuth），且交互式 CLI 的首个目录需要信任对话框。因此 (d) 的桌面渲染与 live-idle 行为仍待有桌面会话的环境复测；上面的停损结论基于「运行中的 CLI 不重读转录 + 并发写分叉」两项实测。spike 产生的临时会话、计划文件与临时仓库均已清理。
+
+## 官方远程输入调研（2026-11-11）
+
+目的：确认已安装的 Claude Code 是否有一条官方通道，能把输入送进运行中的本地会话，并且该输入算作会话自己的用户回合（不带 cross-session 信封），同时能被 Bridge 程序化驱动。
+
+本机 `claude --version` 输出 `2.1.321 (Claude Code)`。`claude --help` 中与本问题相关的选项：`--remote-control [name]`、`--input-format`、`--output-format`、`--permission-mode`、`--permission-prompts`、`--permission-prompt-tool`、`--bg`、`--cloud`、`--session-id`、`--resume`。`claude remote-control --help` 给出 `--spawn <same-dir|worktree|session>`。
+
+### 候选 1：Remote Control（`--remote-control` / `claude remote-control` / `/remote-control`）
+
+文档：<https://code.claude.com/docs/en/remote-control>、<https://docs.claude.com/en/docs/claude-code/remote-control>。
+
+- 定位：把本地会话接到 claude.ai/code 与 Claude 手机/桌面应用。在这些入口里发的话是一等用户回合，不带 peer 信封；甚至能挂到 Desktop / VS Code 已开着的会话上。
+- 官方限制：需要 claude.ai 订阅，不支持 API key 或第三方 provider；`ANTHROPIC_BASE_URL` 指向非 `api.anthropic.com` 时（本地代理、网关、Bedrock/Vertex/Foundry）不可用；输入只能来自用户的 claude.ai 入口，没有本地 API/IPC 可供第三方写入；转录保存在 Anthropic 服务器。
+- 实测：
+
+  ```
+  $ claude auth status
+  {"loggedIn":false,"authMethod":"none", ...}
+
+  $ claude remote-control
+  Error: You must be logged in to use Remote Control. ...
+  ```
+
+  本机 `~/.claude/settings.json` 的 `env.ANTHROPIC_BASE_URL` 指向本地代理，按文档 Remote Control 本来也不可用。
+- 按四个问题核对：
+  1. 输入是真正用户回合——是，但只能由用户本人在 claude.ai/code 或 Claude 客户端输入；
+  2. 适用桌面会话——可挂到 Desktop / VS Code 会话；
+  3. 认证——claude.ai 订阅，且不能走代理/网关；本机环境不满足；
+  4. Bridge 可否程序化驱动——不能。没有本地接口，且密钥不出 Mac 的前提下无法把配对设备的输入代填进用户账号界面。
+
+### 候选 2：`claude --cloud <session_id> -p`
+
+只把输入排进云端会话（claude.ai 托管），对本地桌面会话无效，且同样要求账号侧认证。
+
+### 候选 3：`claude --bg` + `claude attach` / `claude agents --json`
+
+后台会话由 CLI 自己持有 PTY，`attach` 是交互式 TTY 接管，不是给第三方进程的输入接口；Bridge 无法在不抢走终端的前提下写入。
+
+### 候选 4：`-p --input-format stream-json` + `--permission-prompt-tool stdio`
+
+这是官方支持的流式控制接口：调用方启动进程并拥有 stdin，写 `{"type":"user","message":…}` 就是真正的 user 回合；工具批准与 AskUserQuestion 以 `control_request`（`subtype:"can_use_tool"`）回到 stdio，调用方用 `control_response` 答复。它不解决「往已有桌面会话注入」，但正好是「Bridge 自己托管一个 Claude Code 会话」所需的能力（见下节）。
+
+### 结论
+
+没有可被 Bridge 程序化驱动、又能把配对设备输入送进运行中桌面会话的官方通道。Remote Control 是唯一官方「远程输入」能力，但入口锁死在用户自己的 Claude 账号界面，本机环境（本地代理 + 未登录）也不可用；其余入口要么只对云端会话有效，要么是 TTY 交互。因此按任务要求进入 Phase 2：由 Bridge 托管独立会话。
+
+## Bridge 托管会话（Phase 2）
+
+思路：不去碰桌面会话，改由 Bridge 自己启动并持有一个 Claude Code 进程。写进它 stdin 的每一句都是这个进程自己的用户回合，不经过 peer socket，也不会出现 cross-session 信封。
+
+### 形态
+
+- 适配器 `hosted`（`apps/bridge/src/adapters/hosted.ts`），会话 id 为 `hosted:<uuid>`，进程由 `apps/bridge/src/hosted/manager.ts` 管理。
+- 启动参数：
+
+  ```
+  claude -p --input-format stream-json --output-format stream-json --verbose \
+    --permission-mode <显式模式> --permission-prompts host \
+    --permission-prompt-tool stdio --session-id <uuid>
+  ```
+
+  resume 时用 `--resume <uuid>` 替代 `--session-id`。不传 `--dangerously-skip-permissions`，也不依赖 CLI 默认值（本机全局默认是 `bypassPermissions`）。
+- stdin 由 Bridge 独占：用户消息写 `{"type":"user","message":…}`；工具批准与 AskUserQuestion 通过 `control_request`/`control_response` 往返。
+- 网页「新建托管会话」的目录只能从 Mac 侧允许列表里选。允许列表文件 `${AGENT_BRIDGE_HOME}/hosted.json`：
+
+  ```json
+  { "dirs": ["/Users/you/code/demo"], "idleTimeoutMs": 1800000 }
+  ```
+
+  目录按 realpath 精确匹配；增删条目后重启 Bridge 生效。默认空闲 30 分钟停止进程（60 秒扫一次），再发消息自动 `--resume`。
+- 生命周期：网页断开不影响进程；网页上可「停止进程」「恢复进程」；Bridge 重启后从 `hosted/sessions.json` 恢复列表，会话记录在 `hosted/<uuid>.jsonl`。
+
+### 输入与权限
+
+- 只有通过 Noise 握手、已配对设备的请求才会进入 `DeviceSession.dispatch`，`hosted.*` 与 `message.send` 都只在那之后可达。未认证连接没有写 stdin 的路径；其他本机会话转来的 peer 文本只走桌面适配器，不会被写进托管进程。
+- 工具批准以 `next-step` 块（允许 / 拒绝）展示，AskUserQuestion 以 `ask` 块展示。点击后网页把按钮文案作为普通消息发回，Bridge 匹配后写 `control_response`；不是批准文案的输入会先拒绝该次调用，再作为普通用户消息写入。
+- 用户消息原样写入 stdin，不加发送者标签——这是托管会话自己的输入，不是转发。
+
+### 与桌面会话的边界
+
+- 不读写桌面转录，不使用 `/tmp/cc-socks`，不把托管输入伪装成桌面会话。
+- 网页明确标注「由 Bridge 托管，不出现在桌面应用」；这些会话不会出现在 Claude 桌面/Claude Code 应用里。
+- 权限模式不是「不可逆操作必被拦下」的保证：用户的 `PreToolUse` hook（如 RTK 自动放行 Bash）仍会生效。
+
+### 测试
+
+`npm test`（根目录）先构建再跑 `apps/bridge/test/hosted.test.mjs`，用注入的假进程覆盖：创建参数与非 bypass 模式、写入用户回合并回传助手消息、工具批准、AskUserQuestion 回答、停止/恢复、允许列表拒绝、未知会话不写 stdin、重启后恢复列表。真实进程的端到端在 preview 环境另测。
