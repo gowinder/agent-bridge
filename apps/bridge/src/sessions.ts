@@ -10,7 +10,7 @@ import {
   SecureChannel,
   type KeyPair,
   type Noise,
-} from "@agent-bridge/crypto";
+} from "@craftstead/crypto";
 import type {
   DeviceSummary,
   ErrorCode,
@@ -18,15 +18,18 @@ import type {
   HostInfoResult,
   MessageAttachment,
   PairResult,
+  PushInfoResult,
+  PushSubscribeResult,
   RequestMessage,
   ResponseMessage,
   SessionListParams,
   ShellEventData,
   WireMessage,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";
+import type { Pusher } from "./push.js";
 import type { RelayApi } from "./relay-client.js";
 import type { DeviceRecord, InviteRecord, Store } from "./store.js";
 import type { UploadStore } from "./uploads.js";
@@ -231,6 +234,7 @@ export interface DeviceSessionOptions extends SessionOptions {
   adapters: SessionAdapters;
   uploads: UploadStore;
   devtools: Devtools;
+  pusher: Pusher;
 }
 
 export class DeviceSession implements ChannelSession {
@@ -349,6 +353,46 @@ export class DeviceSession implements ChannelSession {
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.rail(sessionId);
       }
+      case "session.models": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.models(sessionId);
+      }
+      case "session.compact": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.compact(sessionId);
+      }
+      case "push.info": {
+        const info: PushInfoResult = {
+          publicKey: this.options.pusher.publicKey(),
+          subscriptions: this.options.pusher.count(this.options.device.id),
+        };
+        return info;
+      }
+      case "push.subscribe": {
+        const endpoint = stringParam(params, "endpoint") ?? "";
+        const keys = params["keys"];
+        const p256dh = isObject(keys) ? stringParam(keys, "p256dh") : undefined;
+        const auth = isObject(keys) ? stringParam(keys, "auth") : undefined;
+        if (!p256dh || !auth) throw new RpcError("invalid_params", "订阅缺少密钥");
+        if (!/^https:\/\//i.test(endpoint)) throw new RpcError("invalid_params", "订阅地址必须是 https");
+        const result: PushSubscribeResult = {
+          subscriptions: this.options.pusher.subscribe(this.options.device.id, {
+            endpoint,
+            keys: { p256dh, auth },
+          }),
+        };
+        return result;
+      }
+      case "push.unsubscribe": {
+        const endpoint = stringParam(params, "endpoint");
+        if (!endpoint) throw new RpcError("invalid_params", "endpoint required");
+        const result: PushSubscribeResult = {
+          subscriptions: this.options.pusher.unsubscribe(this.options.device.id, endpoint),
+        };
+        return result;
+      }
       case "task.messages": {
         const sessionId = stringParam(params, "sessionId");
         const taskId = stringParam(params, "taskId");
@@ -378,7 +422,15 @@ export class DeviceSession implements ChannelSession {
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         if (!name) throw new RpcError("invalid_params", "name required");
         if (size === undefined) throw new RpcError("invalid_params", "size required");
-        this.options.adapters.session(sessionId);        return this.options.uploads.begin(sessionId, name, stringParam(params, "mime") ?? "", size);
+        // 会话不存在时这里会抛出 not_found；必须 await，否则 reject 无人接管会让进程退出。
+        await this.options.adapters.session(sessionId);
+        return this.options.uploads.begin(
+          this.options.channel,
+          sessionId,
+          name,
+          stringParam(params, "mime") ?? "",
+          size,
+        );
       }
       case "file.upload.chunk": {
         const uploadId = stringParam(params, "uploadId");
@@ -387,12 +439,12 @@ export class DeviceSession implements ChannelSession {
         if (!uploadId) throw new RpcError("invalid_params", "uploadId required");
         if (index === undefined) throw new RpcError("invalid_params", "index required");
         if (data === undefined) throw new RpcError("invalid_params", "data required");
-        return this.options.uploads.chunk(uploadId, index, data);
+        return this.options.uploads.chunk(this.options.channel, uploadId, index, data);
       }
       case "file.upload.finish": {
         const uploadId = stringParam(params, "uploadId");
         if (!uploadId) throw new RpcError("invalid_params", "uploadId required");
-        return this.options.uploads.finish(uploadId);
+        return this.options.uploads.finish(this.options.channel, uploadId);
       }
       case "transfer.prepare": {
         const sourceSessionId = stringParam(params, "sourceSessionId");
@@ -410,7 +462,11 @@ export class DeviceSession implements ChannelSession {
       case "transfer.commit": {
         const transferId = stringParam(params, "transferId");
         if (!transferId) throw new RpcError("invalid_params", "transferId required");
-        return this.options.adapters.commitTransfer(this.options.device.id, transferId);
+        return this.options.adapters.commitTransfer(
+          this.options.device.id,
+          transferId,
+          stringParam(params, "text"),
+        );
       }
       case "device.list": {
         const devices: DeviceSummary[] = this.options.store.devices().map((device) => ({
@@ -436,22 +492,42 @@ export class DeviceSession implements ChannelSession {
         this.options.store.revokeDevice(deviceId);
         return { ok: true };
       }
+      case "device.rename": {
+        const deviceId = params["deviceId"];
+        if (typeof deviceId !== "string") throw new RpcError("invalid_params", "deviceId required");
+        // 同撤销一样只允许改自己，其他设备的名称由 Mac 上的持有者管理。
+        if (deviceId !== this.options.device.id) {
+          throw new RpcError("unauthorized", "只能重命名当前设备");
+        }
+        const name = stringParam(params, "name")?.trim();
+        if (!name || name.length > 64) throw new RpcError("invalid_params", "invalid device name");
+        const target = this.options.store.device(deviceId);
+        if (!target) throw new Error("unknown device");
+        this.options.store.saveDevice({ ...target, name });
+        // 通道打开时读的那份记录也要跟着改，否则后续 message.send 仍用旧名字。
+        this.options.device.name = name;
+        return { ok: true, name };
+      }
       case "fs.roots": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
-        return this.options.devtools.roots(root);
+        return this.options.devtools.roots(stringParam(params, "sessionId"), root);
       }
       case "fs.list": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
-        return this.options.devtools.listDirs(root, stringParam(params, "path"));
+        return this.options.devtools.listDirs(
+          stringParam(params, "sessionId"),
+          root,
+          stringParam(params, "path"),
+        );
       }
       case "fs.read": {
         const root = stringParam(params, "root");
         if (!root) throw new RpcError("invalid_params", "root required");
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
-        return this.options.devtools.readFile(root, path);
+        return this.options.devtools.readFile(stringParam(params, "sessionId"), root, path);
       }
       case "shell.exec": {
         const root = stringParam(params, "root");
@@ -459,6 +535,7 @@ export class DeviceSession implements ChannelSession {
         const command = stringParam(params, "command") ?? "";
         return this.options.devtools.exec(
           this.options.channel,
+          stringParam(params, "sessionId"),
           root,
           command,
           stringParam(params, "cwd"),
@@ -469,7 +546,7 @@ export class DeviceSession implements ChannelSession {
       case "shell.cancel": {
         const execId = stringParam(params, "execId");
         if (!execId) throw new RpcError("invalid_params", "execId required");
-        return this.options.devtools.cancel(execId);
+        return this.options.devtools.cancel(this.options.channel, execId);
       }
       default:
         throw new Error(`unsupported method: ${request.method}`);

@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.1.0",
+  "version": "0.1.6",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -9,10 +9,10 @@
   ],
   "scripts": {
     "build": "tsc -b",
-    "check": "tsc -b && npm run check -w @agent-bridge/web",
-    "web": "npm run dev -w @agent-bridge/web",
-    "relay:dev": "npm --workspace @agent-bridge/relay run dev",
-    "relay:deploy": "npm --workspace @agent-bridge/relay run deploy",
+    "check": "tsc -b && npm run check -w @craftstead/web",
+    "web": "npm run dev -w @craftstead/web",
+    "relay:dev": "npm --workspace @craftstead/relay run dev",
+    "relay:deploy": "npm --workspace @craftstead/relay run deploy",
     "bridge": "node apps/bridge/dist/main.js",
     "menubar": "bash apps/menubar/build.sh"
   },
@@ -20,5 +20,6 @@
     "@cloudflare/workers-types": "^4.20250926.0",
     "@types/node": "^24.5.2",
     "typescript": "^5.9.2"
-  }
+  },
+  "license": "MIT"
 }

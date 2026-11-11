@@ -9,8 +9,8 @@ import {
   toHex,
   type KeyPair,
   type SecureChannel,
-} from "@agent-bridge/crypto";
-import type { PairResult } from "@agent-bridge/protocol";
+} from "@craftstead/crypto";
+import type { PairResult } from "@craftstead/protocol";
 import { credentialsFromFragment, type PairingLink } from "./link.js";
 import { noise } from "./noise.js";
 import { PeerClient } from "./peer.js";
@@ -102,7 +102,7 @@ export async function finishPairing(
     pairedAt: Date.now(),
     bridge: result.bridge,
   };
-  saveDevice(device);
+  await saveDevice(device);
   client.stop();
   return { device, result };
 }

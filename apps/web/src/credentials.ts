@@ -1,66 +1,469 @@
-export interface StoredDevice {
+export interface DeviceMeta {
   relayUrl: string;
   roomId: string;
   deviceId: string;
-  reconnectToken: string;
   expiresAt: number | null;
   name: string;
   bridgePublicKey: string;
-  privateKey: string;
   publicKey: string;
   pairedAt: number;
   bridge: { name: string; version: string; platform: string };
 }
 
-const STORAGE_KEY = "agent-bridge:devices:v1";
+/** The two fields that must never sit in localStorage as plaintext. */
+export interface DeviceSecrets {
+  privateKey: string;
+  reconnectToken: string;
+}
 
-function read(): StoredDevice[] {
+export interface StoredDevice extends DeviceMeta, DeviceSecrets {}
+
+export class LockedError extends Error {
+  constructor(message = "设备凭据已锁定，请重新输入密码") {
+    super(message);
+    this.name = "LockedError";
+  }
+}
+
+/**
+ * v2 keeps device metadata in the clear so the list can render before unlocking,
+ * and puts the secrets in one AES-GCM blob whose key comes from the user's password.
+ * v1 is the old plaintext layout; it is read until a password is set, then removed.
+ */
+const STORAGE_KEY = "agent-bridge:devices:v2";
+const LEGACY_KEY = "agent-bridge:devices:v1";
+/** 解锁后 30 分钟没有用到凭据就清掉内存里的密钥。 */
+const UNLOCK_MS = 30 * 60 * 1000;
+const ITERATIONS = 600_000;
+
+interface Vault {
+  salt: string;
+  iv: string;
+  data: string;
+}
+
+interface Store {
+  devices: DeviceMeta[];
+  vault: Vault | null;
+}
+
+let sessionKey: CryptoKey | null = null;
+let secrets: Map<string, DeviceSecrets> | null = null;
+let unlockTimer: ReturnType<typeof setTimeout> | null = null;
+/** 后台标签页的定时器会被节流，所以除了定时器还要按时间戳兜底判断。 */
+let lastUsed = 0;
+/** 内存里的 secrets 对应的密文；不一致说明别的标签页改过存储。 */
+let vaultData: string | null = null;
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder();
+
+function keyOf(device: { relayUrl: string; roomId: string }): string {
+  return `${device.relayUrl}#${device.roomId}`;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function fromBase64(text: string): Uint8Array<ArrayBuffer> {
+  const binary = atob(text);
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function isMeta(value: unknown): value is DeviceMeta {
+  const item = value as Partial<DeviceMeta> | null;
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    typeof item.relayUrl === "string" &&
+    typeof item.roomId === "string" &&
+    typeof item.deviceId === "string" &&
+    typeof item.bridgePublicKey === "string" &&
+    typeof item.publicKey === "string"
+  );
+}
+
+function isSecrets(value: unknown): value is DeviceSecrets {
+  const item = value as Partial<DeviceSecrets> | null;
+  return (
+    typeof item === "object" &&
+    item !== null &&
+    typeof item.privateKey === "string" &&
+    typeof item.reconnectToken === "string"
+  );
+}
+
+function readStore(): Store | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const store = parsed as Partial<Store>;
+    const devices = Array.isArray(store.devices) ? store.devices.filter(isMeta) : [];
+    const vault = store.vault;
+    return {
+      devices,
+      vault:
+        typeof vault === "object" &&
+        vault !== null &&
+        typeof vault.salt === "string" &&
+        typeof vault.iv === "string" &&
+        typeof vault.data === "string"
+          ? vault
+          : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeStore(store: Store): void {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+  syncPairedCookie(store.devices);
+}
+
+/** 老格式：整份设备（含私钥）明文存在 v1 里。 */
+function readLegacy(): StoredDevice[] {
+  try {
+    const raw = localStorage.getItem(LEGACY_KEY);
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((item): item is StoredDevice => {
-      const value = item as Partial<StoredDevice> | null;
-      return (
-        typeof value === "object" &&
-        value !== null &&
-        typeof value.relayUrl === "string" &&
-        typeof value.roomId === "string" &&
-        typeof value.deviceId === "string" &&
-        typeof value.reconnectToken === "string" &&
-        typeof value.privateKey === "string" &&
-        typeof value.publicKey === "string" &&
-        typeof value.bridgePublicKey === "string"
-      );
-    });
+    return parsed.filter((item): item is StoredDevice => isMeta(item) && isSecrets(item));
   } catch {
     return [];
   }
 }
 
-function write(devices: StoredDevice[]): void {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(devices));
+export function hasVault(): boolean {
+  return readStore()?.vault != null;
 }
 
-export function listDevices(): StoredDevice[] {
-  return read().sort((a, b) => b.pairedAt - a.pairedAt);
+const PAIRED_COOKIE = "ab_paired";
+const COOKIE_MAX_AGE_SECONDS = 60 * 60 * 24 * 365;
+
+/** 落地页只读取这个标记；它不含房间号、令牌、密钥或桥的名字。 */
+function pairedCookieAttributes(): string {
+  let attrs = "; Path=/; SameSite=Lax";
+  if (location.protocol === "https:") attrs += "; Secure";
+  const host = location.hostname;
+  if (host === "craftstead.app" || host.endsWith(".craftstead.app")) {
+    attrs += "; Domain=.craftstead.app";
+  }
+  return attrs;
 }
 
-export function findDevice(relayUrl: string, roomId: string): StoredDevice | null {
-  return read().find((device) => device.relayUrl === relayUrl && device.roomId === roomId) ?? null;
+/** 只在真有未过期设备时置 1；否则清除，免得落地页一直显示已配对。 */
+function syncPairedCookie(devices: ReadonlyArray<{ expiresAt: number | null }>): void {
+  if (typeof document === "undefined") return;
+  const now = Date.now();
+  const live = devices.filter((device) => device.expiresAt === null || device.expiresAt > now);
+  if (live.length === 0) {
+    document.cookie = `${PAIRED_COOKIE}=; Max-Age=0${pairedCookieAttributes()}`;
+    return;
+  }
+  const perpetual = live.some((device) => device.expiresAt === null);
+  const latest = perpetual
+    ? Number.POSITIVE_INFINITY
+    : Math.max(...live.map((device) => device.expiresAt as number));
+  const maxAge = perpetual
+    ? COOKIE_MAX_AGE_SECONDS
+    : Math.max(60, Math.min(COOKIE_MAX_AGE_SECONDS, Math.round((latest - now) / 1000)));
+  document.cookie = `${PAIRED_COOKIE}=1; Max-Age=${maxAge}${pairedCookieAttributes()}`;
 }
 
-export function saveDevice(device: StoredDevice): void {
-  const devices = read().filter(
+/** Reading the list never needs the password: only metadata is stored in the clear. */
+export function listDevices(): DeviceMeta[] {
+  const store = readStore();
+  const devices = store ? store.devices : readLegacy();
+  return [...devices].sort((a, b) => b.pairedAt - a.pairedAt);
+}
+
+export function findDevice(relayUrl: string, roomId: string): DeviceMeta | null {
+  return listDevices().find((device) => device.relayUrl === relayUrl && device.roomId === roomId) ?? null;
+}
+
+export function needsUnlock(): boolean {
+  return hasVault() && (secrets === null || expired());
+}
+
+function expired(): boolean {
+  return secrets !== null && Date.now() - lastUsed > UNLOCK_MS;
+}
+
+function armUnlockTimer(): void {
+  lastUsed = Date.now();
+  if (unlockTimer !== null) clearTimeout(unlockTimer);
+  unlockTimer = setTimeout(() => {
+    sessionKey = null;
+    secrets = null;
+    unlockTimer = null;
+  }, UNLOCK_MS);
+}
+
+async function deriveKey(password: string, salt: Uint8Array<ArrayBuffer>): Promise<CryptoKey> {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    { name: "PBKDF2", salt, iterations: ITERATIONS, hash: "SHA-256" },
+    material,
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function seal(key: CryptoKey, salt: Uint8Array<ArrayBuffer>, map: Map<string, DeviceSecrets>): Promise<Vault> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const plain = encoder.encode(JSON.stringify(Object.fromEntries(map)));
+  const sealed = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plain);
+  return { salt: toBase64(salt), iv: toBase64(iv), data: toBase64(new Uint8Array(sealed)) };
+}
+
+function decryptVault(key: CryptoKey, vault: Vault): Promise<ArrayBuffer> {
+  return crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: fromBase64(vault.iv) },
+    key,
+    fromBase64(vault.data),
+  );
+}
+
+function parseSecrets(plain: ArrayBuffer): Map<string, DeviceSecrets> {
+  const parsed: unknown = JSON.parse(decoder.decode(plain));
+  const map = new Map<string, DeviceSecrets>();
+  if (typeof parsed === "object" && parsed !== null) {
+    for (const [name, value] of Object.entries(parsed)) if (isSecrets(value)) map.set(name, value);
+  }
+  return map;
+}
+
+/**
+ * Writes must not clobber another tab's work: decrypt the vault on disk whenever it is
+ * not the one this session already holds, so a stale tab merges instead of overwriting.
+ */
+async function latestSecrets(store: Store): Promise<Map<string, DeviceSecrets>> {
+  const vault = store.vault;
+  if (!vault) throw new LockedError();
+  if (secrets !== null && vault.data === vaultData) return secrets;
+  if (sessionKey === null) throw new LockedError();
+  let plain: ArrayBuffer;
+  try {
+    plain = await decryptVault(sessionKey, vault);
+  } catch {
+    // 另一个标签页重置了口令，旧密钥解不开新密文；清掉内存状态让调用方重新解锁。
+    lock();
+    throw new LockedError("凭据已在其它标签页重新设置，请重新输入密码");
+  }
+  secrets = parseSecrets(plain);
+  vaultData = vault.data;
+  return secrets;
+}
+
+export async function unlock(password: string): Promise<void> {
+  const vault = readStore()?.vault;
+  if (!vault) throw new Error("还没有设置密码");
+  const key = await deriveKey(password, fromBase64(vault.salt));
+  let plain: ArrayBuffer;
+  try {
+    plain = await decryptVault(key, vault);
+  } catch {
+    // AES-GCM 的认证标签校验失败就是密码不对，没有别的解释。
+    throw new Error("密码不正确");
+  }
+  sessionKey = key;
+  secrets = parseSecrets(plain);
+  vaultData = vault.data;
+  armUnlockTimer();
+}
+
+export function lock(): void {
+  sessionKey = null;
+  secrets = null;
+  vaultData = null;
+  if (unlockTimer !== null) clearTimeout(unlockTimer);
+  unlockTimer = null;
+}
+
+/**
+ * Another tab wrote the vault (storage events only fire in the tabs that did not write):
+ * our in-memory map is stale, so drop it and let the next use ask for the password.
+ */
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (event) => {
+    if (event.key === STORAGE_KEY || event.key === LEGACY_KEY) lock();
+  });
+}
+
+/**
+ * Forgetting the password is unrecoverable by design; the only way forward is a clean
+ * slate, which costs a fresh pairing. Metadata goes too, otherwise a device row would
+ * point at secrets nobody can read.
+ */
+export function resetCredentials(): Promise<void> {
+  // 与写入共用同一把锁：在途的保存先落盘，重置随后删除，不会反过来复活旧凭据。
+  return withVaultLock(async () => {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_KEY);
+    syncPairedCookie([]);
+    lock();
+  });
+}
+
+/** Web Locks 让同源的多个标签页排队写存储，避免读-改-写互相覆盖。 */
+async function withVaultLock<T>(run: () => Promise<T>): Promise<T> {
+  const locks = typeof navigator === "undefined" ? undefined : navigator.locks;
+  if (!locks) return run();
+  return locks.request("agent-bridge:credentials", run);
+}
+
+/** Encrypts what is on disk now, including anything left in the old plaintext layout. */
+export function setupPassword(password: string): Promise<void> {
+  return withVaultLock(() => writePassword(password));
+}
+
+async function writePassword(password: string): Promise<void> {
+  const store = readStore();
+  // 另一个标签页可能刚设好口令：不能再覆盖，改成让用户解锁同一份存储。
+  if (store?.vault) throw new LockedError("本机凭据已由其它标签页设置，请重新输入密码");
+  const legacy = readLegacy();
+  const devices: DeviceMeta[] = store
+    ? store.devices
+    : legacy.map(({ privateKey: _private, reconnectToken: _token, ...meta }) => meta);
+  const map = new Map<string, DeviceSecrets>();
+  for (const device of legacy) {
+    map.set(keyOf(device), { privateKey: device.privateKey, reconnectToken: device.reconnectToken });
+  }
+  for (const [name, value] of secrets ?? []) map.set(name, value);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await deriveKey(password, salt);
+  const vault = await seal(key, salt, map);
+  writeStore({ devices, vault });
+  localStorage.removeItem(LEGACY_KEY);
+  sessionKey = key;
+  secrets = map;
+  vaultData = vault.data;
+  armUnlockTimer();
+}
+
+/**
+ * Returns the secrets for a device, or null when they are still encrypted.
+ * Callers must ask the user for the password and call `unlock` first.
+ */
+export function getDeviceSecrets(device: { relayUrl: string; roomId: string }): DeviceSecrets | null {
+  if (secrets !== null && expired()) lock();
+  if (secrets !== null) {
+    const found = secrets.get(keyOf(device)) ?? null;
+    if (found) armUnlockTimer();
+    return found;
+  }
+  // 还没设置密码时，老格式里存的就是明文。
+  if (!hasVault()) {
+    const legacy = readLegacy().find(
+      (item) => item.relayUrl === device.relayUrl && item.roomId === device.roomId,
+    );
+    return legacy ? { privateKey: legacy.privateKey, reconnectToken: legacy.reconnectToken } : null;
+  }
+  return null;
+}
+
+/** 锁定期间删掉的设备只删了元数据，密文里的条目在下一次写入时一并清掉。 */
+function prune(map: Map<string, DeviceSecrets>, devices: DeviceMeta[]): void {
+  const live = new Set(devices.map(keyOf));
+  for (const key of [...map.keys()]) if (!live.has(key)) map.delete(key);
+}
+
+export function saveDevice(device: StoredDevice): Promise<void> {
+  return withVaultLock(() => writeDevice(device));
+}
+
+async function writeDevice(device: StoredDevice): Promise<void> {
+  const { privateKey, reconnectToken, ...meta } = device;
+  const store = readStore();
+  if (!store || store.vault === null) {
+    // 口令可能刚被另一个标签页清掉（忘记密码）：绝不能退回明文存储。
+    throw new LockedError("本机凭据已被清除，请重新配对");
+  }
+  if (sessionKey === null || secrets === null) throw new LockedError();
+  // 先按磁盘上的最新密文合并，再写回，避免覆盖别的标签页刚配对的设备。
+  const map = await latestSecrets(store);
+  const devices = store.devices.filter(
     (item) => !(item.relayUrl === device.relayUrl && item.roomId === device.roomId),
   );
-  devices.push(device);
-  write(devices);
+  devices.push(meta);
+  map.set(keyOf(device), { privateKey, reconnectToken });
+  prune(map, devices);
+  const vault = await seal(sessionKey, fromBase64(store.vault.salt), map);
+  writeStore({ devices, vault });
+  vaultData = vault.data;
+  armUnlockTimer();
 }
 
-export function removeDevice(relayUrl: string, roomId: string): void {
-  write(read().filter((item) => !(item.relayUrl === relayUrl && item.roomId === roomId)));
+export function removeDevice(relayUrl: string, roomId: string): Promise<void> {
+  return withVaultLock(() => deleteDevice(relayUrl, roomId));
+}
+
+async function deleteDevice(relayUrl: string, roomId: string): Promise<void> {
+  const store = readStore();
+  if (!store || store.vault === null) {
+    const legacy = readLegacy().filter(
+      (item) => !(item.relayUrl === relayUrl && item.roomId === roomId),
+    );
+    localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
+    syncPairedCookie(legacy);
+    return;
+  }
+  const devices = store.devices.filter(
+    (item) => !(item.relayUrl === relayUrl && item.roomId === roomId),
+  );
+  if (sessionKey === null || secrets === null) {
+    // 锁定时改不了密文，只删元数据；残留的密文条目在下一次加密写入时清理。
+    writeStore({ devices, vault: store.vault });
+    return;
+  }
+  const map = await latestSecrets(store);
+  prune(map, devices);
+  const vault = await seal(sessionKey, fromBase64(store.vault.salt), map);
+  writeStore({ devices, vault });
+  vaultData = vault.data;
+}
+
+/** 改名只动明文元数据、不碰密文，所以凭据锁定时也能写。 */
+export function renameDevice(relayUrl: string, roomId: string, name: string): Promise<void> {
+  return withVaultLock(() => updateDeviceName(relayUrl, roomId, name));
+}
+
+async function updateDeviceName(relayUrl: string, roomId: string, name: string): Promise<void> {
+  const store = readStore();
+  if (!store || store.vault === null) {
+    const legacy = readLegacy().map((item) =>
+      item.relayUrl === relayUrl && item.roomId === roomId ? { ...item, name } : item,
+    );
+    localStorage.setItem(LEGACY_KEY, JSON.stringify(legacy));
+    syncPairedCookie(legacy);
+    return;
+  }
+  const devices = store.devices.map((item) =>
+    item.relayUrl === relayUrl && item.roomId === roomId ? { ...item, name } : item,
+  );
+  writeStore({ devices, vault: store.vault });
+}
+
+const EXPIRY_WARNING_MS = 3 * 24 * 60 * 60 * 1000;
+
+/** 到期前 3 天就要提示重新配对，否则用户会在某天突然连不上。 */
+export function isExpiringSoon(expiresAt: number | null): boolean {
+  return expiresAt !== null && expiresAt - Date.now() <= EXPIRY_WARNING_MS;
 }
 
 export function expireLabel(expiresAt: number | null): string {

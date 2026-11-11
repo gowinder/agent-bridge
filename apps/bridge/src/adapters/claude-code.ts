@@ -19,14 +19,19 @@ import type {
   ContextUsage,
   MessageBlock,
   MessageListResult,
+  MessageQuestion,
+  MessageQuestionOption,
   MessageRecord,
   MessageSendResult,
+  ModelOption,
+  NextStepAction,
   ProjectInfo,
   RailRow,
   RailTask,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
@@ -50,6 +55,8 @@ interface DesktopSession {
   cliSessionId: string;
   priorCliSessionIds: string[];
   cwd: string;
+  /** 会话所属项目目录；工作树里的会话归到原项目，而不是单独成一个项目。 */
+  projectCwd: string;
   title: string;
   createdAt: number;
   updatedAt: number;
@@ -98,10 +105,93 @@ interface CachedMessages {
   context?: ContextUsage;
   busy?: BusyState;
   interrupted?: boolean;
+  /** 还有 AskUserQuestion 没有对应的 tool_result：客户端正等着用户选。 */
+  pendingAsk?: boolean;
 }
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
+}
+
+/** 桌面端回合结束时的「下一步」盒子就是这一次工具调用。 */
+const WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up";
+
+/** 桌面端给应用动作按钮的默认文案；工具输入里可能只给了 action。 */
+const APP_ACTION_LABELS: Record<string, string> = {
+  commit: "提交",
+  create_pr: "创建 PR",
+  merge: "合并 PR",
+  fix_ci: "修复 CI",
+  address_comments: "处理评审意见",
+  resolve_conflicts: "解决冲突",
+  verify: "验证改动",
+  archive: "归档会话",
+};
+
+/** 把 wrap_up 的输入转成带按钮的消息块；没有可点的东西时不显示。 */
+function nextStepBlock(input: unknown): MessageBlock | null {
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  const ask = typeof raw["ask"] === "string" ? raw["ask"].trim() : "";
+  const actions: NextStepAction[] = [];
+  if (Array.isArray(raw["actions"])) {
+    for (const item of raw["actions"]) {
+      if (typeof item !== "object" || item === null) continue;
+      const entry = item as Record<string, unknown>;
+      const action = typeof entry["action"] === "string" ? entry["action"] : undefined;
+      const label = (typeof entry["label"] === "string" ? entry["label"] : "").trim()
+        || (action ? APP_ACTION_LABELS[action] : undefined);
+      if (!label) continue;
+      actions.push(action ? { action, label } : { label });
+    }
+  }
+  if (!ask && actions.length === 0) return null;
+  const block: MessageBlock = { type: "next-step", text: ask || "下一步" };
+  if (ask) block.ask = ask;
+  if (actions.length > 0) block.actions = actions;
+  return block;
+}
+
+/** 桌面端弹给用户选的提问工具；网页只展示，不在网页里回答。 */
+const ASK_TOOL = "AskUserQuestion";
+
+/** 把 AskUserQuestion 的输入转成一行行可读的问题与选项。 */
+function askBlock(input: unknown, max: number): MessageBlock | null {
+  if (typeof input !== "object" || input === null) return null;
+  const raw = input as Record<string, unknown>;
+  if (!Array.isArray(raw["questions"])) return null;
+  const questions: MessageQuestion[] = [];
+  const lines: string[] = [];
+  for (const item of raw["questions"]) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const question = (typeof entry["question"] === "string" ? entry["question"] : "").trim();
+    if (!question) continue;
+    const header = (typeof entry["header"] === "string" ? entry["header"] : "").trim();
+    const options: MessageQuestionOption[] = [];
+    if (Array.isArray(entry["options"])) {
+      for (const option of entry["options"]) {
+        if (typeof option !== "object" || option === null) continue;
+        const value = option as Record<string, unknown>;
+        const label = (typeof value["label"] === "string" ? value["label"] : "").trim();
+        if (!label) continue;
+        const description = (typeof value["description"] === "string" ? value["description"] : "").trim();
+        options.push(description ? { label, description } : { label });
+      }
+    }
+    questions.push({
+      ...(header ? { header } : {}),
+      question,
+      ...(typeof entry["multiSelect"] === "boolean" ? { multiSelect: entry["multiSelect"] } : {}),
+      options,
+    });
+    lines.push(`${header ? `${header}：` : ""}${question}`);
+    for (const option of options) {
+      lines.push(option.description ? `- ${option.label}：${option.description}` : `- ${option.label}`);
+    }
+  }
+  if (questions.length === 0) return null;
+  return { type: "ask", ...truncate(lines.join("\n"), max), questions };
 }
 
 /**
@@ -118,6 +208,42 @@ function asNumber(value: unknown): number {
 }
 
 /** Models advertised with a 1M token context window (e.g. `claude-sonnet-4-5[1m]`). */
+/** 桌面记录的模型值可能是路由别名（`a.b.claude-opus-5-5`）或带 `[1m]` 后缀。 */
+function normalizeModelId(raw: string): string {
+  let value = raw.replace(/\[1m\]$/i, "").trim();
+  const dot = value.lastIndexOf(".");
+  if (dot >= 0) value = value.slice(dot + 1);
+  return value;
+}
+
+/** 取最长匹配，避免 `claude-opus-4-8` 抢走 `claude-opus-4-8-20261210`。 */
+function matchCatalogModel(raw: string, catalog: ModelOption[]): ModelOption | undefined {
+  const value = normalizeModelId(raw);
+  let best: ModelOption | undefined;
+  for (const item of catalog) {
+    if (value !== item.id && !value.startsWith(`${item.id}-`)) continue;
+    if (!best || item.id.length > best.id.length) best = item;
+  }
+  return best;
+}
+
+/** 目录里的 models 数组：只留下选择器会显示的常用与更多两组。 */
+function modelOptionsOf(list: unknown): ModelOption[] {
+  if (!Array.isArray(list)) return [];
+  const out: ModelOption[] = [];
+  for (const item of list) {
+    if (typeof item !== "object" || item === null) continue;
+    const entry = item as Record<string, unknown>;
+    const id = typeof entry["id"] === "string" ? entry["id"] : "";
+    const name = typeof entry["name"] === "string" ? entry["name"] : "";
+    if (!id || !name) continue;
+    const section = entry["section"];
+    if (section !== "main" && section !== "overflow") continue;
+    out.push({ id, name, section });
+  }
+  return out;
+}
+
 function isMillionTokenModel(model: string): boolean {
   const name = model.toLowerCase();
   return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
@@ -149,6 +275,26 @@ function trackBusy(busy: BusyState, entry: RawEntry): void {
   if (entry.type === "user" && at > busy.lastUserAt) busy.lastUserAt = at;
   if (entry.type === "system" && entry.subtype === "turn_duration") {
     if (at > busy.lastTurnEndAt) busy.lastTurnEndAt = at;
+  }
+}
+
+/**
+ * An AskUserQuestion tool_use without its tool_result means the client is waiting on the user:
+ * the turn is still open and the desktop shows a question box. Answers land as a tool_result,
+ * so the set empties as soon as either side replies.
+ */
+function trackAsks(pending: Set<string>, content: unknown): void {
+  if (!Array.isArray(content)) return;
+  for (const raw of content) {
+    if (typeof raw !== "object" || raw === null) continue;
+    const block = raw as Record<string, unknown>;
+    if (block["type"] === "tool_use" && block["name"] === ASK_TOOL) {
+      const id = asString(block["id"]);
+      if (id) pending.add(id);
+    } else if (block["type"] === "tool_result") {
+      const id = asString(block["tool_use_id"]);
+      if (id) pending.delete(id);
+    }
   }
 }
 
@@ -255,15 +401,15 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   projects(): ProjectInfo[] {
     const map = new Map<string, ProjectInfo>();
     for (const session of this.records()) {
-      const projectId = this.projectIdFor(session.cwd);
+      const projectId = this.projectIdFor(session.projectCwd);
       const entry = map.get(projectId);
       if (entry) entry.sessionCount += 1;
       else {
         map.set(projectId, {
           projectId,
           appId: this.key,
-          name: session.cwd ? basename(session.cwd) : "未分组会话",
-          cwd: session.cwd || undefined,
+          name: session.projectCwd ? basename(session.projectCwd) : "未分组会话",
+          cwd: session.projectCwd || undefined,
           sessionCount: 1,
         });
       }
@@ -286,10 +432,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       // 所以只按「能否唤醒」判断可发送，不再要求进程已经在跑。
       const canWake = !session.archived && session.cliSessionId !== "" && scan.error === null;
       const canSend = live ? this.socketFor(pid) !== null : canWake;
+      const needsDecision = busy && session.cliSessionId !== "" ? this.pendingAsk(session) : false;
       out.push({
         sessionId,
         appId: this.key,
-        projectId: this.projectIdFor(session.cwd),
+        projectId: this.projectIdFor(session.projectCwd),
         kind: "code",
         title: (session.title || "未命名会话").slice(0, 120),
         createdAt: session.createdAt,
@@ -297,7 +444,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         archived: session.archived,
         live,
         ...(busy ? { busy: true } : {}),
+        ...(needsDecision ? { needsDecision: true } : {}),
         canSend,
+        ...(session.cwd ? { cwd: session.cwd } : {}),
         sendBlockedReason: canSend
           ? undefined
           : scan.error ??
@@ -364,7 +513,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     if (record.cwd) environment.push({ label: "目录", value: record.cwd });
     const branch = this.gitBranch(record);
     if (branch) environment.push({ label: "分支", value: branch });
-    if (record.model) environment.push({ label: "模型", value: record.model });
+    const model = this.runningModel(record) ?? record.model;
+    if (model) environment.push({ label: "模型", value: model });
     if (record.effort) environment.push({ label: "推理强度", value: record.effort });
     if (record.permissionMode) {
       environment.push({
@@ -380,6 +530,122 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const context = this.contextFor(record);
     if (context) result.context = context;
     return result;
+  }
+
+  /**
+   * 桌面端的模型清单来自它自己拉取的 signed catalog（model-catalog/published.json），
+   * 里面 ccd 表面就是 Code 会话的模型选择器；只有取不到时才退回 CLI 的本地缓存。
+   */
+  models(sessionId: string): SessionModelsResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知会话");
+    const catalog = this.modelCatalog();
+    // 会话记录里的模型是建会话时选的，在桌面里切换后不会回写；转录里最后一条回复
+    // 实际用的模型才算「当前模型」。
+    const raw = this.runningModel(record) ?? (record.model || undefined);
+    // 桌面记录里可能是路由别名或带 [1m] 后缀，能对上目录时以目录里的 id 为准。
+    const matched = raw ? matchCatalogModel(raw, catalog) : undefined;
+    const current = matched?.id ?? raw;
+    const currentName = matched?.name ?? raw;
+    return {
+      ...(current ? { current } : {}),
+      ...(currentName ? { currentName } : {}),
+      models: catalog,
+      canSwitch: false,
+      note: "模型需要在 Claude 桌面里切换；这里只展示当前会话可用的模型。",
+    };
+  }
+
+  /** 转录里最后一条主链回复用的模型；读不到就交给会话记录兜底。 */
+  private runningModel(record: DesktopSession): string | undefined {
+    if (!record.cliSessionId) return undefined;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return undefined;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).context?.model;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** 正在运行的会话是否停在一个没人回答的提问上；读不到 transcript 就当没有。 */
+  private pendingAsk(record: DesktopSession): boolean {
+    if (!record.cliSessionId) return false;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return false;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).needsDecision;
+    } catch {
+      return false;
+    }
+  }
+
+  private modelCatalogCache: { at: number; models: ModelOption[] } | null = null;
+
+  private modelCatalog(): ModelOption[] {
+    const now = Date.now();
+    if (this.modelCatalogCache && now - this.modelCatalogCache.at < 60_000) {
+      return this.modelCatalogCache.models;
+    }
+    const published = this.publishedCatalogModels();
+    const models = published.length > 0 ? published : this.cachedCatalogModels();
+    this.modelCatalogCache = { at: now, models };
+    return models;
+  }
+
+  /** 桌面端拉取的 signed catalog：surfaces.ccd 就是 Code 会话模型选择器的清单。 */
+  private publishedCatalogModels(): ModelOption[] {
+    for (const name of ["Claude-3p", "Claude"]) {
+      const path = join(SUPPORT_DIR, name, "model-catalog", "published.json");
+      try {
+        const outer = JSON.parse(readFileSync(path, "utf8")) as { documentBytes?: unknown };
+        if (typeof outer.documentBytes !== "string") continue;
+        const doc = JSON.parse(Buffer.from(outer.documentBytes, "base64").toString("utf8")) as {
+          surfaces?: Record<string, { model_selector_config?: { models?: unknown }[] }>;
+        };
+        const configs = doc.surfaces?.["ccd"]?.model_selector_config ?? doc.surfaces?.["cc"]?.model_selector_config;
+        const models = modelOptionsOf(configs?.[0]?.models);
+        if (models.length > 0) return models;
+      } catch {
+        // 应用没写过这份缓存：试下一个目录，最后退回 CLI 的本地缓存。
+      }
+    }
+    return [];
+  }
+
+  /** CLI 自己缓存的目录，字段比桌面端少一档，内容也常常落后一版。 */
+  private cachedCatalogModels(): ModelOption[] {
+    const models: ModelOption[] = [];
+    try {
+      const dir = join(homedir(), ".claude", "cache", "model-catalog");
+      const files = readdirSync(dir)
+        .filter((name) => name.endsWith("-ccd.json"))
+        .map((name) => {
+          const path = join(dir, name);
+          try {
+            return { path, mtimeMs: statSync(path).mtimeMs };
+          } catch {
+            return null;
+          }
+        })
+        .filter((item): item is { path: string; mtimeMs: number } => item !== null)
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+      const raw = files[0] ? JSON.parse(readFileSync(files[0].path, "utf8")) : null;
+      const list = raw?.catalog?.config?.models;
+      if (Array.isArray(list)) {
+        for (const item of list) {
+          if (typeof item?.id !== "string" || typeof item?.name !== "string") continue;
+          models.push({
+            id: item.id,
+            name: item.name,
+            ...(item.section === "main" || item.section === "overflow" ? { section: item.section } : {}),
+          });
+        }
+      }
+    } catch {
+      // 没有缓存或格式变了：只展示当前模型名。
+    }
+    return models;
   }
 
   taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
@@ -638,6 +904,16 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return task;
   }
 
+  /**
+   * 桌面端为工作树会话写了 originCwd；没有这个字段的旧记录按路径推断，
+   * 否则每个工作树都会变成一个独立项目，会话在原项目里就找不到了。
+   */
+  private projectCwdOf(cwd: string, originCwd: string): string {
+    if (originCwd) return originCwd;
+    const at = cwd.indexOf("/.claude/worktrees/");
+    return at > 0 ? cwd.slice(0, at) : cwd;
+  }
+
   private projectIdFor(cwd: string): string {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
@@ -682,6 +958,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const raw = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
       const localId = asString(raw["sessionId"]) || basename(path).replace(/\.json$/, "");
       const createdAt = asNumber(raw["createdAt"]);
+      const cwd = asString(raw["cwd"]);
       return {
         localId,
         cliSessionId: asString(raw["cliSessionId"]),
@@ -690,7 +967,8 @@ export class ClaudeCodeAdapter implements SessionAdapter {
               .filter((item): item is string => typeof item === "string" && item !== "")
               .slice(-20)
           : [],
-        cwd: asString(raw["cwd"]),
+        cwd,
+        projectCwd: this.projectCwdOf(cwd, asString(raw["originCwd"])),
         title: asString(raw["title"]),
         createdAt,
         updatedAt:
@@ -891,7 +1169,13 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   private readTranscript(
     path: string,
     sessionId: string,
-  ): { messages: MessageRecord[]; context?: ContextUsage; busy: boolean; interrupted: boolean } {
+  ): {
+    messages: MessageRecord[];
+    context?: ContextUsage;
+    busy: boolean;
+    interrupted: boolean;
+    needsDecision: boolean;
+  } {
     let mtimeMs = 0;
     let size = 0;
     try {
@@ -904,17 +1188,21 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const cached = this.messageCache.get(path);
     if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
       const interrupted = cached.interrupted === true;
+      const running = isBusy(cached.busy) && !interrupted;
       return {
         messages: cached.messages,
         ...(cached.context ? { context: cached.context } : {}),
-        busy: isBusy(cached.busy) && !interrupted,
+        busy: running,
         interrupted,
+        needsDecision: running && cached.pendingAsk === true,
       };
     }
 
     const messages: MessageRecord[] = [];
     let context: ContextUsage | undefined;
     const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, lastActivityAt: 0 };
+    /** 已发出、还没有结果的提问工具调用；有剩的就是客户端正等着用户选。 */
+    const pendingAsks = new Set<string>();
     let lastContentOrder = -1;
     let lastInterruptOrder = -1;
     let order = 0;
@@ -945,8 +1233,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       const usage = this.contextOf(entry);
       if (usage) context = usage;
       trackBusy(busy, entry);
+      if (!entry.isSidechain) trackAsks(pendingAsks, entry.message?.content);
     }
     const interrupted = lastInterruptOrder > lastContentOrder;
+    const running = isBusy(busy) && !interrupted;
+    const pendingAsk = pendingAsks.size > 0;
     this.messageCache.set(path, {
       mtimeMs,
       size,
@@ -954,12 +1245,14 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       ...(context ? { context } : {}),
       busy,
       interrupted,
+      pendingAsk,
     });
     return {
       messages,
       ...(context ? { context } : {}),
-      busy: isBusy(busy) && !interrupted,
+      busy: running,
       interrupted,
+      needsDecision: running && pendingAsk,
     };
   }
 
@@ -1037,6 +1330,16 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         if (clean) blocks.push({ type: "text", ...truncate(clean, MAX_BLOCK_CHARS) });
       } else if (block["type"] === "tool_use") {
         const name = asString(block["name"]) || "tool";
+        const nextStep = name === WRAP_UP_TOOL ? nextStepBlock(block["input"]) : null;
+        if (nextStep) {
+          blocks.push(nextStep);
+          continue;
+        }
+        const ask = name === ASK_TOOL ? askBlock(block["input"], MAX_BLOCK_CHARS) : null;
+        if (ask) {
+          blocks.push(ask);
+          continue;
+        }
         const input = block["input"] === undefined ? "" : JSON.stringify(block["input"]);
         blocks.push({ type: "tool", ...truncate(`调用 ${name} ${input}`.trim(), 300) });
       }

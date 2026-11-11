@@ -1,5 +1,5 @@
 {
-  "name": "@agent-bridge/bridge",
+  "name": "@craftstead/bridge",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,8 @@
     "start": "node dist/main.js serve"
   },
   "dependencies": {
-    "@agent-bridge/crypto": "*",
-    "@agent-bridge/protocol": "*"
+    "@craftstead/crypto": "*",
+    "@craftstead/protocol": "*",
+    "web-push": "^4.0.0"
   }
 }

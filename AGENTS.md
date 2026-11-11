@@ -13,6 +13,12 @@
 - feature 分支从 `develop` 切出，PR 合回 `develop`
 - 需要上线时，再开 `develop` → `main` 的 PR
 
+## 发版
+
+- 每次发布生产环境（`develop` → `main` 的 PR）必须递增版本号，不能复用已发布过的版本号。
+- 版本号写在仓库根 `package.json` 的 `version`，并同步 `package-lock.json`；提交信息用 `chore(release): <version>`。
+- 同一个发版 PR 内更新 `CHANGELOG.md`：把 `[Unreleased]` 下的改动归入新版本号与日期，分类用 Added / Changed / Fixed / Removed。
+
 ## 开发流程
 
 1. 在 worktree 中开发，不在主 checkout 直接改：
@@ -28,8 +34,8 @@
 
 - `npm run check`（`tsc -b` + web `tsc --noEmit`）必须通过。
 - 改动涉及 wasm 或 web 构建时，本地也跑一遍部署链路：
-  - `npm run build:wasm -w @agent-bridge/crypto`
-  - `npm run build -w @agent-bridge/web`
+  - `npm run build:wasm -w @craftstead/crypto`
+  - `npm run build -w @craftstead/web`
 - 仓库当前没有 lint / test 脚本，不要声称跑过。
 
 ## 约定

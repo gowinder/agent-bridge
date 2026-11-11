@@ -29,7 +29,7 @@ export interface NoiseWasmExports {
   conn_free(h: number): void;
 }
 
-const PATTERNS = { xxpsk3: 0, ik: 1, nn: 2 } as const;
+const PATTERNS = { xxpsk3: 0, ik: 1 } as const;
 export type NoisePattern = keyof typeof PATTERNS;
 
 export async function loadNoise(source: WasmSource | Response): Promise<Noise> {
@@ -107,8 +107,20 @@ export class Noise {
     psk?: Uint8Array;
     prologue?: Uint8Array;
   }): number {
-    if (options.pattern === "xxpsk3" && options.psk?.length !== 32) {
-      throw new Error("xxpsk3 requires a 32-byte psk");
+    // The wasm ABI reads exactly 32 bytes at each key pointer; a short buffer would
+    // make it read adjacent memory instead, so lengths are enforced here.
+    const { privateKey, publicKey } = options.localKeys;
+    if (privateKey.length !== 32 || publicKey.length !== 32) {
+      throw new Error("local keys must be 32 bytes");
+    }
+    if (options.remotePublicKey && options.remotePublicKey.length !== 32) {
+      throw new Error("remote public key must be 32 bytes");
+    }
+    if (options.psk && options.psk.length !== 32) {
+      throw new Error("psk must be 32 bytes");
+    }
+    if (options.pattern === "xxpsk3" && !options.psk) {
+      throw new Error("xxpsk3 requires a psk");
     }
     const local = this.input(options.localKeys.privateKey);
     const remote = this.input(options.remotePublicKey);

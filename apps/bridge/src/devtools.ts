@@ -4,7 +4,7 @@
 // `agent-bridge devtools`. File browsing never leaves the chat's own project directory.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, extname, resolve, sep } from "node:path";
 import {
   DEVTOOLS_CAPABILITIES,
@@ -20,7 +20,7 @@ import {
   type ShellCancelResult,
   type ShellEventData,
   type ShellExecResult,
-} from "@agent-bridge/protocol";
+} from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Store } from "./store.js";
@@ -36,9 +36,12 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 const MAX_ENTRIES = 2_000;
+/** 同时运行的命令上限：一条长命令最多占用 10 分钟，不设上限就成了一键 fork bomb。 */
+const MAX_CONCURRENT_EXECS = 8;
 
 type Capability = DevtoolsCapabilityName;
-type ScopedRoot = FsRoot & { real: string };
+/** `projectIds` keeps every adapter project that resolves to this directory, so a chat in any of them is accepted. */
+type ScopedRoot = FsRoot & { real: string; projectIds: Set<string> };
 
 const CAPABILITY_LABEL: Record<Capability, string> = {
   files: "文件浏览",
@@ -107,12 +110,6 @@ interface PendingExec {
 interface ExpiryState {
   timer: NodeJS.Timeout | null;
   for: number | null;
-}
-
-/** An exec still waiting on the adapter index; a closing channel cancels it before spawn. */
-interface PendingExec {
-  owner: string;
-  cancelled: boolean;
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -208,10 +205,10 @@ export class Devtools {
     }
   }
 
-  /** `root` must be one of the known project directories; the reply names it back. */
-  async roots(root: string): Promise<FsRootsResult> {
+  /** `root` must be the project directory of `sessionId`; the reply names it back. */
+  async roots(sessionId: string | undefined, root: string): Promise<FsRootsResult> {
     this.requireCapability("files");
-    const scoped = await this.scope(root);
+    const scoped = await this.scope(sessionId, root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     this.requireCapability("files");
     return { enabled: true, roots: [{ name: scoped.name, path: scoped.path }] };
@@ -235,7 +232,7 @@ export class Devtools {
   }
 
   private async loadRoots(): Promise<ScopedRoot[]> {
-    const seen = new Set<string>();
+    const seen = new Map<string, ScopedRoot>();
     const roots: ScopedRoot[] = [];
     for (const project of (await this.adapters.projects()).projects) {
       if (!project.cwd) continue;
@@ -246,28 +243,59 @@ export class Devtools {
       } catch {
         continue;
       }
-      if (seen.has(real)) continue;
-      seen.add(real);
-      roots.push({ name: project.name || basename(real), path: real, real });
+      const existing = seen.get(real);
+      if (existing) {
+        existing.projectIds.add(project.projectId);
+        continue;
+      }
+      const root: ScopedRoot = {
+        name: project.name || basename(real),
+        path: real,
+        real,
+        projectIds: new Set([project.projectId]),
+      };
+      seen.set(real, root);
+      roots.push(root);
     }
     this.rootsCache = { at: Date.now(), roots };
     return roots;
   }
 
   /**
-   * Resolves the chat's project directory. Only a directory that belongs to one of
-   * the known projects is accepted, so a device cannot aim the browser at `/`.
+   * Resolves the chat's project directory. `sessionId` must resolve to the same
+   * project as `root`, so a device cannot aim the browser at another project or at `/`.
    */
-  private async scope(root: string): Promise<ScopedRoot> {
-    let want: string;
+  private async scope(sessionId: string | undefined, root: string): Promise<ScopedRoot> {
+    if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+    const { session } = await this.adapters.session(sessionId);
+    // A missing path must not be reported differently from a foreign one, or the
+    // device could probe the filesystem for existence outside the project.
+    let want: string | null = null;
     try {
       want = realpathSync(resolve(root));
     } catch {
-      throw new RpcError("not_found", "项目目录不存在");
+      want = null;
     }
-    const match = (await this.allRoots()).find((item) => item.real === want);
-    if (!match) throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
-    return match;
+    const match = want === null
+      ? undefined
+      : (await this.allRoots()).find(
+        (item) => item.real === want && item.projectIds.has(session.projectId),
+      );
+    if (match) return match;
+    // 工作树会话归在原项目里，但它自己在 .claude/worktrees/<name> 下工作：
+    // 只放行这个会话自己的 cwd，别的路径仍按项目范围拒绝。
+    if (want !== null && session.cwd) {
+      let own: string | null = null;
+      try {
+        own = realpathSync(resolve(session.cwd));
+      } catch {
+        own = null;
+      }
+      if (own === want) {
+        return { name: basename(want), path: want, real: want, projectIds: new Set([session.projectId]) };
+      }
+    }
+    throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
   }
 
   /** Resolves a client path and refuses anything outside the scoped project root. */
@@ -284,9 +312,9 @@ export class Devtools {
     return real;
   }
 
-  async listDirs(root: string, path?: string): Promise<FsListResult> {
+  async listDirs(sessionId: string | undefined, root: string, path?: string): Promise<FsListResult> {
     this.requireCapability("files");
-    const scoped = await this.scope(root);
+    const scoped = await this.scope(sessionId, root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     this.requireCapability("files");
     const real = path ? this.resolveInside(scoped, path) : scoped.real;
@@ -303,7 +331,8 @@ export class Devtools {
       const child = `${real}${sep}${entry.name}`;
       let childStats;
       try {
-        childStats = statSync(child);
+        // lstat: a symlink pointing outside the project must not leak its target's size or mtime.
+        childStats = lstatSync(child);
       } catch {
         continue;
       }
@@ -328,9 +357,9 @@ export class Devtools {
     };
   }
 
-  async readFile(root: string, path: string): Promise<FsReadResult> {
+  async readFile(sessionId: string | undefined, root: string, path: string): Promise<FsReadResult> {
     this.requireCapability("files");
-    const scoped = await this.scope(root);
+    const scoped = await this.scope(sessionId, root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     this.requireCapability("files");
     const real = this.resolveInside(scoped, path);
@@ -382,6 +411,7 @@ export class Devtools {
 
   async exec(
     owner: string,
+    sessionId: string | undefined,
     root: string,
     command: string,
     cwd: string | undefined,
@@ -397,7 +427,7 @@ export class Devtools {
     this.pendingExecs.add(pending);
     let workdir: string;
     try {
-      const scoped = await this.scope(root);
+      const scoped = await this.scope(sessionId, root);
       workdir = cwd ? this.resolveInside(scoped, cwd) : scoped.real;
     } finally {
       this.pendingExecs.delete(pending);
@@ -405,6 +435,9 @@ export class Devtools {
     if (pending.cancelled) throw new RpcError("unsupported", "设备通道已断开");
     // The switch can be turned off, or expire, while the adapter index is loading.
     this.requireCapability("terminal");
+    if (this.execs.size >= MAX_CONCURRENT_EXECS) {
+      throw new RpcError("rate_limited", "同时运行的命令过多，请先结束其他命令");
+    }
     const timeout = clamp(Math.round(timeoutMs ?? DEFAULT_TIMEOUT_MS), 1_000, MAX_TIMEOUT_MS);
     const shell = process.env["SHELL"] && existsSync(process.env["SHELL"]) ? process.env["SHELL"] : "/bin/sh";
     const execId = randomUUID();
@@ -474,9 +507,10 @@ export class Devtools {
     return { execId, cwd: workdir };
   }
 
-  cancel(execId: string): ShellCancelResult {
+  /** Only the channel that started a command may cancel it; other channels get a silent no-op. */
+  cancel(owner: string, execId: string): ShellCancelResult {
     const record = this.execs.get(execId);
-    if (!record) return { ok: true, killed: false };
+    if (!record || record.owner !== owner) return { ok: true, killed: false };
     this.kill(execId, true);
     return { ok: true, killed: true };
   }

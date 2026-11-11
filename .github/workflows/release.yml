@@ -1,0 +1,215 @@
+name: macOS DMG
+
+on:
+  push:
+    branches: [develop]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    # 菜单栏 app 依赖 AppKit，只能在 macOS runner 上编译。
+    runs-on: macos-latest
+    env:
+      # 缺失时是空串，用它来门控签名与公证，不能让缺证书把构建打红。
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: 读取版本
+        id: version
+        run: |
+          set -eu
+          version=$(node -p "require('./package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short=${version%%-*}" >> "$GITHUB_OUTPUT"
+
+      - run: npm ci
+
+      - run: rustup target add wasm32-unknown-unknown
+
+      - run: npm run build:wasm -w @craftstead/crypto
+
+      - run: npm run build
+
+      # 用户机器上多半没有 Node。把官方 darwin 版 node 的两种架构 lipo 成一份
+      # 通用二进制塞进 app 里，DMG 才对 Intel 与 Apple Silicon 都能用。
+      - name: 准备通用 Node 运行时
+        run: |
+          set -eu
+          v=$(node -p "process.versions.node")
+          root="$RUNNER_TEMP/node"
+          mkdir -p "$root"
+          for arch in arm64 x64; do
+            curl -fsSL "https://nodejs.org/dist/v$v/node-v$v-darwin-$arch.tar.gz" -o "$root/$arch.tgz"
+            mkdir -p "$root/$arch"
+            tar -xzf "$root/$arch.tgz" -C "$root/$arch" --strip-components=1
+          done
+          mkdir -p "$root/bin"
+          lipo -create "$root/arm64/bin/node" "$root/x64/bin/node" -output "$root/bin/node"
+          chmod +x "$root/bin/node"
+          file "$root/bin/node"
+          "$root/bin/node" -p "'node runtime ok: ' + process.version + ' ' + process.arch"
+
+      - name: 构建 AgentBridge.app
+        env:
+          AGENT_BRIDGE_NODE: ${{ runner.temp }}/node/bin/node
+          AGENT_BRIDGE_ARCHS: arm64 x86_64
+        run: |
+          set -eu
+          bash apps/menubar/build.sh
+          app=apps/menubar/build/AgentBridge.app
+          lipo -info "$app/Contents/MacOS/AgentBridge"
+          test -x "$app/Contents/Resources/node/bin/node"
+          test -f "$app/Contents/Resources/bridge/apps/bridge/dist/main.js"
+          test -f "$app/Contents/Resources/bridge/node_modules/@craftstead/crypto/wasm/noise.wasm"
+          /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$app/Contents/Info.plist"
+          # 用 bundle 里的 node 跑一次 CLI，证明拷进去的运行时真的能用。
+          # 从仓库外的一份拷贝里跑：留在仓库内时 Node 会顺着目录往上解析到源码树的
+          # node_modules，bundle 少带依赖也照样通过。
+          outside="$RUNNER_TEMP/outside/AgentBridge.app"
+          rm -rf "$RUNNER_TEMP/outside"
+          mkdir -p "$RUNNER_TEMP/outside"
+          cp -R "$app" "$outside"
+          AGENT_BRIDGE_HOME="$RUNNER_TEMP/state" \
+            "$outside/Contents/Resources/node/bin/node" \
+            "$outside/Contents/Resources/bridge/apps/bridge/dist/main.js" info
+
+      - name: 签名（配置了证书时）
+        id: sign
+        env:
+          P12: ${{ secrets.APPLE_CERT_P12 }}
+          P12_PASS: ${{ secrets.APPLE_CERT_PASSWORD }}
+        run: |
+          set -eu
+          app=apps/menubar/build/AgentBridge.app
+          if [ -z "${P12:-}" ] || [ -z "${P12_PASS:-}" ]; then
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+            echo "未配置 APPLE_CERT_P12 / APPLE_CERT_PASSWORD，保留 ad-hoc 签名"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p actions "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p actions "$keychain"
+          printf '%s' "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$P12_PASS" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k actions "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*"\(Developer ID Application[^"]*\)"/\1/p' | head -1)
+          if [ -z "$identity" ]; then echo "证书里没有 Developer ID Application 身份" >&2; exit 1; fi
+          codesign --force --timestamp --options runtime --sign "$identity" "$app/Contents/Resources/node/bin/node"
+          codesign --force --timestamp --options runtime --sign "$identity" "$app"
+          codesign --verify --strict --verbose=2 "$app"
+          echo "signed=true" >> "$GITHUB_OUTPUT"
+
+      - name: 打包 DMG
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/dmg"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          cp -R apps/menubar/build/AgentBridge.app "$stage/"
+          ln -s /Applications "$stage/Applications"
+          rm -f AgentBridge.dmg
+          hdiutil create -volname "Agent Bridge" -srcfolder "$stage" -ov -format UDZO AgentBridge.dmg
+          cp AgentBridge.dmg "AgentBridge-${{ steps.version.outputs.version }}.dmg"
+
+      - name: 公证（Apple ID 与证书都配好时）
+        if: steps.sign.outputs.signed == 'true' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        run: |
+          set -eu
+          xcrun notarytool submit AgentBridge.dmg \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple AgentBridge.dmg
+          cp AgentBridge.dmg "AgentBridge-${{ steps.version.outputs.version }}.dmg"
+
+      - name: 计算 sha256
+        run: |
+          set -eu
+          shasum -a 256 AgentBridge.dmg | tee AgentBridge.dmg.sha256
+
+      - name: 保存构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentBridge-${{ steps.version.outputs.version }}
+          path: |
+            AgentBridge.dmg
+            AgentBridge.dmg.sha256
+
+      - name: 创建 GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SIGNED: ${{ steps.sign.outputs.signed }}
+        run: |
+          set -eu
+          sha=$(cut -d' ' -f1 AgentBridge.dmg.sha256)
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            echo "Agent Bridge 菜单栏 app + bridge CLI，已打包成一个 DMG。"
+            echo
+            echo "- 版本：\`$VERSION\`"
+            echo "- 要求：macOS 13 或更新（universal：Apple Silicon 与 Intel）"
+            echo "- SHA-256：\`$sha\`"
+            echo
+            echo "## 安装"
+            echo
+            echo "打开 DMG，把 AgentBridge.app 拖进「应用程序」。首次启动后在菜单栏点菱形图标，"
+            echo "选择「初始化 Bridge…」填入中继地址即可配对。"
+            echo
+            if [ "$SIGNED" != "true" ]; then
+              echo "## Gatekeeper"
+              echo
+              echo "这是未签名构建，首次打开会被系统拦下："
+              echo
+              echo "- macOS 15 及以后：关掉拦截弹窗，打开「系统设置 → 隐私与安全性」，在底部点「仍要打开」。（右键 → 打开这条捷径从 15 起被系统去掉了。）"
+              echo "- macOS 14 及更早：在「应用程序」里右键 AgentBridge → 打开 → 再点「打开」。"
+              echo
+              echo "也可以在终端里执行："
+              echo
+              echo '```'
+              echo "xattr -dr com.apple.quarantine /Applications/AgentBridge.app"
+              echo '```'
+            fi
+          } > "$notes"
+          args=(--title "$TAG" --notes-file "$notes" --verify-tag)
+          case "$TAG" in *-*) args+=(--prerelease);; esac
+          gh release create "$TAG" \
+            AgentBridge.dmg \
+            "AgentBridge-$VERSION.dmg" \
+            AgentBridge.dmg.sha256 \
+            "${args[@]}"
+
+      # 官网下载按钮要尽快指向新版本；没有 PAT 就静默跳过，不能因此把发布打红。
+      # 只对正式版触发：预发布不进 /releases/latest，也不该动生产站点。
+      - name: 通知官网重建
+        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ secrets.HOMEPAGE_DISPATCH_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "未配置 HOMEPAGE_DISPATCH_TOKEN，跳过 repository_dispatch"
+            exit 0
+          fi
+          gh api repos/gowinder/craftstead-homepage/dispatches \
+            -f event_type=agent-bridge-release \
+            -f "client_payload[tag]=$TAG" \
+            || echo "repository_dispatch 失败（不影响发布）"

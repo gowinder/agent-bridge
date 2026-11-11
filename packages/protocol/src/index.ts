@@ -102,6 +102,11 @@ export const METHODS = [
   "session.list",
   "session.get",
   "session.rail",
+  "session.models",
+  "session.compact",
+  "push.info",
+  "push.subscribe",
+  "push.unsubscribe",
   "task.messages",
   "message.list",
   "session.subscribe",
@@ -118,6 +123,7 @@ export const METHODS = [
   "operation.get",
   "device.list",
   "device.revoke",
+  "device.rename",
   "fs.roots",
   "fs.list",
   "fs.read",
@@ -260,8 +266,13 @@ export interface FsRoot {
   path: string;
 }
 
-/** `root` is the project directory the chat belongs to; the bridge refuses anything else. */
+/**
+ * `root` is the project directory the chat belongs to; the bridge refuses anything else.
+ * `sessionId` is what ties the request to that chat: the bridge checks the session's
+ * project resolves to `root`, so a device cannot aim the browser at another project.
+ */
 export interface FsRootsParams {
+  sessionId: string;
   root: string;
 }
 
@@ -279,6 +290,8 @@ export interface FsEntry {
 }
 
 export interface FsListParams {
+  /** The chat whose project directory is being browsed. */
+  sessionId: string;
   /** Project directory of the chat; every read is confined to it. */
   root: string;
   path?: string;
@@ -292,6 +305,7 @@ export interface FsListResult {
 }
 
 export interface FsReadParams {
+  sessionId: string;
   root: string;
   path: string;
 }
@@ -310,6 +324,8 @@ export interface FsReadResult {
 }
 
 export interface ShellExecParams {
+  /** The chat whose project directory the command runs in. */
+  sessionId: string;
   /** Project directory of the chat; the command starts there unless `cwd` names a path inside it. */
   root: string;
   command: string;
@@ -396,17 +412,56 @@ export interface SessionSummary {
   live: boolean;
   /** The session process is actively running a turn right now. */
   busy?: boolean;
+  /** The client is blocked on a question only the user can answer (AskUserQuestion). */
+  needsDecision?: boolean;
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;
+  /** The client exposes a native "compact this conversation" action to the bridge. */
+  canCompact?: boolean;
+  /**
+   * The directory the session actually works in. A worktree session keeps the
+   * original repository as its project but runs in `.claude/worktrees/<name>`;
+   * remote tools (file browsing, commands) must start here, not at the project.
+   */
+  cwd?: string;
 }
 
 export type MessageRole = "user" | "assistant" | "system";
 
+/** One button the desktop client offered after a turn. */
+export interface NextStepAction {
+  /** Desktop host action id (`commit`, `merge`, …); absent for reply buttons. */
+  action?: string;
+  /** Button text; a client sends it as the user's message when it has no host API. */
+  label: string;
+}
+
+/** 桌面端弹给用户选的选项；网页只展示，回答仍然在桌面里做。 */
+export interface MessageQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** 桌面端的一次结构化提问（AskUserQuestion）。 */
+export interface MessageQuestion {
+  /** 分组标题，桌面端显示在问题上方。 */
+  header?: string;
+  question: string;
+  multiSelect?: boolean;
+  options: MessageQuestionOption[];
+}
+
 export interface MessageBlock {
-  type: "text" | "tool";
+  type: "text" | "tool" | "next-step" | "ask";
   text: string;
   truncated?: boolean;
+  /** `next-step` only: the question the client drew above the buttons. */
+  ask?: string;
+  /** `next-step` only: the buttons the desktop client offered. */
+  actions?: NextStepAction[];
+  /** `ask` only: the structured questions, for clients that can draw them. */
+  questions?: MessageQuestion[];
 }
 
 export interface MessageRecord {
@@ -466,12 +521,20 @@ export interface MessageListResult {
   busy?: boolean;
   /** The latest turn was stopped by the user before it finished. */
   interrupted?: boolean;
+  /** An on-demand compaction that is still running in the client, or how it failed. */
+  compact?: { pending: boolean; error?: string };
 }
 
 export interface MessageSendResult {
   accepted: boolean;
   /** True only when the target confirmed delivery. */
   delivered: boolean;
+  detail?: string;
+}
+
+/** Outcome of asking a client to compact the conversation on demand. */
+export interface SessionCompactResult {
+  compacted: boolean;
   detail?: string;
 }
 
@@ -507,6 +570,46 @@ export interface SessionRailResult {
 
 export interface SessionRailParams {
   sessionId: string;
+}
+
+export interface SessionModelsParams {
+  sessionId: string;
+}
+
+/** 会话所属客户端提供的一个模型。 */
+export interface ModelOption {
+  id: string;
+  name: string;
+  /** 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。 */
+  section?: "main" | "overflow";
+}
+
+/** 当前会话的模型信息；各 agent 能给出的内容不一样，缺字段就是不知道。 */
+export interface SessionModelsResult {
+  /** 客户端报告的模型标识。 */
+  current?: string;
+  /** 模型的可读名称。 */
+  currentName?: string;
+  models: ModelOption[];
+  /** 能否从网页切换模型；false 时看 note。 */
+  canSwitch: boolean;
+  note?: string;
+}
+
+/** 网页订阅系统推送需要 VAPID 公钥；私钥只留在 Bridge 里，不出这台机器。 */
+export interface PushInfoResult {
+  publicKey: string;
+  /** 当前设备已经登记过的订阅数；0 表示这台设备的浏览器还没订阅。 */
+  subscriptions: number;
+}
+
+export interface PushSubscribeParams {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
+export interface PushSubscribeResult {
+  subscriptions: number;
 }
 
 export interface TaskMessagesParams {
@@ -604,6 +707,9 @@ export interface TransferTargetInfo {
   sendBlockedReason?: string;
 }
 
+/** 转发正文（含预览里编辑后的内容）的长度上限，客户端据此提前拦住过长的内容。 */
+export const MAX_TRANSFER_CHARS = 200_000;
+
 export interface TransferPrepareResult {
   transferId: string;
   /** Epoch ms after which the prepared transfer is discarded. */
@@ -618,6 +724,8 @@ export interface TransferPrepareResult {
 
 export interface TransferCommitParams {
   transferId: string;
+  /** 预览里改过的正文；省略时发送 prepare 生成的内容。 */
+  text?: string;
 }
 
 export interface TransferCommitResult extends MessageSendResult {

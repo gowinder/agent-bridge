@@ -18,8 +18,31 @@ binding = "ASSETS"
 not_found_handling = "single-page-application"
 run_worker_first = ["/v1/*"]
 
+# 生产：品牌子域，前端静态资源与 /v1/* 由同一个 Worker 提供，保持同源。
+# 路由只写在 production 里，预览环境就没有可继承的来源；名字显式写死，
+# `deploy --env production` 才不会变成 agent-bridge-relay-production 这个新 Worker。
+[env.production]
+name = "agent-bridge-relay"
+routes = [{ pattern = "agent-bridge.craftstead.app", custom_domain = true }]
+
+[env.production.durable_objects]
+bindings = [{ name = "ROOMS", class_name = "Room" }]
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[env.production.assets]
+directory = "../web/dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/v1/*"]
+
 [env.preview]
 name = "agent-bridge-preview"
+# routes 是可继承键：不显式清空，preview 部署会把这台 Worker 也绑到生产域名上。
+routes = []
+workers_dev = true
 
 [env.preview.durable_objects]
 bindings = [{ name = "ROOMS", class_name = "Room" }]

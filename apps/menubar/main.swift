@@ -1,6 +1,7 @@
 // Agent Bridge menu bar app: shows who is connected to the local bridge, and
 // lets you cut a device off or revoke its credential without a terminal.
 import AppKit
+import CoreImage
 import Foundation
 
 struct DeviceInfo: Decodable {
@@ -170,10 +171,21 @@ enum BridgeCLI {
         let error: String
     }
 
+    /// DMG 安装版把运行时和 CLI 放在 Contents/Resources 里，源码树和本机 Node 都不需要。
+    static func bundledPath(_ relative: String) -> String? {
+        guard let resources = Bundle.main.resourceURL else { return nil }
+        let path = resources.appendingPathComponent(relative).path
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
     static func nodePath() -> String? {
         if let explicit = ProcessInfo.processInfo.environment["AGENT_BRIDGE_NODE"],
            FileManager.default.isExecutableFile(atPath: explicit) {
             return explicit
+        }
+        if let bundled = bundledPath("node/bin/node"),
+           FileManager.default.isExecutableFile(atPath: bundled) {
+            return bundled
         }
         for candidate in ["/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node"] {
             if FileManager.default.isExecutableFile(atPath: candidate) { return candidate }
@@ -199,11 +211,14 @@ enum BridgeCLI {
         return path.isEmpty || !FileManager.default.isExecutableFile(atPath: path) ? nil : path
     }
 
-    /// env override, else the checkout recorded in Info.plist at build time.
+    /// env override, else the CLI bundled into the app, else the source tree in Info.plist.
     static func scriptPath() -> String? {
         if let bin = ProcessInfo.processInfo.environment["AGENT_BRIDGE_BIN"], !bin.isEmpty,
            FileManager.default.fileExists(atPath: bin) {
             return bin
+        }
+        if let bundled = bundledPath("bridge/apps/bridge/dist/main.js") {
+            return bundled
         }
         guard let repo = Bundle.main.object(forInfoDictionaryKey: "AgentBridgeRepo") as? String else {
             return nil
@@ -572,6 +587,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSPasteboard.general.setString(pairLink, forType: .string)
     }
 
+    /// 邀请链接的二维码：手机相机扫一下就能直接打开配对页。放大时用最近邻插值，
+    /// 否则模块边缘会被糊掉，扫码失败。
+    private func makeQRImage(for text: String, points: CGFloat) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator"),
+              let message = text.data(using: .utf8) else { return nil }
+        filter.setValue(message, forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let output = filter.outputImage,
+              let cgImage = CIContext().createCGImage(output, from: output.extent) else { return nil }
+
+        // 按 2x 出图，Retina 屏上才不会被系统插值。
+        let pixels = Int(points * 2)
+        guard let rep = NSBitmapImageRep(
+            bitmapDataPlanes: nil,
+            pixelsWide: pixels,
+            pixelsHigh: pixels,
+            bitsPerSample: 8,
+            samplesPerPixel: 4,
+            hasAlpha: true,
+            isPlanar: false,
+            colorSpaceName: .deviceRGB,
+            bytesPerRow: 0,
+            bitsPerPixel: 0
+        ), let graphics = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+
+        // 静区（quiet zone）是二维码规范的一部分，四周留出空白才能被识别。
+        let margin = CGFloat(pixels) * 0.08
+        let side = CGFloat(pixels) - margin * 2
+
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphics
+        graphics.imageInterpolation = .none
+        NSColor.white.setFill()
+        NSRect(x: 0, y: 0, width: pixels, height: pixels).fill()
+        NSImage(cgImage: cgImage, size: output.extent.size)
+            .draw(in: NSRect(x: margin, y: margin, width: side, height: side))
+        NSGraphicsContext.restoreGraphicsState()
+
+        rep.size = NSSize(width: points, height: points)
+        let image = NSImage(size: NSSize(width: points, height: points))
+        image.addRepresentation(rep)
+        return image
+    }
+
     /// The pairing page shows a confirm code derived from both keys. The bridge only
     /// learns it once the browser's handshake finishes, so this window keeps polling
     /// the admin snapshot and swaps the placeholder for the real code.
@@ -580,8 +639,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pairLink = url
         pairSawChannel = false
 
-        let width: CGFloat = 480
-        let height: CGFloat = 250
+        let width: CGFloat = 520
+        let height: CGFloat = 520
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -593,30 +652,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         window.isReleasedWhenClosed = false
 
         let content = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        let hint = NSTextField(wrappingLabelWithString: "链接已复制，粘贴到浏览器打开。客户端显示的确认码要和下面一致，否则取消配对。")
-        hint.frame = NSRect(x: 20, y: height - 62, width: width - 40, height: 42)
+
+        let qrSide: CGFloat = 200
+        if let qr = makeQRImage(for: url, points: qrSide) {
+            let qrView = NSImageView(image: qr)
+            qrView.frame = NSRect(x: (width - qrSide) / 2, y: height - 24 - qrSide, width: qrSide, height: qrSide)
+            qrView.imageScaling = .scaleProportionallyUpOrDown
+            content.addSubview(qrView)
+        }
+
+        let hint = NSTextField(wrappingLabelWithString: "用手机相机扫码打开配对页，或复制链接到浏览器。链接 5 分钟内有效；客户端显示的确认码要和下面一致，否则取消配对。")
+        hint.frame = NSRect(x: 20, y: 240, width: width - 40, height: 48)
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = .secondaryLabelColor
 
         let urlField = NSTextField(labelWithString: url)
-        urlField.frame = NSRect(x: 20, y: height - 96, width: width - 40, height: 20)
+        urlField.frame = NSRect(x: 20, y: 210, width: width - 40, height: 20)
         urlField.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
         urlField.lineBreakMode = .byTruncatingMiddle
         urlField.isSelectable = true
         urlField.toolTip = url
 
         let status = NSTextField(labelWithString: "等待设备打开链接…")
-        status.frame = NSRect(x: 20, y: height - 132, width: width - 40, height: 20)
+        status.frame = NSRect(x: 20, y: 182, width: width - 40, height: 20)
         status.font = .systemFont(ofSize: 13, weight: .medium)
 
         let code = NSTextField(labelWithString: "— — —")
-        code.frame = NSRect(x: 20, y: 44, width: width - 40, height: 48)
+        code.frame = NSRect(x: 20, y: 110, width: width - 40, height: 52)
         code.font = .monospacedDigitSystemFont(ofSize: 38, weight: .semibold)
         code.alignment = .center
         code.isSelectable = true
 
         let copy = NSButton(title: "复制链接", target: self, action: #selector(copyPairLink))
-        copy.frame = NSRect(x: 20, y: 12, width: 100, height: 24)
+        copy.frame = NSRect(x: (width - 100) / 2, y: 64, width: 100, height: 24)
         copy.bezelStyle = .rounded
 
         for view in [hint, urlField, status, code, copy] { content.addSubview(view) }
