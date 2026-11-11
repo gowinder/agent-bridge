@@ -62,7 +62,8 @@ if [ -n "${AGENT_BRIDGE_NODE:-}" ]; then
   # dist/node.js 用 new URL("../wasm/noise.wasm", import.meta.url) 找 wasm，相对布局要保持。
   cp -R "$repo/packages/crypto/wasm" "$contents/Resources/bridge/node_modules/@craftstead/crypto/wasm"
 
-  printf '{"name":"agent-bridge-bundle","private":true,"type":"module"}' \
+  # 与源码树同布局：CLI 从 dist 往上三层读版本号，这里补上同一份根 package.json 的版本。
+  printf '{"name":"agent-bridge-bundle","private":true,"type":"module","version":"%s"}' "$version" \
     > "$contents/Resources/bridge/package.json"
 
   repo_key=""
