@@ -2260,6 +2260,15 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
   const mode = el("select", { className: "input" });
+  const model = el("input", {
+    className: "input",
+    attrs: {
+      type: "text",
+      placeholder: "留空用 CLI 默认（可填 opus / sonnet / haiku 或完整模型 ID）",
+      spellcheck: "false",
+      autocapitalize: "off",
+    },
+  });
   const title = el("input", {
     className: "input",
     attrs: { type: "text", placeholder: "标题（可选）", maxlength: "60" },
@@ -2274,6 +2283,7 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
     void call<SessionGetResult>("hosted.create", {
       path: cwd,
       permissionMode,
+      ...(model.value.trim() ? { model: model.value.trim() } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
       .then((result) => {
@@ -2303,6 +2313,7 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
       el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
     ]),
     el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]),
+    el("label", { className: "field" }, [el("span", { text: "模型" }), model]),
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
     status,
     el("div", { className: "row-actions" }, [submit]),
