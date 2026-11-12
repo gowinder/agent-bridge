@@ -57,7 +57,7 @@ function frameVersion(method: string, hostId: string | undefined): number {
   return hostId && method.startsWith("thread-follower-") ? base + 1 : base;
 }
 
-interface ThreadRow {
+export interface ThreadRow {
   id: string;
   title: string | null;
   cwd: string | null;
@@ -66,6 +66,7 @@ interface ThreadRow {
   rollout_path: string | null;
   archived: number | null;
   thread_source: string | null;
+  source_kind?: string | null;
 }
 
 interface BusyState {
@@ -235,9 +236,9 @@ function scanBusyLines(text: string, state: BusyState): void {
   }
 }
 
-const CATALOG_PATH = join(SQLITE_DIR, "codex.db");
+export const CATALOG_PATH = join(SQLITE_DIR, "codex.db");
 
-function hasCatalog(path: string): boolean {
+export function hasCatalog(path: string): boolean {
   try {
     const db = new DatabaseSync(path, { readOnly: true });
     try {
@@ -251,7 +252,7 @@ function hasCatalog(path: string): boolean {
   }
 }
 
-function newestStateDb(): string | null {
+export function newestStateDb(): string | null {
   let best: { path: string; version: number } | null = null;
   try {
     for (const name of readdirSync(SQLITE_DIR)) {
@@ -477,7 +478,7 @@ function encodeFrame(message: Record<string, unknown>): Buffer {
 }
 
 export class CodexAdapter implements SessionAdapter {
-  readonly key = "codex";
+  readonly key: string = "codex";
   private db: DatabaseSync | null = null;
   private dbPath: string | null = null;
   private catalogDb: DatabaseSync | null = null;
@@ -560,7 +561,7 @@ export class CodexAdapter implements SessionAdapter {
    * rollout is append-only: the first look seeds from the tail (walking back until a marker is
    * found), then each poll reads only the appended bytes, so a long turn keeps its start marker.
    */
-  private threadBusy(thread: ThreadRow): boolean {
+  protected threadBusy(thread: ThreadRow): boolean {
     const file = this.rolloutFor(thread);
     if (!file || file.compressed) return false;
     let size: number;
@@ -982,7 +983,7 @@ export class CodexAdapter implements SessionAdapter {
     );
   }
 
-  private projectIdFor(cwd: string | null): string {
+  protected projectIdFor(cwd: string | null): string {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
 
@@ -999,7 +1000,7 @@ export class CodexAdapter implements SessionAdapter {
     }
   }
 
-  private threads(): ThreadRow[] {
+  protected threads(): ThreadRow[] {
     const catalog = this.catalog();
     if (catalog) {
       try {
@@ -1010,7 +1011,8 @@ export class CodexAdapter implements SessionAdapter {
                     CAST(source_updated_at * 1000 AS INTEGER) AS updated_at_ms,
                     NULL AS rollout_path, 0 AS archived, thread_source
              FROM local_thread_catalog
-             WHERE host_id = 'local' AND (thread_source IS NULL OR thread_source != 'subagent')
+             WHERE host_id = 'local' AND COALESCE(source_kind, '') != 'cli'
+               AND (thread_source IS NULL OR thread_source != 'subagent')
              ORDER BY source_updated_at DESC
              LIMIT ${MAX_SESSIONS}`,
           )
@@ -1025,7 +1027,8 @@ export class CodexAdapter implements SessionAdapter {
         .prepare(
           `SELECT id, title, cwd, created_at_ms, updated_at_ms, rollout_path, archived, thread_source
            FROM threads
-           WHERE archived = 0 AND (thread_source IS NULL OR thread_source != 'subagent')
+           WHERE archived = 0 AND COALESCE(source, '') != 'cli'
+             AND (thread_source IS NULL OR thread_source != 'subagent')
            ORDER BY updated_at_ms DESC
            LIMIT ${MAX_SESSIONS}`,
         )
@@ -1036,7 +1039,7 @@ export class CodexAdapter implements SessionAdapter {
     }
   }
 
-  private thread(threadId: string): ThreadRow | null {
+  protected thread(threadId: string): ThreadRow | null {
     const catalog = this.catalog();
     if (catalog) {
       try {
@@ -1046,7 +1049,8 @@ export class CodexAdapter implements SessionAdapter {
                     CAST(source_created_at * 1000 AS INTEGER) AS created_at_ms,
                     CAST(source_updated_at * 1000 AS INTEGER) AS updated_at_ms,
                     NULL AS rollout_path, 0 AS archived, thread_source
-             FROM local_thread_catalog WHERE host_id = 'local' AND thread_id = ?`,
+             FROM local_thread_catalog
+             WHERE host_id = 'local' AND COALESCE(source_kind, '') != 'cli' AND thread_id = ?`,
           )
           .get(threadId) as unknown as ThreadRow | undefined;
         return row ?? null;
@@ -1059,7 +1063,7 @@ export class CodexAdapter implements SessionAdapter {
       const row = this.db
         .prepare(
           `SELECT id, title, cwd, created_at_ms, updated_at_ms, rollout_path, archived, thread_source
-           FROM threads WHERE id = ?`,
+           FROM threads WHERE id = ? AND COALESCE(source, '') != 'cli'`,
         )
         .get(threadId) as unknown as ThreadRow | undefined;
       return row ?? null;
@@ -1081,7 +1085,7 @@ export class CodexAdapter implements SessionAdapter {
     }
   }
 
-  private rolloutFor(thread: ThreadRow): { path: string; compressed: boolean } | null {
+  protected rolloutFor(thread: ThreadRow): { path: string; compressed: boolean } | null {
     if (thread.rollout_path) return rolloutFile(thread.rollout_path);
     const cached = this.rolloutCache.get(thread.id);
     if (cached && existsSync(cached.path)) return cached;
@@ -1110,7 +1114,7 @@ export class CodexAdapter implements SessionAdapter {
     return null;
   }
 
-  private async readRollout(
+  protected async readRollout(
     path: string,
     threadId: string,
   ): Promise<{

@@ -387,7 +387,15 @@ export interface AdapterCapabilities {
 export interface AppInfo {
   appId: string;
   provider: "anthropic" | "openai" | "google" | "deepseek";
-  kind: "claude-code" | "codex" | "antigravity" | "antigravity-desktop" | "dsh" | "hosted";
+  kind:
+    | "claude-code"
+    | "claude-code-cli"
+    | "codex"
+    | "codex-cli"
+    | "antigravity"
+    | "antigravity-desktop"
+    | "dsh"
+    | "hosted";
   name: string;
   version?: string;
   mode: AdapterMode;
