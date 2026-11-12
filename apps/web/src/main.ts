@@ -142,6 +142,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
+  more:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.4" cy="8" r="1.25"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -1633,9 +1635,11 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     if (recents) right.append(recents);
     const switcher = agentSwitcher(parseRoute());
     if (switcher) right.append(switcher);
+    // 桌面上直接平铺；手机上这几个按钮会把顶栏撑出屏宽，折进「更多」菜单。
+    const secondary = el("div", { className: "topbar-secondary" });
     const notify = notifyButton();
-    if (notify) right.append(notify);
-    right.append(
+    if (notify) secondary.append(notify);
+    secondary.append(
       el("span", { className: "conn" }, [
         el("span", { className: "dot" }),
         el("span", { text: connected.info.name }),
@@ -1643,6 +1647,7 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
       button("设备", () => navigate({ level: "devices" }), "btn ghost small"),
       button("断开", showHome, "btn ghost small"),
     );
+    right.append(topbarOverflow(secondary));
   }
   return el("header", { className: "topbar" }, [
     el("a", { className: "brand", attrs: { href: hashFor({ level: "clients" }) } }, [
@@ -1667,6 +1672,38 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     nav,
     right,
   ]);
+}
+
+/**
+ * 窄屏顶栏放不下「提醒 / 设备 / 断开」，收进一个下拉；宽屏用 CSS 把面板展开平铺，
+ * 同一批按钮在两种布局里共用，状态（提醒开没开）不用维护两份。
+ */
+function topbarOverflow(panel: HTMLElement): HTMLElement {
+  const toggle = button("", () => setOpen(!panel.classList.contains("is-open")), "btn ghost small topbar-more");
+  toggle.append(icon("more"));
+  toggle.setAttribute("aria-haspopup", "true");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-label", "更多操作");
+
+  const wrap = el("div", { className: "topbar-more-wrap" }, [toggle, panel]);
+
+  function onOutside(event: MouseEvent): void {
+    if (!wrap.isConnected) {
+      document.removeEventListener("click", onOutside);
+      return;
+    }
+    if (event.target instanceof Node && wrap.contains(event.target)) return;
+    setOpen(false);
+  }
+
+  function setOpen(open: boolean): void {
+    panel.classList.toggle("is-open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+    if (open) document.addEventListener("click", onOutside);
+    else document.removeEventListener("click", onOutside);
+  }
+
+  return wrap;
 }
 
 /**
