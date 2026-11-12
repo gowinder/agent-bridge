@@ -223,6 +223,9 @@ let justPaired = false;
 let retryTimer: number | null = null;
 let pollTimer: number | null = null;
 let renderToken = 0;
+let deferredListRender = false;
+/** 新建托管会话表单的草稿：中途重连重绘时把已填内容还回去，不打断输入。 */
+let hostedDraft: { projectId: string; title: string; model: string; mode: string } | null = null;
 /** Lets a soft reconnect refresh the open chat in place instead of re-rendering it. */
 let chatResumeKey: string | null = null;
 let chatResume: (() => void) | null = null;
@@ -535,7 +538,7 @@ async function watchSessions(): Promise<void> {
     if (document.visibilityState !== "visible") return;
     const route = parseRoute();
     if (route.level !== "clients" && route.level !== "projects" && route.level !== "sessions") return;
-    if (snapshotSignature() !== before) void renderRoute();
+    if (snapshotSignature() !== before) repaintList();
   } catch {
     // The connection layer already reports disconnects; the next tick retries.
   }
@@ -1946,6 +1949,9 @@ async function renderRoute(soft = false): Promise<void> {
     return;
   }
   const route = parseRoute();
+  if (hostedDraft && (route.level !== "sessions" || route.projectId !== hostedDraft.projectId)) {
+    hostedDraft = null;
+  }
   if (soft && chatResume && chatResumeKey === hashFor(route)) {
     chatResume();
     // 重连会清空快照；这里补拉一次，分享等依赖全局数据的操作才不会静默失效。
@@ -2016,9 +2022,30 @@ async function refreshSnapshot(token: number): Promise<void> {
   // 这里再 renderRoute() 会把正在编辑的输入区整个重建掉。
   if (token !== renderToken) return;
   if (snapshotSignature() === before) return;
-  // 新建托管会话面板是就地展开的表单：整页重绘会清掉它和已填内容，等用户提交或收起后再刷新。
-  if (document.querySelector(".hosted-create-host")?.childElementCount) return;
-  void renderRoute();
+  repaintList();
+}
+
+/**
+ * 列表数据变了就重绘。新建托管会话的表单是就地展开的，整页重绘会清掉正在输入的标题，
+ * 所以表单打开期间先记下来，等它从页面上消失后再补画一次。
+ */
+function repaintList(): void {
+  const host = document.querySelector(".hosted-create-host");
+  if (!host || host.childElementCount === 0) {
+    void renderRoute();
+    return;
+  }
+  if (deferredListRender) return;
+  deferredListRender = true;
+  const observer = new MutationObserver(() => {
+    if (host.childElementCount > 0) return;
+    observer.disconnect();
+    const pending = deferredListRender;
+    deferredListRender = false;
+    // 表单被整页替换（提交后跳到聊天页）时那次导航已经画过了，不要再画一遍。
+    if (pending && host.isConnected) void renderRoute();
+  });
+  observer.observe(host, { childList: true });
 }
 
 function viewHead(eyebrow: string, title: string, meta: string, extra?: HTMLElement): HTMLElement {
@@ -2144,9 +2171,12 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const isHosted = appInfo?.appId === "hosted";
   const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
   const panelHost = isHosted ? el("div", { className: "hosted-create-host" }) : null;
+  const draft = project && hostedDraft?.projectId === project.projectId ? hostedDraft : null;
+  if (panelHost && project && draft) panelHost.append(hostedCreatePanel(project, draft));
   const openCreate = (): void => {
     if (!panelHost || !project) return;
-    panelHost.replaceChildren(hostedCreatePanel(project));
+    hostedDraft = { projectId: project.projectId, title: "", model: "", mode: "manual" };
+    panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     panelHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
 
@@ -2301,7 +2331,10 @@ function hostedModelLabel(model: string | undefined): string {
   return model ? model : "CLI 默认";
 }
 
-function hostedCreatePanel(project: ProjectInfo): HTMLElement {
+function hostedCreatePanel(
+  project: ProjectInfo,
+  draft: { title: string; model: string; mode: string },
+): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
   const mode = el("select", { className: "input" });
@@ -2319,6 +2352,14 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
     className: "input",
     attrs: { type: "text", placeholder: "标题（可选）", maxlength: "60" },
   });
+  model.value = draft.model;
+  model.addEventListener("input", () => {
+    draft.model = model.value;
+  });
+  title.value = draft.title;
+  title.addEventListener("input", () => {
+    draft.title = title.value;
+  });
   const submit = button("创建", () => {
     const cwd = project.cwd;
     if (!cwd) return;
@@ -2333,6 +2374,7 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
       .then((result) => {
+        hostedDraft = null;
         // Chat pages read the cached snapshot, so the new session must be in it
         // before navigating; otherwise the page reports it as missing.
         if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
@@ -2356,7 +2398,10 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
     const help = HOSTED_MODE_HELP[mode.value];
     modeHint.textContent = help ? help.detail : "";
   };
-  mode.addEventListener("change", syncModeHint);
+  mode.addEventListener("change", () => {
+    draft.mode = mode.value;
+    syncModeHint();
+  });
   form.append(
     el("p", { className: "panel-title", text: "新建 Bridge 托管会话" }),
     el("label", { className: "field" }, [
@@ -2378,7 +2423,10 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
           attrs: { value: item },
         })),
       );
-      mode.value = "manual";
+      mode.value = config.permissionModes.includes(draft.mode as HostedPermissionMode)
+        ? draft.mode
+        : "manual";
+      draft.mode = mode.value;
       syncModeHint();
       const idle = Math.round(config.idleTimeoutMs / 60_000);
       const bypassNote = config.allowBypassPermissions

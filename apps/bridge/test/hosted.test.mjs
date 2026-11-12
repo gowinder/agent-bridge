@@ -302,3 +302,90 @@ test("sessions survive a manager restart through the registry", (t) => {
   const page = next.messagesFor(session.sessionId, { limit: 50 });
   assert.equal(page.completeness, "complete");
 });
+
+test("rail and messages report context usage from assistant events", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: "好的" }],
+      usage: {
+        input_tokens: 1200,
+        cache_read_input_tokens: 30_000,
+        cache_creation_input_tokens: 4_000,
+        output_tokens: 300,
+      },
+    },
+  });
+  const context = h.manager.rail(session.sessionId).context;
+  assert.ok(context);
+  assert.equal(context.usedTokens, 35_200);
+  assert.equal(context.windowTokens, 200_000);
+  assert.equal(context.model, "claude-sonnet-4-5");
+  assert.equal(context.windowEstimated, undefined);
+  assert.deepEqual(
+    context.details.map((detail) => detail.label),
+    ["输入", "缓存读", "缓存写", "输出"],
+  );
+  assert.equal(h.manager.messagesFor(session.sessionId, { limit: 50 }).context.usedTokens, 35_200);
+});
+
+test("context usage is recorded even when the assistant event has no blocks", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-opus-4-5[1m]",
+      content: [],
+      usage: { input_tokens: 10, cache_read_input_tokens: 500_000, output_tokens: 5 },
+    },
+  });
+  const page = h.manager.messagesFor(session.sessionId, { limit: 50 });
+  assert.equal(page.messages.length, 0);
+  assert.equal(page.context.windowTokens, 1_000_000);
+  assert.equal(page.context.usedTokens, 500_010);
+});
+
+test("unknown model names keep usage but mark the window as estimated", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({
+    type: "assistant",
+    message: {
+      model: "some-router-alias",
+      content: [{ type: "text", text: "hi" }],
+      usage: { input_tokens: 100, output_tokens: 20 },
+    },
+  });
+  const context = h.manager.rail(session.sessionId).context;
+  assert.equal(context.windowTokens, 200_000);
+  assert.equal(context.windowEstimated, true);
+});
+
+test("context usage survives a manager restart", (t) => {
+  const h = harness();
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: "hi" }],
+      usage: { input_tokens: 500, cache_read_input_tokens: 1_500, output_tokens: 10 },
+    },
+  });
+  h.manager.dispose();
+  const next = new HostedSessionManager({ stateDir: h.stateDir, spawn: () => new FakeChild() });
+  t.after(() => next.dispose());
+  const context = next.rail(session.sessionId).context;
+  assert.equal(context.usedTokens, 2_000);
+  assert.deepEqual(
+    context.details.map((detail) => detail.value),
+    ["500", "1,500", "0", "10"],
+  );
+});
