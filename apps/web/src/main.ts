@@ -2256,10 +2256,39 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   );
 }
 
+/** 权限模式的说明文案；bridge 只下发部分模式，未知值不显示说明。 */
+const HOSTED_MODE_HELP: Record<string, { short: string; detail: string }> = {
+  manual: {
+    short: "每次操作都要确认",
+    detail: "文件编辑、shell 命令、联网访问都会停下来等你确认。最安全的日常模式。",
+  },
+  acceptEdits: {
+    short: "工作目录内编辑免确认",
+    detail: "工作目录内的文件编辑，以及 mkdir/rm/mv/cp/sed 等常见文件命令自动放行；目录外路径、受保护路径（.git/.claude 等）和其它 shell 命令仍要确认。",
+  },
+  plan: {
+    short: "先出计划不动手",
+    detail: "只读代码并给出计划，不修改源码；计划批准后才按选定方式执行。不是完全只读。",
+  },
+  dontAsk: {
+    short: "不问，需要确认的直接拒绝",
+    detail: "不会弹出确认：凡是需要确认的操作一律自动拒绝，只运行只读命令和已预先授权的操作。无人值守时最安全，但联网、写文件常被拒。",
+  },
+  auto: {
+    short: "分类器自动判定",
+    detail: "由分类器逐个审查动作：明显危险的被拦下并说明原因，其余自动放行；只有少数情况仍会询问。",
+  },
+  bypassPermissions: {
+    short: "跳过权限检查",
+    detail: "不再询问、跳过安全检查，deny 规则和 sandbox（文件/网络隔离）仍然生效。只应在隔离环境里用。",
+  },
+};
+
 function hostedCreatePanel(project: ProjectInfo): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
   const mode = el("select", { className: "input" });
+  const modeHint = el("p", { className: "hint" });
   const model = el("input", {
     className: "input",
     attrs: {
@@ -2306,6 +2335,11 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
       });
   }, "btn small");
   form.addEventListener("submit", (event) => event.preventDefault());
+  const syncModeHint = (): void => {
+    const help = HOSTED_MODE_HELP[mode.value];
+    modeHint.textContent = help ? help.detail : "";
+  };
+  mode.addEventListener("change", syncModeHint);
   form.append(
     el("p", { className: "panel-title", text: "新建 Bridge 托管会话" }),
     el("label", { className: "field" }, [
@@ -2313,6 +2347,7 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
       el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
     ]),
     el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]),
+    modeHint,
     el("label", { className: "field" }, [el("span", { text: "模型" }), model]),
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
     status,
@@ -2321,9 +2356,13 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
   void call<HostedDirsResult>("hosted.dirs")
     .then((config) => {
       mode.replaceChildren(
-        ...config.permissionModes.map((item) => el("option", { text: item, attrs: { value: item } })),
+        ...config.permissionModes.map((item) => el("option", {
+          text: HOSTED_MODE_HELP[item] ? `${item} — ${HOSTED_MODE_HELP[item].short}` : item,
+          attrs: { value: item },
+        })),
       );
       mode.value = "manual";
+      syncModeHint();
       const idle = Math.round(config.idleTimeoutMs / 60_000);
       status.textContent = config.enabled
         ? `只在 ${project.cwd ?? ""} 中运行；网页断开不会结束进程，空闲 ${idle} 分钟后自动停止，再发消息时 resume。`
