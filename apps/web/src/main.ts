@@ -4854,7 +4854,7 @@ function assistantTurn(
   if (!folded) bubble.append(processFold(steps));
   // 只有最新一回合的盒子可以点；历史回合保留文字说明。
   const latest = nextSteps[nextSteps.length - 1];
-  if (latest) bubble.append(nextStepBox(latest, state));
+  if (latest) bubble.append(nextStepBox(latest, latest.pending ? (askState ?? state) : state));
   return bubble;
 }
 

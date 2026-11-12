@@ -485,6 +485,8 @@ export interface MessageBlock {
   actions?: NextStepAction[];
   /** `ask` only: the structured questions, for clients that can draw them. */
   questions?: MessageQuestion[];
+  /** `next-step` only: 等待应答的权限确认；会话在忙（等批准）时也允许点击。 */
+  pending?: boolean;
 }
 
 export interface MessageRecord {
