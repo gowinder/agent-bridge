@@ -13,6 +13,8 @@ const HEAD_BYTES = 64 * 1024;
 const TAIL_BYTES = 64 * 1024;
 const MAX_TITLE_CHARS = 120;
 const EXCLUDE_CACHE_MS = 10_000;
+/** 远程续写不沿用的高权限模式：没有交互界面可确认。 */
+const RESUME_UNSAFE_MODES = new Set(["bypassPermissions", "dontAsk", "auto", "acceptEdits"]);
 
 interface TranscriptHead {
   cwd: string;
@@ -154,12 +156,14 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
     }
 
     this.resumeTurn(record, text);
+    const downgraded =
+      !!record.permissionMode && RESUME_UNSAFE_MODES.has(record.permissionMode);
     return {
       accepted: true,
       delivered: false,
       detail: `已让 Bridge 用 claude --resume 恢复该 CLI 会话执行这一轮（权限模式 ${
-        record.permissionMode || "默认"
-      }）`,
+        downgraded ? "默认" : record.permissionMode || "默认"
+      }${downgraded ? `；安全降级：远程续写不沿用 ${record.permissionMode}` : ""}）`,
     };
   }
 
@@ -173,7 +177,10 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
       "--output-format",
       "json",
     ];
-    if (record.permissionMode) args.push("--permission-mode", record.permissionMode);
+    // 远程触发的新进程没人盯着，不沿用高权限模式，交给 CLI 默认值兜底。
+    if (record.permissionMode && !RESUME_UNSAFE_MODES.has(record.permissionMode)) {
+      args.push("--permission-mode", record.permissionMode);
+    }
     const child = spawn(cli, args, {
       cwd: record.cwd || process.cwd(),
       env: process.env,

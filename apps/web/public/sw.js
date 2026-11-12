@@ -26,7 +26,9 @@ self.addEventListener("push", (event) => {
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
   const data = event.notification.data || {};
-  const target = new URL(typeof data.url === "string" ? data.url : "/", self.registration.scope).href;
+  let target = new URL(typeof data.url === "string" ? data.url : "/", self.registration.scope).href;
+  // 通知里的 url 来自 push 数据，不可信；只允许跳回本站，否则 `//evil.com` 会开出外站。
+  if (new URL(target).origin !== self.location.origin) target = self.registration.scope;
   event.waitUntil(
     (async () => {
       const windows = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
