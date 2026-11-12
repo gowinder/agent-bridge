@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Bridge 托管会话在网页侧栏显示上下文用量（输入/缓存读/缓存写/输出），数据取自 CLI 的 assistant 事件并随会话记录持久化。
+
+### Fixed
+
+- 网页新建托管会话时，列表后台刷新或重连不再重建表单：已输入的标题、模型和权限模式会保留；列表更新等表单结束再重绘。
+
+- 本机保存的旧预览中继地址（`agent-bridge-preview.gowinder.workers.dev`）在打开状态目录时自动改写为 `agent-bridge-preview.craftstead.app`，避免 workers.dev 路由下线后一直报 `relay websocket error`。
+
 ## [0.1.9] - 2026-11-12
 
 ### Added

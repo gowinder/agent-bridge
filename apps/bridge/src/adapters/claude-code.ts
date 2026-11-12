@@ -32,6 +32,7 @@ import type {
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
+import { contextUsageFromUsage } from "../context-usage.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
@@ -242,11 +243,6 @@ function modelOptionsOf(list: unknown): ModelOption[] {
     out.push({ id, name, section });
   }
   return out;
-}
-
-function isMillionTokenModel(model: string): boolean {
-  const name = model.toLowerCase();
-  return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
 }
 
 /** A turn the user stopped is recorded as a synthetic user entry. */
@@ -1264,28 +1260,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   /** Latest assistant usage entry wins; it describes the context the next turn will see. */
   private contextOf(entry: RawEntry): ContextUsage | undefined {
     if (entry.type !== "assistant" || entry.isSidechain) return undefined;
-    const usage = entry.message?.usage;
-    if (!usage) return undefined;
-    const input = asNumber(usage["input_tokens"]);
-    const cacheRead = asNumber(usage["cache_read_input_tokens"]);
-    const cacheWrite = asNumber(usage["cache_creation_input_tokens"]);
-    const output = asNumber(usage["output_tokens"]);
-    const used = input + cacheRead + cacheWrite;
-    if (used <= 0) return undefined;
-    const model = asString(entry.message?.model);
-    const known = /claude|opus|sonnet|haiku/i.test(model);
-    return {
-      usedTokens: used,
-      windowTokens: isMillionTokenModel(model) ? 1_000_000 : 200_000,
-      ...(model ? { model } : {}),
-      ...(known ? {} : { windowEstimated: true }),
-      details: [
-        { label: "输入", value: input.toLocaleString("en-US") },
-        { label: "缓存读", value: cacheRead.toLocaleString("en-US") },
-        { label: "缓存写", value: cacheWrite.toLocaleString("en-US") },
-        { label: "输出", value: output.toLocaleString("en-US") },
-      ],
-    };
+    return contextUsageFromUsage(entry.message?.usage, asString(entry.message?.model));
   }
 
   private toMessage(

@@ -13,6 +13,7 @@ import {
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import type {
+  ContextUsage,
   HostedCreateParams,
   HostedDirInfo,
   HostedDirsResult,
@@ -28,6 +29,7 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText } from "../adapters/types.js";
+import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js";
 import { defaultStateDir } from "../store.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -86,6 +88,8 @@ interface HostedRecord {
   model?: string;
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
+  /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
+  context?: ContextUsage;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -260,6 +264,7 @@ export class HostedSessionManager {
       messages: pageMessages,
       completeness: "complete",
       busy: live?.busy ?? false,
+      ...(record.context ? { context: record.context } : {}),
     };
     const first = pageMessages[0];
     if (start > 0 && first) result.nextBefore = first.messageId;
@@ -300,6 +305,7 @@ export class HostedSessionManager {
       ],
       servers: [],
       tasks: [],
+      ...(record.context ? { context: record.context } : {}),
       note: "This session is hosted by Bridge, not by the Claude desktop app.",
     };
   }
@@ -531,8 +537,19 @@ export class HostedSessionManager {
     const type = event["type"];
     if (type === "assistant") {
       const message = isRecord(event["message"]) ? event["message"] : {};
+      // usage 既描述这次调用的用量，也是下一轮开始时的上下文占用；blocks 为空（例如
+      // 全是工具调用）时也要记下来，否则侧栏只在有可见文本时才更新。
+      const reported = typeof message["model"] === "string" ? message["model"] : "";
+      const context = contextUsageFromUsage(
+        message["usage"],
+        reported || record.observedModel || record.model || "",
+      );
+      if (context) record.context = context;
       const blocks = blocksFromContent(message["content"]);
-      if (blocks.length === 0) return;
+      if (blocks.length === 0) {
+        if (context) this.touch(record);
+        return;
+      }
       if (record.title === "托管会话") {
         const textBlock = blocks.find((block) => block.type === "text" && block.text.trim());
         if (textBlock) record.title = truncateTitle(textBlock.text);
@@ -876,6 +893,7 @@ export class HostedSessionManager {
       for (const item of list) {
         if (!isRecord(item)) continue;
         if (typeof item["id"] !== "string" || typeof item["cwd"] !== "string") continue;
+        const context = sanitizeContextUsage(item["context"]);
         this.records.set(item["id"], {
           id: item["id"],
           cwd: item["cwd"],
@@ -888,6 +906,7 @@ export class HostedSessionManager {
           ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
             ? { observedModel: item["observedModel"] }
             : {}),
+          ...(context ? { context } : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
           updatedAt: numberOr(item["updatedAt"], Date.now()),
           lastActiveAt: numberOr(item["lastActiveAt"], Date.now()),
@@ -913,6 +932,7 @@ export class HostedSessionManager {
               permissionMode: record.permissionMode,
               ...(record.model ? { model: record.model } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
+              ...(record.context ? { context: record.context } : {}),
               createdAt: record.createdAt,
               updatedAt: record.updatedAt,
               lastActiveAt: record.lastActiveAt,
