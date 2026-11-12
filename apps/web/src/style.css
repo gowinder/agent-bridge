@@ -304,6 +304,19 @@ a.crumb:hover {
   min-width: 0;
 }
 
+/* 宽屏下「更多」不出现，那一组按钮直接平铺在顶栏里。 */
+.topbar-more-wrap {
+  display: contents;
+}
+
+.topbar-more {
+  display: none;
+}
+
+.topbar-secondary {
+  display: contents;
+}
+
 .recents-btn {
   display: inline-flex;
   align-items: center;
@@ -3245,6 +3258,70 @@ body.has-file-preview {
 
 /* ---------- responsive ---------- */
 
+/* 顶栏操作按钮平铺放不下时会把整页撑宽，浏览器随之缩放，字和历史记录都显得很小。
+   窗口窄一点就收起「提醒 / 设备 / 断开」，最近访问占满剩下的宽度。 */
+@media (max-width: 900px) {
+  .topbar-actions {
+    gap: 4px;
+    min-width: 0;
+  }
+
+  .topbar-more-wrap {
+    display: block;
+    position: relative;
+    flex: none;
+  }
+
+  .topbar-more {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 6px 8px;
+  }
+
+  .topbar-secondary {
+    display: none;
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 40;
+    min-width: 176px;
+    flex-direction: column;
+    gap: 2px;
+    padding: 5px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--line);
+    background: var(--surface);
+    box-shadow: var(--shadow);
+  }
+
+  .topbar-secondary.is-open {
+    display: flex;
+  }
+
+  .topbar-secondary .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+    text-align: left;
+  }
+
+  .recent-switch {
+    flex: 1 1 0;
+  }
+
+  .recents-btn {
+    width: 100%;
+    max-width: none;
+  }
+
+  .recents-track {
+    flex: 1 1 auto;
+  }
+}
+
 @media (max-width: 720px) {
   .brand-name,
   .craftstead-name,
@@ -3253,7 +3330,8 @@ body.has-file-preview {
   }
 
   .topbar {
-    gap: 10px;
+    gap: 8px;
+    padding: 12px 14px;
   }
 
   /* 只剩菱形时，标识本身只有 6px，触摸根本点不到；给它一个 32px 的可点区域。 */
@@ -3262,10 +3340,6 @@ body.has-file-preview {
     min-width: 32px;
     min-height: 32px;
     padding: 0 8px 0 12px;
-  }
-
-  .recents-btn {
-    max-width: 118px;
   }
 
   .recent-menu {
@@ -3301,7 +3375,7 @@ body.has-file-preview {
   }
 
   .main.chat {
-    height: calc(100dvh - 53px);
+    height: calc(100dvh - 58px);
     padding-top: 8px;
     gap: 8px;
   }
