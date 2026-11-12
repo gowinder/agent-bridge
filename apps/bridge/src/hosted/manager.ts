@@ -90,6 +90,10 @@ interface LiveProcess {
   busy: boolean;
   pending: PendingPermission | null;
   startedAt: number;
+  /** 最后一条 stderr，进程非零退出时拼进系统消息，避免只剩一个光秃秃的退出码。 */
+  stderrTail: string;
+  /** 最后一次启动是否为 --resume，用来识别「会话记录不存在」并自动改走新建。 */
+  resumed: boolean;
 }
 
 export interface HostedChild {
@@ -416,13 +420,22 @@ export class HostedSessionManager {
     // 恢复也要带上同一个模型，否则续写会悄悄换回 CLI 默认模型。
     if (record.model) args.push("--model", record.model);
     const child = this.spawnFn(cli, args, { cwd: record.cwd, env: process.env });
-    const live: LiveProcess = { child, buffer: "", busy: false, pending: null, startedAt: Date.now() };
+    const live: LiveProcess = {
+      child,
+      buffer: "",
+      busy: false,
+      pending: null,
+      startedAt: Date.now(),
+      stderrTail: "",
+      resumed: resume,
+    };
     this.live.set(record.id, live);
     child.stdout?.setEncoding?.("utf8");
     child.stdout?.on("data", (chunk: string | Buffer) => this.onStdout(record, live, String(chunk)));
     child.stderr?.setEncoding?.("utf8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
       const line = String(chunk).trim();
+      if (line) live.stderrTail = line.slice(0, 300);
       if (line && !line.startsWith("[claude-code:")) this.log(`hosted ${record.id} stderr: ${line.slice(0, 300)}`);
     });
     child.on("error", (error) => {
@@ -443,7 +456,21 @@ export class HostedSessionManager {
     });
     child.on("exit", (code, signal) => {
       this.live.delete(record.id);
-      const reason = signal ? `信号 ${signal}` : `退出码 ${code ?? "?"}`;
+      // 会话记录从来没生成过（例如上次 spawn 直接失败）时，--resume 会立刻退出；
+      // 这种会话改走 --session-id 新建一次，用户不必手动删掉重来。
+      if (!signal && code !== 0 && live.resumed && /no conversation found/i.test(live.stderrTail)) {
+        this.log(`hosted ${record.id}: 会话记录不存在，改为新建`);
+        try {
+          this.start(record, false);
+          return;
+        } catch (error) {
+          this.log(`hosted ${record.id}: 重新启动失败：${String(error)}`);
+        }
+      }
+      const failed = !signal && code !== 0;
+      const reason = signal
+        ? `信号 ${signal}`
+        : `退出码 ${code ?? "?"}${failed && live.stderrTail ? `：${live.stderrTail}` : ""}`;
       this.appendRecord(record, {
         messageId: randomUUID(),
         sessionId: record.id,
@@ -728,7 +755,8 @@ export class HostedSessionManager {
     return "claude";
   }
 
-  private model(value: string | undefined): string | undefined {    const model = value?.trim();
+  private model(value: string | undefined): string | undefined {
+    const model = value?.trim();
     if (!model) return undefined;
     if (!MODEL_PATTERN.test(model)) {
       throw new RpcError("invalid_params", `模型名不合法：${value}`);
