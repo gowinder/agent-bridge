@@ -70,10 +70,19 @@ function flag(args: string[], name: string): string | undefined {
 
 function normalizeUrl(value: string): string {
   const url = new URL(value);
+  // 中继承载设备凭据和消息，必须走加密通道；本地回环保留 http 方便开发。
+  if (url.protocol !== "https:" && !isLoopbackHost(url.hostname)) {
+    throw new Error(`relay 地址必须是 https（本地回环地址除外）：${value}`);
+  }
   url.pathname = url.pathname.replace(/\/+$/, "");
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const name = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return name === "localhost" || name === "127.0.0.1" || name === "::1";
 }
 
 function requireConfig(store: Store): {
@@ -421,6 +430,26 @@ async function commandServe(): Promise<void> {
     return closed;
   };
 
+  // 设备过期/撤销平时只在建立通道时检查一次；长期在线的通道要定期复核，否则吊销后仍然能用。
+  const deviceCheckTimer = setInterval(() => {
+    for (const [channel, entry] of [...sessions.entries()]) {
+      if (!entry.deviceId) continue;
+      const device = store.device(entry.deviceId);
+      const reason = !device
+        ? "设备已不存在"
+        : device.revokedAt !== null
+          ? "设备已撤销"
+          : device.expiresAt !== null && device.expiresAt < Date.now()
+            ? "设备已过期"
+            : null;
+      if (!reason) continue;
+      log(`断开设备「${entry.name ?? entry.deviceId}」：${reason}`);
+      entry.session.dispose();
+      if (sessions.get(channel) === entry) sessions.delete(channel);
+    }
+  }, 60_000);
+  deviceCheckTimer.unref();
+
   /** 菜单栏的每设备操作日志；存在本地库里，Bridge 重启后还在。 */
   const recordEvent = (deviceId: string, line: string): void => {
     try {
@@ -655,6 +684,7 @@ async function commandServe(): Promise<void> {
     if (stopping) return;
     stopping = true;
     log("正在退出…");
+    clearInterval(deviceCheckTimer);
     notifier.stop();
     for (const entry of sessions.values()) entry.session.dispose();
     sessions.clear();

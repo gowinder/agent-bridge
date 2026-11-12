@@ -858,12 +858,28 @@ function showConfirm(challenge: PairingChallenge): void {
       el("h1", { className: "display", text: "核对确认码" }),
       el("p", { className: "lede", text: "Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。" }),
       el("div", { className: "code", text: challenge.confirmCode }),
+      el("p", { className: "hint", text: relayTargetText(challenge.link.relayUrl) }),
       el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
       el("p", { className: "hint", text: "浏览器读不到电脑名称和机型，默认值只能按系统、浏览器和屏幕区分；两台设备看起来一样时，改成你认得出的名字。" }),
       error,
       el("div", { className: "actions" }, [confirm, cancel]),
     ]),
   );
+}
+
+/**
+ * 配对链接把人连到哪个中继，必须在确认码旁边说清楚：确认码只能证明信道一致，
+ * 看不出中继是不是用户以为的那个站点。
+ */
+function relayTargetText(relayUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(relayUrl);
+  } catch {
+    return `中继：${relayUrl}，注意：不是你当前所在的站点`;
+  }
+  if (url.origin === location.origin) return `中继：${url.host}（本站）`;
+  return `中继：${url.host}，注意：不是你当前所在的站点`;
 }
 
 /**

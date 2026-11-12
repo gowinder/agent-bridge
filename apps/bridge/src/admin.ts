@@ -80,7 +80,15 @@ export function ensureAdminToken(dir: string): string {
   const path = join(dir, "admin-token");
   try {
     const existing = readFileSync(path, "utf8").trim();
-    if (existing) return existing;
+    if (existing) {
+      // 老版本可能写出 0644，读到就顺手收紧。
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // best effort
+      }
+      return existing;
+    }
   } catch {
     // create below
   }

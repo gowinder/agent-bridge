@@ -976,7 +976,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let stateDir = AdminClient.stateDir
-        try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: stateDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        // 目录已存在时 attributes 不生效，老版本留下的宽松权限要单独收紧。
+        try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: stateDir.path)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: node)
@@ -987,8 +993,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let logPath = stateDir.appendingPathComponent("bridge.log")
         if !FileManager.default.fileExists(atPath: logPath.path) {
-            FileManager.default.createFile(atPath: logPath.path, contents: nil)
+            FileManager.default.createFile(
+                atPath: logPath.path,
+                contents: nil,
+                attributes: [.posixPermissions: 0o600]
+            )
         }
+        // 老版本留下的日志可能是 0644，打开前收紧一次。
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: logPath.path)
         if let handle = try? FileHandle(forWritingTo: logPath) {
             handle.seekToEndOfFile()
             process.standardOutput = handle

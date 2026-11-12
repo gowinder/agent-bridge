@@ -30,6 +30,7 @@ import type {
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";
+import { REMOTE_HOSTED_MODES } from "./hosted/manager.js";
 import type { Pusher } from "./push.js";
 import type { RelayApi } from "./relay-client.js";
 import type { DeviceRecord, InviteRecord, Store } from "./store.js";
@@ -427,6 +428,13 @@ export class DeviceSession implements ChannelSession {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
         const permissionMode = stringParam(params, "permissionMode");
+        // 托管会话是远程发起、无人值守的，只接受不需要现场确认的模式。
+        if (permissionMode && !REMOTE_HOSTED_MODES.includes(permissionMode as HostedPermissionMode)) {
+          throw new RpcError(
+            "invalid_params",
+            `托管会话不接受该权限模式：${permissionMode}`,
+          );
+        }
         const title = stringParam(params, "title");
         return this.options.adapters.hostedCreate({
           path,

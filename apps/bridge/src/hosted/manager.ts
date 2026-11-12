@@ -45,6 +45,14 @@ export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
   "plan",
 ];
 
+/** 托管会话允许远程指定的权限模式：无人值守时不应放开绕过确认的模式。 */
+export const REMOTE_HOSTED_MODES: HostedPermissionMode[] = [
+  "manual",
+  "acceptEdits",
+  "dontAsk",
+  "plan",
+];
+
 export interface HostedConfig {
   /** Directories allowed to host sessions. Absolute paths after `~` expansion. */
   dirs: string[];
@@ -159,7 +167,7 @@ export class HostedSessionManager {
       enabled: this.config.dirs.length > 0,
       dirs,
       idleTimeoutMs: this.config.idleTimeoutMs,
-      permissionModes: HOSTED_PERMISSION_MODES,
+      permissionModes: REMOTE_HOSTED_MODES,
     };
     if (!result.enabled) {
       result.note = `尚未配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`;
