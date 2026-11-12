@@ -598,6 +598,8 @@ export interface MessageListResult {
   note?: string;
   /** Context window usage of the session, when the client exposes it. */
   context?: ContextUsage;
+  /** Slash commands (skills included) the client accepts in this session; names without the slash. */
+  slashCommands?: string[];
   /** The client is still working on the latest turn. */
   busy?: boolean;
   /** The latest turn was stopped by the user before it finished. */

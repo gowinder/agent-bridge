@@ -90,6 +90,8 @@ interface HostedRecord {
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
   context?: ContextUsage;
+  /** CLI init 事件报告的斜杠命令与技能，网页输入「/」时用来提示。 */
+  slashCommands?: string[];
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -265,6 +267,7 @@ export class HostedSessionManager {
       completeness: "complete",
       busy: live?.busy ?? false,
       ...(record.context ? { context: record.context } : {}),
+      ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
     };
     const first = pageMessages[0];
     if (start > 0 && first) result.nextBefore = first.messageId;
@@ -601,11 +604,18 @@ export class HostedSessionManager {
     if (type === "system") {
       // init 事件里带着 CLI 实际加载的模型；记下来，老会话也能看到自己在用哪个。
       if (event["subtype"] === "init") {
+        let changed = false;
         const model = event["model"];
         if (typeof model === "string" && model && model !== record.observedModel) {
           record.observedModel = model;
-          this.touch(record);
+          changed = true;
         }
+        const commands = slashCommandsOf(event);
+        if (commands && commands.join("\n") !== (record.slashCommands ?? []).join("\n")) {
+          record.slashCommands = commands;
+          changed = true;
+        }
+        if (changed) this.touch(record);
         return;
       }
     }
@@ -894,6 +904,7 @@ export class HostedSessionManager {
         if (!isRecord(item)) continue;
         if (typeof item["id"] !== "string" || typeof item["cwd"] !== "string") continue;
         const context = sanitizeContextUsage(item["context"]);
+        const slashCommands = sanitizeSlashCommands(item["slashCommands"]);
         this.records.set(item["id"], {
           id: item["id"],
           cwd: item["cwd"],
@@ -907,6 +918,7 @@ export class HostedSessionManager {
             ? { observedModel: item["observedModel"] }
             : {}),
           ...(context ? { context } : {}),
+          ...(slashCommands ? { slashCommands } : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
           updatedAt: numberOr(item["updatedAt"], Date.now()),
           lastActiveAt: numberOr(item["lastActiveAt"], Date.now()),
@@ -933,6 +945,7 @@ export class HostedSessionManager {
               ...(record.model ? { model: record.model } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.context ? { context: record.context } : {}),
+              ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
               createdAt: record.createdAt,
               updatedAt: record.updatedAt,
               lastActiveAt: record.lastActiveAt,
@@ -1024,6 +1037,35 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function numberOr(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+const MAX_SLASH_COMMANDS = 500;
+const MAX_SLASH_COMMAND_CHARS = 120;
+
+/** init 事件里的 `slash_commands` 混着只在终端生效的命令，去掉它们免得网页提示了却不可用。 */
+function slashCommandsOf(event: Record<string, unknown>): string[] | undefined {
+  const list = event["slash_commands"];
+  if (!Array.isArray(list)) return undefined;
+  const terminalRaw = event["terminal_slash_commands"];
+  const terminal = new Set(
+    Array.isArray(terminalRaw) ? terminalRaw.filter((item): item is string => typeof item === "string") : [],
+  );
+  return sanitizeSlashCommands(list.filter((item) => !terminal.has(String(item))));
+}
+
+function sanitizeSlashCommands(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const name = item.trim().replace(/^\/+/, "");
+    if (!name || name.length > MAX_SLASH_COMMAND_CHARS || /\s/.test(name) || seen.has(name)) continue;
+    seen.add(name);
+    out.push(name);
+    if (out.length >= MAX_SLASH_COMMANDS) break;
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 function truncateTitle(text: string): string {

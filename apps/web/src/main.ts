@@ -2623,6 +2623,8 @@ interface ChatState {
   /** The latest turn was stopped by the user. */
   interrupted: boolean;
   context?: ContextUsage;
+  /** 客户端报告的斜杠命令与技能（名字不带斜杠），输入「/」时提示。 */
+  slashCommands?: string[];
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
@@ -2695,6 +2697,81 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     },
   });
   input.value = draftFor(summary.sessionId);
+
+  const slashMenu = el("div", { className: "slash-menu" });
+  slashMenu.hidden = true;
+  let slashItems: string[] = [];
+  let slashIndex = 0;
+
+  /** 「/」之后还没空格的这一段就是要匹配的命令名。 */
+  function slashQuery(): { start: number; text: string } | null {
+    if (input.selectionStart !== input.selectionEnd) return null;
+    const caret = input.selectionStart ?? input.value.length;
+    const match = /(^|\s)\/([^\s/]*)$/.exec(input.value.slice(0, caret));
+    if (!match) return null;
+    const text = match[2] ?? "";
+    return { start: caret - text.length - 1, text };
+  }
+
+  function closeSlashMenu(): void {
+    slashMenu.hidden = true;
+    slashItems = [];
+    slashIndex = 0;
+  }
+
+  function renderSlashMenu(): void {
+    const query = slashQuery();
+    const commands = state.slashCommands ?? [];
+    if (!query || commands.length === 0) {
+      closeSlashMenu();
+      return;
+    }
+    const needle = query.text.toLowerCase();
+    const matches = commands
+      .filter((name) => name.toLowerCase().includes(needle))
+      .sort((a, b) => {
+        const byPrefix =
+          Number(b.toLowerCase().startsWith(needle)) - Number(a.toLowerCase().startsWith(needle));
+        return byPrefix !== 0 ? byPrefix : a.localeCompare(b);
+      })
+      .slice(0, 40);
+    if (matches.length === 0) {
+      closeSlashMenu();
+      return;
+    }
+    slashItems = matches;
+    if (slashIndex >= slashItems.length) slashIndex = 0;
+    slashMenu.replaceChildren(
+      ...slashItems.map((name, index) =>
+        el("button", {
+          className: `slash-item${index === slashIndex ? " is-active" : ""}`,
+          attrs: { type: "button" },
+          text: `/${name}`,
+        }),
+      ),
+    );
+    [...slashMenu.children].forEach((item, index) => {
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        const name = slashItems[index];
+        if (name) applySlash(name);
+      });
+    });
+    slashMenu.hidden = false;
+  }
+
+  /** 把光标所在的那段命令替换成选中的命令，光标留在命令后面。 */
+  function applySlash(name: string): void {
+    const query = slashQuery();
+    if (!query) return;
+    const rest = input.value.slice(query.start + query.text.length + 1).replace(/^\s+/, "");
+    input.value = `${input.value.slice(0, query.start)}/${name}${rest ? ` ${rest}` : " "}`;
+    const caret = query.start + name.length + 2;
+    input.setSelectionRange(caret, caret);
+    closeSlashMenu();
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
 
   function autoGrow(): void {
     input.style.height = "auto";
@@ -2773,6 +2850,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const composer = el("form", { className: "composer" }, [
     attachList,
     fileInput,
+    slashMenu,
     el("div", { className: "composer-row" }, [
       attachButton,
       input,
@@ -2885,13 +2963,41 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     saveDraft(state.session.sessionId, input.value);
     autoGrow();
     updateSendState();
+    renderSlashMenu();
   });
   input.addEventListener("keydown", (event) => {
+    if (!slashMenu.hidden && slashItems.length > 0) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        slashIndex = (slashIndex + delta + slashItems.length) % slashItems.length;
+        renderSlashMenu();
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const name = slashItems[slashIndex];
+        if (name) applySlash(name);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+    }
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       submit();
     }
   });
+  input.addEventListener("keyup", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+      renderSlashMenu();
+    }
+  });
+  input.addEventListener("click", () => renderSlashMenu());
+  input.addEventListener("blur", () => closeSlashMenu());
   fileInput.addEventListener("change", () => {
     const files = [...(fileInput.files ?? [])];
     fileInput.value = "";
@@ -4176,6 +4282,7 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     }
     if (result.context) state.context = result.context;
     if (result.context || compactChanged) paintContext(state);
+    if (result.slashCommands) state.slashCommands = result.slashCommands;
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
