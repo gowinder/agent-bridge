@@ -25,7 +25,9 @@ import { HostedSessionManager } from "../hosted/manager.js";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
+import { ClaudeCodeCliAdapter } from "./claude-code-cli.js";
 import { CodexAdapter } from "./codex.js";
+import { CodexCliAdapter } from "./codex-cli.js";
 import { DshAdapter } from "./dsh.js";
 import { HostedAdapter } from "./hosted.js";
 import { RpcError, type SessionAdapter } from "./types.js";
@@ -47,7 +49,9 @@ export class SessionAdapters {
   private readonly hostedManager = new HostedSessionManager();
   private readonly adapters: SessionAdapter[] = [
     new ClaudeCodeAdapter(),
+    new ClaudeCodeCliAdapter(),
     new CodexAdapter(),
+    new CodexCliAdapter(),
     new AntigravityAdapter(),
     new AntigravityDesktopAdapter(),
     new DshAdapter(),

@@ -50,7 +50,7 @@ const WAKE_WAIT_MS = 30_000;
 const WAKE_POLL_MS = 400;
 const MAX_BLOCK_CHARS = 4_000;
 
-interface DesktopSession {
+export interface DesktopSession {
   localId: string;
   cliSessionId: string;
   priorCliSessionIds: string[];
@@ -359,7 +359,7 @@ const metaCache = new Map<string, { mtimeMs: number; session: DesktopSession | n
 let rootsCache: { roots: string[]; checkedAt: number } | null = null;
 
 export class ClaudeCodeAdapter implements SessionAdapter {
-  readonly key = "claude-code";
+  readonly key: string = "claude-code";
   private processCache: {
     at: number;
     bySession: Map<string, number>;
@@ -557,7 +557,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   }
 
   /** 转录里最后一条主链回复用的模型；读不到就交给会话记录兜底。 */
-  private runningModel(record: DesktopSession): string | undefined {
+  protected runningModel(record: DesktopSession): string | undefined {
     if (!record.cliSessionId) return undefined;
     const path = this.transcriptPath(record.cliSessionId);
     if (!path) return undefined;
@@ -569,7 +569,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   }
 
   /** 正在运行的会话是否停在一个没人回答的提问上；读不到 transcript 就当没有。 */
-  private pendingAsk(record: DesktopSession): boolean {
+  protected pendingAsk(record: DesktopSession): boolean {
     if (!record.cliSessionId) return false;
     const path = this.transcriptPath(record.cliSessionId);
     if (!path) return false;
@@ -582,7 +582,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
 
   private modelCatalogCache: { at: number; models: ModelOption[] } | null = null;
 
-  private modelCatalog(): ModelOption[] {
+  protected modelCatalog(): ModelOption[] {
     const now = Date.now();
     if (this.modelCatalogCache && now - this.modelCatalogCache.at < 60_000) {
       return this.modelCatalogCache.models;
@@ -908,13 +908,13 @@ export class ClaudeCodeAdapter implements SessionAdapter {
    * 桌面端为工作树会话写了 originCwd；没有这个字段的旧记录按路径推断，
    * 否则每个工作树都会变成一个独立项目，会话在原项目里就找不到了。
    */
-  private projectCwdOf(cwd: string, originCwd: string): string {
+  protected projectCwdOf(cwd: string, originCwd: string): string {
     if (originCwd) return originCwd;
     const at = cwd.indexOf("/.claude/worktrees/");
     return at > 0 ? cwd.slice(0, at) : cwd;
   }
 
-  private projectIdFor(cwd: string): string {
+  protected projectIdFor(cwd: string): string {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
 
@@ -926,7 +926,12 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return roots;
   }
 
-  private records(): DesktopSession[] {
+  /** 默认只认桌面索引；CLI 适配器覆写 records()，这里保留桌面索引给去重使用。 */
+  protected records(): DesktopSession[] {
+    return this.desktopRecords();
+  }
+
+  protected desktopRecords(): DesktopSession[] {
     // 桌面有几个数据目录（Claude / Claude-3p）会同时写入，只读其中一个会漏掉会话。
     const byId = new Map<string, DesktopSession>();
     for (const root of this.roots()) {
@@ -987,14 +992,14 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
-  private record(sessionId: string): DesktopSession | null {
+  protected record(sessionId: string): DesktopSession | null {
     const localId = sessionId.startsWith(`${this.key}:`)
       ? sessionId.slice(this.key.length + 1)
       : sessionId;
     return this.records().find((item) => item.localId === localId) ?? null;
   }
 
-  private scanProcesses(maxAgeMs = 2_000): {
+  protected scanProcesses(maxAgeMs = 2_000): {
     bySession: Map<string, number>;
     busy: Set<string>;
     error: string | null;
@@ -1086,7 +1091,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
-  private livePid(record: DesktopSession, bySession: Map<string, number>): number | undefined {
+  protected livePid(record: DesktopSession, bySession: Map<string, number>): number | undefined {
     return this.liveMatch(record, bySession)?.pid;
   }
 
@@ -1115,7 +1120,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     execFile(command, args, { timeout: 10_000 }, () => undefined);
   }
 
-  private liveMatch(
+  protected liveMatch(
     record: DesktopSession,
     bySession: Map<string, number>,
   ): { pid: number; id: string } | undefined {
@@ -1131,7 +1136,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return undefined;
   }
 
-  private socketFor(pid: number | undefined): string | null {
+  protected socketFor(pid: number | undefined): string | null {
     if (pid === undefined) return null;
     const direct = join(SOCKET_DIR, `${pid}.sock`);
     if (existsSync(direct)) return direct;
@@ -1145,7 +1150,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return null;
   }
 
-  private transcriptPath(cliSessionId: string): string | null {
+  protected transcriptPath(cliSessionId: string): string | null {
     const now = Date.now();
     const cached = this.transcriptPathCache.get(cliSessionId);
     if (cached && now - cached.checkedAt < 60_000) return cached.path;
@@ -1166,7 +1171,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return path;
   }
 
-  private readTranscript(
+  protected readTranscript(
     path: string,
     sessionId: string,
   ): {
@@ -1366,11 +1371,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return (peer?.[1] ?? joined).trim();
   }
 
-  private stripSystem(text: string): string {
+  protected stripSystem(text: string): string {
     return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
   }
 
-  private async confirmInTranscript(cliSessionId: string, text: string): Promise<boolean> {
+  protected async confirmInTranscript(cliSessionId: string, text: string): Promise<boolean> {
     const path = this.transcriptPath(cliSessionId);
     if (!path) return false;
     const needle = text.trim().slice(0, 40);
@@ -1440,7 +1445,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     });
   }
 
-  private injectUds(target: string, text: string, mode: string, origin?: string): Promise<MessageSendResult> {
+  protected injectUds(target: string, text: string, mode: string, origin?: string): Promise<MessageSendResult> {
     const own = join(SOCKET_DIR, `${process.pid}.sock`);
     return new Promise<MessageSendResult>((resolve, reject) => {
       let settled = false;
