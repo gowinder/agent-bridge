@@ -339,6 +339,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairLink = ""
     private var pairDeviceCountBefore = 0
     private var pairSawChannel = false
+    private var pairOpenedAt: Double = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -752,6 +753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         closePairWindow()
         pairLink = url
         pairSawChannel = false
+        pairOpenedAt = Date().timeIntervalSince1970 * 1000
 
         let width: CGFloat = 520
         let height: CGFloat = 520
@@ -825,7 +827,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             let fresh = try await client.status()
             snapshot = fresh
-            let pairing = fresh.pairings?.first
+            // 之前没配完的标签页可能在 Bridge 里留下旧配对通道，只认本窗口打开之后建立的，
+            // 并在其中取最新的一条，避免窗口一直显示早已作废的确认码。
+            let pairing = fresh.pairings?
+                .filter { $0.since >= pairOpenedAt - 1000 }
+                .max(by: { $0.since < $1.since })
             if let pairing {
                 pairSawChannel = true
                 if let code = pairing.code {

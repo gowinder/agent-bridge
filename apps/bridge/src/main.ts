@@ -552,7 +552,7 @@ async function commandServe(): Promise<void> {
           return;
         }
         log(`收到配对连接，邀请 ${invite.id}`);
-        sessions.set(message.channel, {
+        const entry = {
           channel: message.channel,
           session: new PairingSession({
             noise,
@@ -573,9 +573,17 @@ async function commandServe(): Promise<void> {
               if (entry) entry.code = code;
             },
           }),
-          kind: "pair",
+          kind: "pair" as const,
           since: Date.now(),
-        });
+        };
+        sessions.set(message.channel, entry);
+        // 邀请过期后这条配对通道就没用了；中继在 Bridge 断线时发不出 channel.close，
+        // 不主动清理的话它会一直挂在 sessions 里，菜单栏窗口就会显示早已作废的确认码。
+        const timer = setTimeout(() => {
+          if (sessions.get(message.channel) !== entry) return;
+          entry.session.dispose();
+        }, Math.max(0, invite.expiresAt - Date.now()));
+        timer.unref?.();
         return;
       }
 
