@@ -12,6 +12,8 @@ struct DeviceInfo: Decodable {
     let revokedAt: Double?
     let lastSeenAt: Double?
     let online: Bool
+    /// 最近操作日志，最新的在最前面。
+    let log: [String]?
 }
 
 struct ConnectionInfo: Decodable {
@@ -143,6 +145,22 @@ final class AdminClient {
 
     func revoke(_ deviceId: String) async throws {
         _ = try await request("POST", "/devices/\(deviceId)/revoke")
+    }
+
+    @discardableResult
+    func disconnectAll() async throws -> Int {
+        let data = try await request("POST", "/devices/disconnect-all")
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return object?["closed"] as? Int ?? 0
+    }
+
+    func revokeAll() async throws -> (revoked: Int, failed: [String]) {
+        let data = try await request("POST", "/devices/revoke-all")
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (
+            object?["revoked"] as? Int ?? 0,
+            object?["failed"] as? [String] ?? []
+        )
     }
 
     func invite() async throws -> String {
@@ -342,13 +360,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func paint() {
         guard let button = statusItem.button else { return }
+        let version = snapshot?.version ?? bridge?.version
+        let suffix = version.map { " · v\($0)" } ?? ""
         if reachable {
             let online = snapshot?.connections.filter { $0.kind == "device" }.count ?? 0
             button.title = online > 0 ? " \(online)" : ""
-            button.toolTip = online > 0 ? "\(online) 个客户端已连接" : "Agent Bridge · 就绪"
+            button.toolTip = (online > 0 ? "\(online) 个客户端已连接" : "Agent Bridge · 就绪") + suffix
         } else {
             button.title = ""
-            button.toolTip = bridge?.initialized == true ? "Agent Bridge 未运行" : "Agent Bridge 尚未初始化"
+            let state = bridge?.initialized == true ? "Agent Bridge 未运行" : "Agent Bridge 尚未初始化"
+            button.toolTip = state + suffix
         }
     }
 
@@ -376,7 +397,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !reachable {
             let initialized = bridge?.initialized == true
-            menu.addItem(disabled(initialized ? "Bridge 未运行" : "Bridge 尚未初始化"))
+            let state = initialized ? "Bridge 未运行" : "Bridge 尚未初始化"
+            let version = bridge.map { " · v\($0.version)" } ?? ""
+            menu.addItem(disabled(state + version))
             if let stateDir = bridge?.stateDir {
                 menu.addItem(disabled("状态目录：\(stateDir)"))
             } else if !initialized {
@@ -400,7 +423,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         guard let snapshot else { return }
-        menu.addItem(disabled("\(snapshot.hostName) · 中继\(snapshot.relayOnline ? "在线" : "离线")"))
+        menu.addItem(disabled("\(snapshot.hostName) · v\(snapshot.version) · 中继\(snapshot.relayOnline ? "在线" : "离线")"))
         if let error = snapshot.error {
             menu.addItem(disabled("设备列表读取失败：\(error)"))
         }
@@ -437,8 +460,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             revoke.representedObject = device.deviceId
             revoke.isEnabled = !revoked
             sub.addItem(revoke)
+            sub.addItem(.separator())
+            sub.addItem(logMenuItem(for: device))
             entry.submenu = sub
             menu.addItem(entry)
+        }
+
+        if !snapshot.devices.isEmpty {
+            menu.addItem(.separator())
+            let disconnectAllItem = item("断开全部连接", #selector(disconnectAllDevices), "")
+            disconnectAllItem.isEnabled = !snapshot.connections.isEmpty
+            menu.addItem(disconnectAllItem)
+            let revokeAllItem = item("作废全部证书…", #selector(revokeAllDevices), "")
+            revokeAllItem.isEnabled = snapshot.devices.contains { $0.revokedAt == nil }
+            menu.addItem(revokeAllItem)
         }
 
         if active.count > 0 {
@@ -487,6 +522,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return item
     }
 
+    /// 设备子菜单里的「最近操作日志」：先列最近三条，后面再挂一个「更多」子菜单放全部历史。
+    private func logMenuItem(for device: DeviceInfo) -> NSMenuItem {
+        let entry = NSMenuItem(title: "最近操作日志", action: nil, keyEquivalent: "")
+        entry.isEnabled = true
+        let sub = NSMenu()
+        let lines = device.log ?? []
+        if lines.isEmpty {
+            sub.addItem(disabled("暂无操作记录"))
+            entry.submenu = sub
+            return entry
+        }
+        for line in lines.prefix(3) { sub.addItem(logLineItem(line)) }
+        if lines.count > 3 {
+            sub.addItem(.separator())
+            let more = NSMenuItem(title: "更多…（共 \(lines.count) 条）", action: nil, keyEquivalent: "")
+            more.isEnabled = true
+            let moreSub = NSMenu()
+            for line in lines { moreSub.addItem(logLineItem(line)) }
+            more.submenu = moreSub
+            sub.addItem(more)
+        }
+        entry.submenu = sub
+        return entry
+    }
+
+    private func logLineItem(_ line: String) -> NSMenuItem {
+        let item = disabled(line.count > 90 ? String(line.prefix(90)) + "…" : line)
+        item.toolTip = line
+        return item
+    }
+
     private func item(_ title: String, _ action: Selector, _ key: String) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
@@ -526,6 +592,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 try await client.revoke(deviceId)
                 await refresh()
+            } catch {
+                alert("作废失败", error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func disconnectAllDevices() {
+        Task {
+            do {
+                try await client.disconnectAll()
+                await refresh()
+            } catch {
+                alert("断开失败", error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func revokeAllDevices() {
+        let pending = snapshot?.devices.filter { $0.revokedAt == nil }.count ?? 0
+        guard pending > 0 else { return }
+        let confirm = NSAlert()
+        confirm.messageText = "作废全部 \(pending) 个设备的证书？"
+        confirm.informativeText = "作废后这些设备都无法再连接，需要重新配对才能使用。"
+        confirm.alertStyle = .warning
+        confirm.addButton(withTitle: "全部作废")
+        confirm.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        Task {
+            do {
+                let result = try await client.revokeAll()
+                await refresh()
+                if !result.failed.isEmpty {
+                    alert("部分设备作废失败", result.failed.joined(separator: "\n"))
+                }
             } catch {
                 alert("作废失败", error.localizedDescription)
             }
@@ -587,6 +688,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSPasteboard.general.setString(pairLink, forType: .string)
     }
 
+    /// 默认 CIContext 在没有可用 GPU 的会话里可能渲染不出图，退到软件渲染再试一次，
+    /// 否则邀请窗口会只剩一片空白。
+    private func qrCGImage(_ output: CIImage) -> CGImage? {
+        let space = CGColorSpaceCreateDeviceRGB()
+        return CIContext().createCGImage(output, from: output.extent, format: .RGBA8, colorSpace: space)
+            ?? CIContext(options: [.useSoftwareRenderer: true])
+                .createCGImage(output, from: output.extent, format: .RGBA8, colorSpace: space)
+    }
+
     /// 邀请链接的二维码：手机相机扫一下就能直接打开配对页。放大时用最近邻插值，
     /// 否则模块边缘会被糊掉，扫码失败。
     private func makeQRImage(for text: String, points: CGFloat) -> NSImage? {
@@ -595,7 +705,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         filter.setValue(message, forKey: "inputMessage")
         filter.setValue("M", forKey: "inputCorrectionLevel")
         guard let output = filter.outputImage,
-              let cgImage = CIContext().createCGImage(output, from: output.extent) else { return nil }
+              let cgImage = qrCGImage(output) else { return nil }
 
         // 按 2x 出图，Retina 屏上才不会被系统插值。
         let pixels = Int(points * 2)
