@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { migrateRelayUrls } from "./relay-url.js";
 
 export interface DeviceRecord {
   id: string;
@@ -110,6 +111,7 @@ export class Store {
          PRIMARY KEY(app_id, session_id)
        )`,
     );
+    migrateRelayUrls(this);
   }
 
   meta(key: string): string | null {
