@@ -47,10 +47,15 @@ export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
   "plan",
 ];
 
-/** 托管会话允许远程指定的权限模式：无人值守时不应放开绕过确认的模式。 */
+/**
+ * 托管会话允许远程指定的权限模式。默认包含全部模式：auto 由分类器逐动作审查，
+ * bypassPermissions 由用户在创建时显式选择（仍受 sandbox 与 deny 规则约束）。
+ */
 export const REMOTE_HOSTED_MODES: HostedPermissionMode[] = [
   "manual",
   "acceptEdits",
+  "auto",
+  "bypassPermissions",
   "dontAsk",
   "plan",
 ];
