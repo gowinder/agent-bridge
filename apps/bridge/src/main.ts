@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import type { Server } from "node:http";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@craftstead/crypto";
@@ -639,6 +640,9 @@ async function commandServe(): Promise<void> {
     },
   };
 
+  // 管理接口的 HTTP server 会一直占着事件循环，退出时必须主动关掉，否则 SIGTERM 之后
+  // 进程会一直挂着（数据库已关，接口只剩 "database is not open"）。
+  let adminServer: Server | null = null;
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
@@ -647,6 +651,8 @@ async function commandServe(): Promise<void> {
     for (const entry of sessions.values()) entry.session.dispose();
     sessions.clear();
     relay?.close(1000, "shutdown");
+    adminServer?.close();
+    adminServer?.closeAllConnections();
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
@@ -664,14 +670,14 @@ async function commandServe(): Promise<void> {
     log(`本地管理接口端口无效：${configuredPort}，已跳过`);
   } else {
     try {
-      const server = await startAdminServer({
+      adminServer = await startAdminServer({
         port: adminPort,
         token: ensureAdminToken(store.dir),
         actions: adminActions,
         log,
       });
       log(`本地管理接口 http://${ADMIN_HOST}:${adminPort}（令牌 ${join(store.dir, "admin-token")}）`);
-      process.on("exit", () => server.close());
+      process.on("exit", () => adminServer?.close());
     } catch (error) {
       log(`本地管理接口启动失败：${error instanceof Error ? error.message : String(error)}`);
     }
