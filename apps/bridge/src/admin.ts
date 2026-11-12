@@ -10,6 +10,71 @@ import { isDevtoolsCapability } from "./devtools.js";
 
 export const ADMIN_HOST = "127.0.0.1";
 export const DEFAULT_ADMIN_PORT = 47825;
+/** preview 实例的默认端口：与生产错开，两份 Bridge 可以同时运行。 */
+export const PREVIEW_ADMIN_PORT = 47826;
+/** 每个状态目录各自保存管理端口，preview 与生产实例才能同时运行。 */
+export const ADMIN_PORT_FILE = "admin-port";
+
+function validPort(value: number): number | null {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535 ? value : null;
+}
+
+/** 中继地址或 AGENT_BRIDGE_ENV 指向 preview 时用 preview 默认端口。 */
+export function isPreviewDeployment(relayUrl?: string | null): boolean {
+  const env = process.env["AGENT_BRIDGE_ENV"]?.trim().toLowerCase();
+  if (env === "preview" || env === "dev" || env === "development") return true;
+  if (env === "production" || env === "prod") return false;
+  if (!relayUrl) return false;
+  let host = relayUrl;
+  try {
+    host = new URL(relayUrl).hostname;
+  } catch {
+    // 不是完整 URL 时按原字符串判断
+  }
+  return /preview|staging/i.test(host);
+}
+
+/** `${dir}/admin-port` 里的端口；文件缺失或内容不合法时返回 null。 */
+export function readAdminPortFile(dir: string): number | null {
+  try {
+    const raw = readFileSync(join(dir, ADMIN_PORT_FILE), "utf8").trim();
+    return raw === "" ? null : validPort(Number(raw));
+  } catch {
+    return null;
+  }
+}
+
+/** 写入管理端口文件；菜单栏和 CLI 共用这一份。 */
+export function writeAdminPortFile(dir: string, port: number): void {
+  const value = validPort(port);
+  if (value === null) throw new Error(`端口不合法：${port}（1–65535）`);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, ADMIN_PORT_FILE);
+  writeFileSync(path, `${value}\n`, { mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * 端口优先级：`AGENT_BRIDGE_ADMIN_PORT` > `admin-port` 文件 > 旧版 meta >
+ * 按部署环境取默认（preview 47826、生产 47825）。
+ * 环境变量支持临时覆盖；文件让 preview/生产各用各的端口。
+ */
+export function resolveAdminPort(
+  dir: string,
+  options: { relayUrl?: string | null; legacyMeta?: string | null } = {},
+): number {
+  const fromEnv = validPort(Number(process.env["AGENT_BRIDGE_ADMIN_PORT"]));
+  if (fromEnv !== null) return fromEnv;
+  const fromFile = readAdminPortFile(dir);
+  if (fromFile !== null) return fromFile;
+  const fromMeta = validPort(Number(options.legacyMeta));
+  if (fromMeta !== null) return fromMeta;
+  return isPreviewDeployment(options.relayUrl) ? PREVIEW_ADMIN_PORT : DEFAULT_ADMIN_PORT;
+}
 
 export interface AdminDevice {
   deviceId: string;

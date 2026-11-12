@@ -221,10 +221,10 @@ claude --resume 2222… -p "请把 feature.txt 加入 git 并提交，提交信�
 - 网页「新建托管会话」的目录只能从 Mac 侧允许列表里选。允许列表文件 `${AGENT_BRIDGE_HOME}/hosted.json`：
 
   ```json
-  { "dirs": ["/Users/you/code/demo"], "idleTimeoutMs": 1800000 }
+  { "dirs": ["/Users/you/code/demo"], "idleTimeoutMs": 1800000, "allowBypassPermissions": false }
   ```
 
-  目录按 realpath 精确匹配；增删条目后重启 Bridge 生效。默认空闲 30 分钟停止进程（60 秒扫一次），再发消息自动 `--resume`。
+  目录按 realpath 精确匹配；增删条目后重启 Bridge 生效。默认空闲 30 分钟停止进程（60 秒扫一次），再发消息自动 `--resume`。`allowBypassPermissions` 默认 `false`：托管会话不接受 `bypassPermissions`，老会话也不能再用该模式启动；设为 `true` 后网页创建面板才会出现该选项。
 - 生命周期：网页断开不影响进程；网页上可「停止进程」「恢复进程」；Bridge 重启后从 `hosted/sessions.json` 恢复列表，会话记录在 `hosted/<uuid>.jsonl`。
 
 ### 输入与权限

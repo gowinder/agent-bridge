@@ -88,11 +88,65 @@ final class AdminClient {
             .appendingPathComponent("Library/Application Support/AgentBridge", isDirectory: true)
     }()
 
+    static let portFileName = "admin-port"
+
+    /// 中继地址在启动时从 `agent-bridge info` 读到，用来区分 preview / 生产默认端口。
+    static var relayHint: String?
+
     static var port: Int {
-        if let raw = ProcessInfo.processInfo.environment["AGENT_BRIDGE_ADMIN_PORT"], let value = Int(raw) {
+        if let raw = ProcessInfo.processInfo.environment["AGENT_BRIDGE_ADMIN_PORT"],
+           let value = validPort(Int(raw.trimmingCharacters(in: .whitespaces))) {
             return value
         }
-        return 47825
+        return readPortFile() ?? defaultPort
+    }
+
+    /// 环境变量存在时菜单栏保存的端口不生效，设置界面要据此提示。
+    static var hasPortEnv: Bool {
+        guard let raw = ProcessInfo.processInfo.environment["AGENT_BRIDGE_ADMIN_PORT"] else { return false }
+        return validPort(Int(raw.trimmingCharacters(in: .whitespaces))) != nil
+    }
+
+    private static func validPort(_ value: Int?) -> Int? {
+        guard let value, value >= 1024, value <= 65_535 else { return nil }
+        return value
+    }
+
+    static var defaultPort: Int {
+        let relay = relayHint ?? UserDefaults.standard.string(forKey: "relayUrl")
+        return isPreviewRelay(relay) ? 47826 : 47825
+    }
+
+    private static func isPreviewRelay(_ relay: String?) -> Bool {
+        guard let relay, !relay.isEmpty else { return false }
+        let host = URL(string: relay)?.host ?? relay
+        return host.range(of: "preview", options: .caseInsensitive) != nil
+            || host.range(of: "staging", options: .caseInsensitive) != nil
+    }
+
+    static func readPortFile() -> Int? {
+        let path = stateDir.appendingPathComponent(portFileName)
+        guard let text = try? String(contentsOf: path, encoding: .utf8) else { return nil }
+        return validPort(Int(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+    }
+
+    static func savePort(_ port: Int) throws {
+        guard let value = validPort(port) else {
+            throw AdminError.transport("端口必须在 1024–65535 之间")
+        }
+        try FileManager.default.createDirectory(
+            at: stateDir,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let path = stateDir.appendingPathComponent(portFileName)
+        try "\(value)\n".write(to: path, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+    }
+
+    /// 删掉保存的端口，回到按中继环境取默认值。
+    static func clearPort() {
+        try? FileManager.default.removeItem(at: stateDir.appendingPathComponent(portFileName))
     }
 
     private func token() throws -> String {
@@ -298,7 +352,10 @@ enum BridgeCLI {
         guard let result = run(["info"], timeout: 8), result.code == 0 else { return nil }
         let line = result.output.split(separator: "\n").last.map(String.init) ?? result.output
         guard let data = line.data(using: .utf8) else { return nil }
-        return try? JSONDecoder().decode(BridgeInfo.self, from: data)
+        guard let info = try? JSONDecoder().decode(BridgeInfo.self, from: data) else { return nil }
+        // 端口默认值要跟中继环境一致：preview 47826、生产 47825。
+        AdminClient.relayHint = info.relayUrl
+        return info
     }
 }
 
@@ -355,6 +412,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         paint()
         Task {
+            // 先读一次 info，端口默认值要靠中继地址区分 preview / 生产。
+            if bridge == nil { bridge = BridgeCLI.info() }
             await refresh()
             autoStartBridgeIfIdle()
         }
@@ -421,6 +480,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 menu.addItem(item("初始化 Bridge…", #selector(initBridge), ""))
             }
+            menu.addItem(item("管理端口…（\(AdminClient.port)）", #selector(changePort), ""))
             menu.addItem(.separator())
             menu.addItem(item("刷新", #selector(refreshNow), "r"))
             menu.addItem(item("退出", #selector(quit), "q"))
@@ -503,6 +563,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         devItem.submenu = devSub
         menu.addItem(devItem)
 
+        menu.addItem(item("管理端口：\(AdminClient.port)…", #selector(changePort), ""))
         menu.addItem(item("在浏览器中打开", #selector(openWeb), "o"))
         menu.addItem(item("刷新", #selector(refreshNow), "r"))
         menu.addItem(.separator())
@@ -962,7 +1023,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if BridgeCLI.adminPortBusy(AdminClient.port) {
             alert(
                 "已有 Bridge 在运行",
-                "127.0.0.1:\(AdminClient.port) 已被占用，通常是另一份状态目录的 Bridge（例如终端里用 AGENT_BRIDGE_HOME 启动的那个）。先停掉它，或设置 AGENT_BRIDGE_ADMIN_PORT 区分。"
+                "127.0.0.1:\(AdminClient.port) 已被占用，通常是另一份状态目录的 Bridge（例如终端里用 AGENT_BRIDGE_HOME 启动的 preview 实例）。先停掉它，或在菜单「管理端口」里换一个端口。"
             )
             Task { await refresh() }
             return
@@ -1044,6 +1105,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// 端口按状态目录保存：preview 与生产的 Bridge 各用各的，可以同时运行。
+    @objc private func changePort() {
+        let current = AdminClient.port
+        let dialog = NSAlert()
+        dialog.messageText = "管理端口"
+        dialog.informativeText = "本地管理接口只监听 127.0.0.1。preview 默认 47826，生产默认 47825；留空恢复按中继环境取默认值。保存后会重启菜单栏启动的 Bridge。"
+        dialog.addButton(withTitle: "保存")
+        dialog.addButton(withTitle: "取消")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
+        field.stringValue = String(current)
+        field.placeholderString = "1024–65535，留空用默认"
+        dialog.accessoryView = field
+        NSApp.activate(ignoringOtherApps: true)
+        guard dialog.runModal() == .alertFirstButtonReturn else { return }
+
+        if AdminClient.hasPortEnv {
+            alert("环境变量优先", "当前设置了 AGENT_BRIDGE_ADMIN_PORT，菜单里保存的端口不会生效；删掉该环境变量并重开 App。")
+            return
+        }
+
+        let raw = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        var target = current
+        if raw.isEmpty {
+            AdminClient.clearPort()
+            target = AdminClient.defaultPort
+        } else {
+            guard let port = Int(raw), port >= 1024, port <= 65_535 else {
+                alert("端口不合法", "请填 1024–65535 之间的整数，或留空恢复默认。")
+                return
+            }
+            do {
+                try AdminClient.savePort(port)
+            } catch {
+                alert("保存端口失败", error.localizedDescription)
+                return
+            }
+            target = port
+        }
+        guard target != current else { return }
+
+        // 只有菜单栏自己启动的进程才能代为重启；外部实例只保存设置并提示。
+        guard bridgeProcess?.isRunning == true else {
+            if reachable {
+                alert("端口已保存", "当前运行的 Bridge 不是菜单栏启动的，需要手动重启后才会监听 127.0.0.1:\(target)。")
+            } else {
+                Task { await refresh() }
+            }
+            return
+        }
+        restartBridge()
+    }
+
+    private func restartBridge() {
+        guard let process = bridgeProcess, process.isRunning else {
+            startBridge()
+            return
+        }
+        bridgeProcess = nil
+        process.terminate()
+        DispatchQueue.global().async { [weak self] in
+            let deadline = Date().addingTimeInterval(5)
+            while process.isRunning && Date() < deadline {
+                usleep(50_000)
+            }
+            Task { @MainActor in
+                // 端口文件已经改好，startBridge 会按新端口检查占用并启动。
+                self?.startBridge()
+            }
+        }
+    }
+
     private func alert(_ title: String, _ message: String) {
         let alert = NSAlert()
         alert.messageText = title
@@ -1061,6 +1193,7 @@ let app = NSApplication.shared
 // without a GUI session.
 if CommandLine.arguments.contains("--dump") {
     Task {
+        _ = BridgeCLI.info() // 让端口默认值按中继环境取
         do {
             let snapshot = try await AdminClient().status()
             let devices = snapshot.devices.map { "\($0.name)(\($0.online ? "在线" : "离线"))" }

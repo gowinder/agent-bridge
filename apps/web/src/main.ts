@@ -2160,6 +2160,23 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   for (const session of sessions) {
     const busy = session.busy === true;
     const unread = unreadAt(session.sessionId) !== undefined;
+    const state = busy
+      ? "正在执行"
+      : session.hosted
+        ? session.canSend
+          ? session.live
+            ? "Bridge 托管进程运行中"
+            : "Bridge 托管，发送时自动恢复"
+          : (session.sendBlockedReason ?? "只读")
+        : session.canSend
+          ? session.live
+            ? "桌面运行中，可发送"
+            : sendStateLabel(session)
+          : (session.sendBlockedReason ?? "只读");
+    // 托管会话的模型和权限模式在列表里也常驻显示，不必点进侧栏才知道。
+    const hostedFacts = session.hosted
+      ? ` · 模型 ${hostedModelLabel(session.model)} · 权限 ${hostedModeShort(session.permissionMode)}`
+      : "";
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
       el(
         "span",
@@ -2175,21 +2192,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           : []),
         el("span", {
           className: "meta",
-          text: busy
-            ? `${timeLabel(session.updatedAt)} · 正在执行`
-            : `${timeLabel(session.updatedAt)} · ${
-                session.hosted
-                  ? session.canSend
-                    ? session.live
-                      ? "Bridge 托管进程运行中"
-                      : "Bridge 托管，发送时自动恢复"
-                    : (session.sendBlockedReason ?? "只读")
-                  : session.canSend
-                    ? session.live
-                      ? "桌面运行中，可发送"
-                      : sendStateLabel(session)
-                    : (session.sendBlockedReason ?? "只读")
-              }`,
+          text: `${timeLabel(session.updatedAt)} · ${state}${hostedFacts}`,
         }),
       ]),
       busy
@@ -2284,6 +2287,17 @@ const HOSTED_MODE_HELP: Record<string, { short: string; detail: string }> = {
   },
 };
 
+/** 会话列表与聊天页顶部用：权限模式的中文短名，未知值原样显示。 */
+function hostedModeShort(mode: string | undefined): string {
+  if (!mode) return "manual";
+  return HOSTED_MODE_HELP[mode]?.short ?? mode;
+}
+
+/** 托管会话的模型：记录过就用记录值，否则说明沿用 CLI 默认。 */
+function hostedModelLabel(model: string | undefined): string {
+  return model ? model : "CLI 默认";
+}
+
 function hostedCreatePanel(project: ProjectInfo): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
@@ -2364,8 +2378,11 @@ function hostedCreatePanel(project: ProjectInfo): HTMLElement {
       mode.value = "manual";
       syncModeHint();
       const idle = Math.round(config.idleTimeoutMs / 60_000);
+      const bypassNote = config.allowBypassPermissions
+        ? ""
+        : "；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）";
       status.textContent = config.enabled
-        ? `只在 ${project.cwd ?? ""} 中运行；网页断开不会结束进程，空闲 ${idle} 分钟后自动停止，再发消息时 resume。`
+        ? `只在 ${project.cwd ?? ""} 中运行；网页断开不会结束进程，空闲 ${idle} 分钟后自动停止，再发消息时 resume。${bypassNote}`
         : (config.note ?? "Bridge 还没有配置可托管的目录。");
       submit.disabled = !config.enabled;
     })
@@ -2952,8 +2969,10 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   railToggle.title = "显示环境、上下文、连接器与后台任务";
 
   const chatMeta = summary.hosted
-    ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · ${
-        summary.live ? `进程运行中（${summary.permissionMode ?? "manual"}）` : "进程已停止，发送时自动恢复"
+    ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · 模型 ${hostedModelLabel(
+        summary.model,
+      )} · 权限 ${hostedModeShort(summary.permissionMode)} · ${
+        summary.live ? "进程运行中" : "进程已停止，发送时自动恢复"
       }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
     : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`;
   // Bridge 侧覆盖了显示名时同时展示原名，回源应用里仍能认出这条会话。
@@ -4341,6 +4360,22 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     .filter((labels): labels is string[] => labels !== undefined);
   // 提问在等答案时回合仍在跑；回合结束后的旧提问不能再点，否则会当新消息重发。
   const canAnswer = state !== null && state.session.canSend && state.busy;
+  // 一个问题：点选即发送。多个问题：逐个选完，最后统一提交一条消息。
+  const batch = questions.length > 1;
+  const picks = new Map<string, Set<string>>();
+  const batchButtons: HTMLButtonElement[] = [];
+  const labelsOf = (question: MessageQuestion): string[] => {
+    const already = state?.answers?.get(askKey(block, question));
+    if (already) return already;
+    const picked = picks.get(question.question);
+    return question.options.map((option) => option.label).filter((label) => picked?.has(label));
+  };
+  let batchSubmit: HTMLButtonElement | null = null;
+  const syncBatch = (): void => {
+    if (!batchSubmit) return;
+    batchSubmit.disabled = questions.some((question) => labelsOf(question).length === 0);
+  };
+
   for (const question of questions) {
     const sent = state?.answers?.get(askKey(block, question));
     const selectable = canAnswer && sent === undefined;
@@ -4355,8 +4390,9 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     if (question.options.length > 0) {
       const row = el("div", { className: "ask-options" });
       const picked = new Set<string>();
+      picks.set(question.question, picked);
       const choices: HTMLButtonElement[] = [];
-      const submit = selectable && question.multiSelect
+      const submit = selectable && question.multiSelect && !batch
         ? el("button", { className: "ask-submit", text: "提交选择", attrs: { type: "button" } })
         : null;
       for (const option of question.options) {
@@ -4374,13 +4410,32 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
           "button",
           {
             className: "ask-option is-selectable",
-            attrs: { type: "button", "aria-pressed": "false" },
+            attrs: { type: "button", "aria-pressed": "false", "data-label": option.label },
           },
           children,
         );
         choice.addEventListener("click", () => {
+          if (batch) {
+            if (question.multiSelect) {
+              if (picked.has(option.label)) picked.delete(option.label);
+              else picked.add(option.label);
+            } else {
+              picked.clear();
+              picked.add(option.label);
+            }
+            for (const item of choices) {
+              item.setAttribute("aria-pressed", picked.has(item.dataset["label"] ?? "") ? "true" : "false");
+            }
+            syncBatch();
+            return;
+          }
           if (!question.multiSelect) {
-            void submitAskAnswer(state, askKey(block, question), [option.label], choices);
+            void submitAskAnswers(
+              state,
+              [{ key: askKey(block, question), labels: [option.label] }],
+              option.label,
+              choices,
+            );
             return;
           }
           if (picked.has(option.label)) picked.delete(option.label);
@@ -4389,17 +4444,21 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
           if (submit) submit.disabled = picked.size === 0;
         });
         choices.push(choice);
+        batchButtons.push(choice);
         row.append(choice);
       }
       if (submit) {
         submit.disabled = true;
         submit.addEventListener("click", () => {
           // 按选项原本的顺序发出，避免跟点选顺序绑在一起。
-          const labels = question.options
-            .map((option) => option.label)
-            .filter((label) => picked.has(label));
+          const labels = labelsOf(question);
           if (labels.length === 0) return;
-          void submitAskAnswer(state, askKey(block, question), labels, [...choices, submit]);
+          void submitAskAnswers(
+            state,
+            [{ key: askKey(block, question), labels }],
+            labels.join("、"),
+            [...choices, submit],
+          );
         });
         row.append(submit);
       }
@@ -4407,6 +4466,22 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     }
     box.append(card);
   }
+
+  if (batch && canAnswer) {
+    const submit = el("button", { className: "ask-submit", text: "提交答案", attrs: { type: "button" } });
+    submit.disabled = true;
+    submit.addEventListener("click", () => {
+      const answers = questions.map((question) => ({ key: askKey(block, question), labels: labelsOf(question) }));
+      if (answers.some((entry) => entry.labels.length === 0)) return;
+      // 多选答案内部用「/」连接：只有问题之间用「、」，否则 Bridge 按「、」切分会串位。
+      const text = answers.map((entry) => entry.labels.join("/")).join("、");
+      void submitAskAnswers(state, answers, text, [...batchButtons, submit]);
+    });
+    batchSubmit = submit;
+    box.append(submit);
+    syncBatch();
+  }
+
   box.append(
     el("p", {
       className: "ask-note",
@@ -4414,22 +4489,23 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
         answered.length > 0
           ? `已发送：${answered.flat().join("、")}`
           : canAnswer
-            ? "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
+            ? batch
+              ? "逐个选好后点「提交答案」，会作为一条消息发到会话；桌面上的提问框不会自动关闭。"
+              : "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
             : "请在桌面端回答这个提问",
     }),
   );
   return box;
 }
 
-/** 选项就是一句话：原样发出去，桌面端的提问对话框仍由桌面收尾。 */
-async function submitAskAnswer(
+/** 答案按问题顺序拼成一条消息发出；桌面端的提问对话框仍由桌面收尾。 */
+async function submitAskAnswers(
   state: ChatState | null,
-  key: string,
-  labels: string[],
+  answers: Array<{ key: string; labels: string[] }>,
+  text: string,
   buttons: HTMLButtonElement[],
 ): Promise<void> {
   if (!state) return;
-  const text = labels.join("、");
   for (const item of buttons) item.disabled = true;
   state.status.classList.remove("error");
   state.status.textContent = "正在发送选择…";
@@ -4444,7 +4520,8 @@ async function submitAskAnswer(
       for (const item of buttons) item.disabled = false;
       return;
     }
-    (state.answers ??= new Map<string, string[]>()).set(key, labels);
+    state.answers ??= new Map<string, string[]>();
+    for (const entry of answers) state.answers.set(entry.key, entry.labels);
     state.queued.push({
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       match: text,

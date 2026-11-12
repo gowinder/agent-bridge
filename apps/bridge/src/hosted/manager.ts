@@ -48,10 +48,11 @@ export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
 ];
 
 /**
- * 托管会话允许远程指定的权限模式。默认包含全部模式：auto 由分类器逐动作审查，
- * bypassPermissions 由用户在创建时显式选择（仍受 sandbox 与 deny 规则约束）。
+ * 托管会话允许远程指定的权限模式。auto 由分类器逐动作审查；
+ * bypassPermissions 属于高危模式（仍受 sandbox 与 deny 规则约束），
+ * 默认不开放，只有 hosted.json 里显式打开 allowBypassPermissions 才进入白名单。
  */
-export const REMOTE_HOSTED_MODES: HostedPermissionMode[] = [
+const BASE_REMOTE_MODES: HostedPermissionMode[] = [
   "manual",
   "acceptEdits",
   "auto",
@@ -60,10 +61,18 @@ export const REMOTE_HOSTED_MODES: HostedPermissionMode[] = [
   "plan",
 ];
 
+export function remoteHostedModes(allowBypassPermissions: boolean): HostedPermissionMode[] {
+  return allowBypassPermissions
+    ? [...BASE_REMOTE_MODES]
+    : BASE_REMOTE_MODES.filter((mode) => mode !== "bypassPermissions");
+}
+
 export interface HostedConfig {
   /** Directories allowed to host sessions. Absolute paths after `~` expansion. */
   dirs: string[];
   idleTimeoutMs: number;
+  /** 是否允许托管会话使用 bypassPermissions；默认 false。 */
+  allowBypassPermissions: boolean;
   /** Override the CLI binary; defaults to `claude` on PATH. */
   cliPath?: string;
 }
@@ -184,7 +193,8 @@ export class HostedSessionManager {
       enabled: this.config.dirs.length > 0,
       dirs,
       idleTimeoutMs: this.config.idleTimeoutMs,
-      permissionModes: REMOTE_HOSTED_MODES,
+      permissionModes: this.remotePermissionModes(),
+      allowBypassPermissions: this.config.allowBypassPermissions,
     };
     if (!result.enabled) {
       result.note = `尚未配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`;
@@ -216,6 +226,11 @@ export class HostedSessionManager {
     }
     for (const record of this.records.values()) push(record.cwd);
     return projects;
+  }
+
+  /** 当前配置允许远程指定的权限模式；hosted.create 与网页下拉都以此为准。 */
+  remotePermissionModes(): HostedPermissionMode[] {
+    return remoteHostedModes(this.config.allowBypassPermissions);
   }
 
   sessions(): SessionSummary[] {
@@ -292,6 +307,7 @@ export class HostedSessionManager {
   create(params: HostedCreateParams): SessionSummary {
     const cwd = this.allowedPath(params.path);
     const permissionMode = this.permissionMode(params.permissionMode);
+    this.assertModeAllowed(permissionMode);
     const model = this.model(params.model);
     const now = Date.now();
     const id = randomUUID();
@@ -309,6 +325,8 @@ export class HostedSessionManager {
       this.start(record, false);
     } catch (error) {
       this.live.delete(id);
+      // 权限模式被拒绝这类 RpcError 原样上抛，别改写成「无法启动」。
+      if (error instanceof RpcError) throw error;
       throw new RpcError(
         "adapter_unavailable",
         `无法启动 Claude Code：${error instanceof Error ? error.message : String(error)}`,
@@ -343,6 +361,7 @@ export class HostedSessionManager {
         this.start(record, true);
       } catch (error) {
         this.live.delete(record.id);
+        if (error instanceof RpcError) throw error;
         throw new RpcError(
           "adapter_unavailable",
           `无法 resume Claude Code：${error instanceof Error ? error.message : String(error)}`,
@@ -405,6 +424,8 @@ export class HostedSessionManager {
   }
 
   private start(record: HostedRecord, resume: boolean): void {
+    // 已有记录可能是在开关打开时建的：关掉开关后不允许再用 bypass 启动。
+    this.assertModeAllowed(record.permissionMode);
     const cli = this.cliBinary();
     const args = [
       "-p",
@@ -741,6 +762,16 @@ export class HostedSessionManager {
     throw new RpcError("invalid_params", `不支持的权限模式：${value}`);
   }
 
+  /** bypassPermissions 只有在 hosted.json 显式打开时才允许；关掉后老会话也不能再启动。 */
+  private assertModeAllowed(mode: HostedPermissionMode): void {
+    if (mode === "bypassPermissions" && !this.config.allowBypassPermissions) {
+      throw new RpcError(
+        "unsupported",
+        `Bridge 未允许托管会话使用 bypassPermissions：在 ${join(this.stateDir, "hosted.json")} 设置 "allowBypassPermissions": true 后重启 Bridge`,
+      );
+    }
+  }
+
   /** 模型名会原样进 argv：只收普通标识符形式，挡掉 `--flag` 这类参数注入。 */
   /**
    * 菜单栏/launchd 启动时 PATH 里通常没有 `claude`（它装在 ~/.local/bin），
@@ -924,7 +955,9 @@ function projectIdFor(cwd: string): string {
 
 function readConfig(stateDir: string): HostedConfig {
   const path = join(stateDir, "hosted.json");
-  if (!existsSync(path)) return { dirs: [], idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS };
+  if (!existsSync(path)) {
+    return { dirs: [], idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS, allowBypassPermissions: false };
+  }
   try {
     const raw = JSON.parse(readFileSync(path, "utf8"));
     const dirs = isRecord(raw) && Array.isArray(raw["dirs"])
@@ -934,11 +967,12 @@ function readConfig(stateDir: string): HostedConfig {
     const config: HostedConfig = {
       dirs,
       idleTimeoutMs: Math.max(idle, 60_000),
+      allowBypassPermissions: isRecord(raw) && raw["allowBypassPermissions"] === true,
       ...(isRecord(raw) && typeof raw["cliPath"] === "string" ? { cliPath: raw["cliPath"] } : {}),
     };
     return config;
   } catch {
-    return { dirs: [], idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS };
+    return { dirs: [], idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS, allowBypassPermissions: false };
   }
 }
 

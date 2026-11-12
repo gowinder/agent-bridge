@@ -30,7 +30,6 @@ import type {
 import type { SessionAdapters } from "./adapters/index.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";
-import { REMOTE_HOSTED_MODES } from "./hosted/manager.js";
 import type { Pusher } from "./push.js";
 import type { RelayApi } from "./relay-client.js";
 import type { DeviceRecord, InviteRecord, Store } from "./store.js";
@@ -428,11 +427,13 @@ export class DeviceSession implements ChannelSession {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
         const permissionMode = stringParam(params, "permissionMode");
-        // 只接受白名单里的模式；白名单见 REMOTE_HOSTED_MODES。
-        if (permissionMode && !REMOTE_HOSTED_MODES.includes(permissionMode as HostedPermissionMode)) {
+        // 只接受白名单里的模式；bypassPermissions 还取决于 hosted.json 的 allowBypassPermissions。
+        if (permissionMode && !this.options.adapters.hostedModes().includes(permissionMode as HostedPermissionMode)) {
           throw new RpcError(
             "invalid_params",
-            `托管会话不接受该权限模式：${permissionMode}`,
+            permissionMode === "bypassPermissions"
+              ? "Bridge 未允许托管会话使用 bypassPermissions（hosted.json 的 allowBypassPermissions）"
+              : `托管会话不接受该权限模式：${permissionMode}`,
           );
         }
         const title = stringParam(params, "title");

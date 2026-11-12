@@ -39,7 +39,7 @@ class FakeChild extends EventEmitter {
   }
 }
 
-function harness() {
+function harness(config = {}) {
   const root = mkdtempSync(join(tmpdir(), "hosted-test-"));
   const repo = join(root, "repo");
   const outside = join(root, "outside");
@@ -49,7 +49,7 @@ function harness() {
   mkdirSync(stateDir);
   writeFileSync(
     join(stateDir, "hosted.json"),
-    JSON.stringify({ dirs: [repo], idleTimeoutMs: 60_000 }),
+    JSON.stringify({ dirs: [repo], idleTimeoutMs: 60_000, ...config }),
   );
   const spawns = [];
   const spawn = (command, args, options) => {
@@ -84,6 +84,58 @@ test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   assert.equal(args[args.indexOf("--session-id") + 1], session.sessionId.replace("hosted:", ""));
   assert.ok(!args.includes("--dangerously-skip-permissions"));
   assert.equal(options.cwd, realpathSync(h.repo));
+});
+
+test("bypassPermissions is off by default and rejected at create", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const config = h.manager.configForClient();
+  assert.equal(config.allowBypassPermissions, false);
+  assert.ok(!config.permissionModes.includes("bypassPermissions"));
+  assert.throws(
+    () => h.manager.create({ path: h.repo, permissionMode: "bypassPermissions" }),
+    (error) => error.code === "unsupported",
+  );
+  assert.equal(h.spawns.length, 0);
+});
+
+test("allowBypassPermissions opens bypass for hosted sessions", (t) => {
+  const h = harness({ allowBypassPermissions: true });
+  t.after(() => h.manager.dispose());
+  const config = h.manager.configForClient();
+  assert.equal(config.allowBypassPermissions, true);
+  assert.ok(config.permissionModes.includes("bypassPermissions"));
+  const session = h.manager.create({ path: h.repo, permissionMode: "bypassPermissions" });
+  assert.equal(session.permissionMode, "bypassPermissions");
+  const args = h.spawns[0].args;
+  assert.equal(args[args.indexOf("--permission-mode") + 1], "bypassPermissions");
+  assert.ok(!args.includes("--dangerously-skip-permissions"));
+});
+
+test("turning allowBypassPermissions off blocks resuming a bypass session", (t) => {
+  const h = harness({ allowBypassPermissions: true });
+  const session = h.manager.create({ path: h.repo, permissionMode: "bypassPermissions" });
+  h.manager.stop(session.sessionId);
+  h.manager.dispose();
+  writeFileSync(
+    join(h.stateDir, "hosted.json"),
+    JSON.stringify({ dirs: [h.repo], idleTimeoutMs: 60_000 }),
+  );
+  const spawns = [];
+  const next = new HostedSessionManager({
+    stateDir: h.stateDir,
+    spawn: (...args) => {
+      spawns.push(args);
+      return new FakeChild();
+    },
+  });
+  t.after(() => next.dispose());
+  assert.equal(next.session(session.sessionId).permissionMode, "bypassPermissions");
+  assert.throws(
+    () => next.resume(session.sessionId),
+    (error) => error.code === "unsupported",
+  );
+  assert.equal(spawns.length, 0);
 });
 
 test("send writes a plain user turn and streams the assistant reply back", (t) => {

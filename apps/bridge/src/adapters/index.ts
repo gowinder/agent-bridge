@@ -5,6 +5,7 @@ import type {
   AppListResult,
   HostedCreateParams,
   HostedDirsResult,
+  HostedPermissionMode,
   HostedResumeResult,
   HostedStopResult,
   MessageListResult,
@@ -68,6 +69,10 @@ export class SessionAdapters {
 
   hostedDirs(): HostedDirsResult {
     return this.hostedManager.configForClient();
+  }
+
+  hostedModes(): HostedPermissionMode[] {
+    return this.hostedManager.remotePermissionModes();
   }
 
   hostedCreate(params: HostedCreateParams): SessionGetResult {

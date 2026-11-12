@@ -547,6 +547,8 @@ export interface HostedDirsResult {
   dirs: HostedDirInfo[];
   idleTimeoutMs: number;
   permissionModes: HostedPermissionMode[];
+  /** hosted.json 的 allowBypassPermissions 开关；false 时 permissionModes 不含 bypassPermissions。 */
+  allowBypassPermissions: boolean;
   note?: string;
 }
 
