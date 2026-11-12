@@ -1949,6 +1949,8 @@ async function renderRoute(soft = false): Promise<void> {
     return;
   }
   const route = parseRoute();
+  // 整页重绘后旧表单容器已经不在页面上，之前挂起的延迟重绘也就没有意义了。
+  deferredListRender = false;
   if (hostedDraft && (route.level !== "sessions" || route.projectId !== hostedDraft.projectId)) {
     hostedDraft = null;
   }
