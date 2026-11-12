@@ -421,7 +421,14 @@ async function commandServe(): Promise<void> {
   };
 
   /** 菜单栏的每设备操作日志；存在本地库里，Bridge 重启后还在。 */
-  const recordEvent = (deviceId: string, line: string): void => store.recordDeviceEvent(deviceId, line);
+  const recordEvent = (deviceId: string, line: string): void => {
+    try {
+      store.recordDeviceEvent(deviceId, line);
+    } catch (error) {
+      // 写日志失败不能连累设备通道本身。
+      log(`操作日志写入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
 
   const adminActions: AdminActions = {
     async snapshot() {
