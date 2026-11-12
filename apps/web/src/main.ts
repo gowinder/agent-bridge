@@ -2013,6 +2013,8 @@ async function refreshSnapshot(token: number): Promise<void> {
   // 这里再 renderRoute() 会把正在编辑的输入区整个重建掉。
   if (token !== renderToken) return;
   if (snapshotSignature() === before) return;
+  // 新建托管会话面板是就地展开的表单：整页重绘会清掉它和已填内容，等用户提交或收起后再刷新。
+  if (document.querySelector(".hosted-create-host")?.childElementCount) return;
   void renderRoute();
 }
 
