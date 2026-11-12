@@ -428,7 +428,7 @@ export class DeviceSession implements ChannelSession {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
         const permissionMode = stringParam(params, "permissionMode");
-        // 托管会话是远程发起、无人值守的，只接受不需要现场确认的模式。
+        // 只接受白名单里的模式；白名单见 REMOTE_HOSTED_MODES。
         if (permissionMode && !REMOTE_HOSTED_MODES.includes(permissionMode as HostedPermissionMode)) {
           throw new RpcError(
             "invalid_params",
