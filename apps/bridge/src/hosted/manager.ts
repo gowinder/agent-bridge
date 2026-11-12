@@ -1086,7 +1086,20 @@ function answersFromText(text: string, questions: MessageQuestion[]): Record<str
     return answers;
   }
   questions.forEach((question, index) => {
-    answers[question.question] = parts[index] ?? "";
+    const part = parts[index] ?? "";
+    if (!question.multiSelect) {
+      answers[question.question] = part;
+      return;
+    }
+    // 多选答案在网页里用「/」连接：同题多选要还原成数组，否则会被当成一个选项。
+    const chosen = part
+      .split("/")
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const matched = question.options
+      .map((option) => option.label)
+      .filter((label) => chosen.includes(label));
+    answers[question.question] = matched.length > 0 ? matched : chosen;
   });
   return answers;
 }

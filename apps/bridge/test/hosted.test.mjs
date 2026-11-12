@@ -219,6 +219,37 @@ test("AskUserQuestion answers map back to the question text", (t) => {
   });
 });
 
+test("two-question batch keeps multi-select answers as arrays", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  return h.manager.send(session.sessionId, "开始").then(async () => {
+    const child = h.spawns[0].child;
+    child.emitJson({
+      type: "control_request",
+      request_id: "req-ask-two",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "AskUserQuestion",
+        input: {
+          questions: [
+            {
+              question: "要做哪些？",
+              multiSelect: true,
+              options: [{ label: "写代码" }, { label: "跑测试" }],
+            },
+            { question: "提交到哪里？", options: [{ label: "develop" }, { label: "main" }] },
+          ],
+        },
+      },
+    });
+    await h.manager.send(session.sessionId, "写代码/跑测试、develop");
+    const response = child.writes().filter((item) => item.type === "control_response").at(-1);
+    assert.deepEqual(response.response.response.updatedInput.answers["要做哪些？"], ["写代码", "跑测试"]);
+    assert.equal(response.response.response.updatedInput.answers["提交到哪里？"], "develop");
+  });
+});
+
 test("stop kills the process and resume starts it again with --resume", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
