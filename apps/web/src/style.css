@@ -1806,6 +1806,17 @@ a.crumb:hover {
   color: var(--text);
 }
 
+.message-actions {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.message-actions .share-btn {
+  margin-left: 0;
+}
+
 .share-btn {
   margin-left: auto;
   appearance: none;

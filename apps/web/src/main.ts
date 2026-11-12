@@ -109,6 +109,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>',
   share:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8"/><path d="m4.8 5.2 3.2-3.2 3.2 3.2"/><path d="M3 9.5v3.1c0 .8.6 1.4 1.4 1.4h7.2c.8 0 1.4-.6 1.4-1.4V9.5"/></svg>',
+  copy:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.4" y="5.4" width="7.6" height="7.6" rx="1.4"/><path d="M10.6 5.4v-1A1.4 1.4 0 0 0 9.2 3H4.4A1.4 1.4 0 0 0 3 4.4v4.8a1.4 1.4 0 0 0 1.4 1.4h1"/></svg>',
   close:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg>',
   device:
@@ -4253,7 +4255,7 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (hasText && session) meta.append(shareButton(session, message));
+  if (hasText && session) meta.append(messageActions([copyButton(textBlocks([message])), shareButton(session, message)]));
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
@@ -4701,6 +4703,47 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
   return share;
 }
 
+/** 复制一段输出；写剪贴板失败时给出可见反馈，不静默。 */
+function copyButton(text: string): HTMLButtonElement {
+  const label = el("span", { text: "复制" });
+  const copy = el("button", {
+    className: "share-btn copy-btn",
+    attrs: { type: "button", title: "复制这段输出", "aria-label": "复制这段输出" },
+  }, [icon("copy"), label]);
+  const flash = (next: string): void => {
+    label.textContent = next;
+    setTimeout(() => {
+      label.textContent = "复制";
+    }, 1_500);
+  };
+  copy.addEventListener("click", () => {
+    if (!navigator.clipboard) {
+      flash("无法复制");
+      return;
+    }
+    void navigator.clipboard.writeText(text).then(
+      () => flash("已复制"),
+      () => flash("复制失败"),
+    );
+  });
+  return copy;
+}
+
+/** 消息头右侧的操作区：分享、复制。 */
+function messageActions(buttons: (HTMLElement | null)[]): HTMLElement {
+  return el("span", { className: "message-actions" }, buttons.filter((item): item is HTMLElement => item !== null));
+}
+
+/** 消息里所有正文块，按顺序拼回纯文本。 */
+function textBlocks(messages: MessageRecord[]): string {
+  return messages
+    .flatMap((message) => message.blocks)
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
+}
+
 function assistantTurn(
   session: SessionSummary | null,
   messages: MessageRecord[],
@@ -4735,7 +4778,11 @@ function assistantTurn(
     ...(peer ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (lastText && session) meta.append(shareButton(session, lastText));
+  if (session) {
+    // 复制整回合的输出，分享仍沿用最后一条带正文的消息。
+    const copyText = textBlocks(messages);
+    meta.append(messageActions([copyText ? copyButton(copyText) : null, lastText ? shareButton(session, lastText) : null]));
+  }
   bubble.append(meta);
   let folded = steps.length === 0;
   for (const message of messages) {
