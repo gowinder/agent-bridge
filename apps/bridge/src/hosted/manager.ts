@@ -543,6 +543,7 @@ export class HostedSessionManager {
             text: describeToolInput(input),
             ask: `允许执行 ${toolName} 吗？`,
             actions: [{ label: "允许" }, { label: "拒绝" }],
+            pending: true,
           } as MessageBlock);
       this.appendRecord(record, {
         messageId: randomUUID(),
