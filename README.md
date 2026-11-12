@@ -36,7 +36,8 @@ Allowlist the directories that may be used in `~/Library/Application Support/Age
 ```json
 {
   "dirs": ["/Users/you/code/scratch"],
-  "idleTimeoutMs": 1800000
+  "idleTimeoutMs": 1800000,
+  "allowBypassPermissions": false
 }
 ```
 
@@ -44,6 +45,9 @@ Allowlist the directories that may be used in `~/Library/Application Support/Age
   entries, then restart the bridge.
 - `idleTimeoutMs`: stop an idle process after this many milliseconds (default 30
   minutes). Sending another message resumes the same CLI session.
+- `allowBypassPermissions`: default `false`. When `true`, hosted sessions may be
+  created with `bypassPermissions` (the web panel then offers it); when `false`
+  that mode is rejected and existing bypass sessions can no longer start.
 - `cliPath`: optional; defaults to `claude` on `PATH`.
 
 In the web client open the hosted client, pick an allowlisted project, and choose
@@ -51,6 +55,18 @@ In the web client open the hosted client, pick an allowlisted project, and choos
 shown in the chat with 允许 / 拒绝 buttons. Bridge owns the process stdin, and the
 transcript is stored under `$AGENT_BRIDGE_HOME/hosted/`, never in the desktop
 transcripts. Tests: `npm test`.
+
+## Local admin port
+
+The menu bar app controls Bridge through a loopback-only admin API. Its port is
+stored per state directory in `admin-port` (`$AGENT_BRIDGE_HOME/admin-port`), so a
+preview Bridge and a production Bridge can run at the same time:
+
+- defaults: preview relay 47826, production 47825 (relay host contains
+  `preview`/`staging`, or set `AGENT_BRIDGE_ENV=preview`/`production`)
+- menu bar 「管理端口…」writes the file and restarts the Bridge it started;
+  `agent-bridge port [<port>]` does the same from a terminal
+- `AGENT_BRIDGE_ADMIN_PORT` overrides the file (useful for one-off runs)
 
 ## License
 

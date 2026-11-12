@@ -10,9 +10,12 @@ import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from 
 import { SessionAdapters } from "./adapters/index.js";
 import {
   ADMIN_HOST,
-  DEFAULT_ADMIN_PORT,
   ensureAdminToken,
+  isPreviewDeployment,
+  readAdminPortFile,
+  resolveAdminPort,
   startAdminServer,
+  writeAdminPortFile,
   type AdminActions,
   type AdminDevice,
 } from "./admin.js";
@@ -56,6 +59,7 @@ function usage(): void {
   agent-bridge devices [ttl <manual|1h|24h|7d|30d>]   (默认 30d)
   agent-bridge revoke <deviceId>
   agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]
+  agent-bridge port [<端口>]   (管理接口端口；preview 默认 47826，生产默认 47825)
   agent-bridge status
   agent-bridge info
 
@@ -273,8 +277,10 @@ async function setDevtoolsOnBridge(
     return null;
   }
   if (!token) return null;
-  const configured = process.env["AGENT_BRIDGE_ADMIN_PORT"] ?? store.meta("admin_port");
-  const port = Number(configured) || DEFAULT_ADMIN_PORT;
+  const port = resolveAdminPort(store.dir, {
+    relayUrl: store.meta("relay_url"),
+    legacyMeta: store.meta("admin_port"),
+  });
   try {
     const response = await fetch(`http://${ADMIN_HOST}:${port}/devtools`, {
       method: "POST",
@@ -333,6 +339,32 @@ async function commandDevtools(args: string[]): Promise<void> {
       throw new Error("用法：agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]");
     }
     printDevtools(next ?? localDevtools().status());
+  } finally {
+    store.close();
+  }
+}
+
+/** 查看或设置本状态目录的管理接口端口；文件与菜单栏共用同一份。 */
+async function commandPort(args: string[]): Promise<void> {
+  const store = new Store();
+  try {
+    const relayUrl = store.meta("relay_url");
+    if (args.length === 0) {
+      const port = resolveAdminPort(store.dir, { relayUrl, legacyMeta: store.meta("admin_port") });
+      const source = process.env["AGENT_BRIDGE_ADMIN_PORT"]
+        ? "环境变量 AGENT_BRIDGE_ADMIN_PORT"
+        : readAdminPortFile(store.dir) !== null
+          ? join(store.dir, "admin-port")
+          : isPreviewDeployment(relayUrl)
+            ? "preview 默认值"
+            : "生产默认值";
+      console.log(`${port}（${source}）`);
+      return;
+    }
+    if (args.length > 1) throw new Error("用法：agent-bridge port [<端口>]");
+    const port = Number(args[0]);
+    writeAdminPortFile(store.dir, port);
+    console.log(`已保存 ${port}：${join(store.dir, "admin-port")}；运行中的 Bridge 重启后生效`);
   } finally {
     store.close();
   }
@@ -705,23 +737,21 @@ async function commandServe(): Promise<void> {
     log(`发送不可用（${app.name}）：${app.capabilities.sendDetail ?? app.capabilities.reason ?? "原因未知"}`);
   }
 
-  const configuredPort = process.env["AGENT_BRIDGE_ADMIN_PORT"] ?? store.meta("admin_port");
-  const adminPort = configuredPort ? Number(configuredPort) : DEFAULT_ADMIN_PORT;
-  if (!Number.isInteger(adminPort) || adminPort < 1 || adminPort > 65_535) {
-    log(`本地管理接口端口无效：${configuredPort}，已跳过`);
-  } else {
-    try {
-      adminServer = await startAdminServer({
-        port: adminPort,
-        token: ensureAdminToken(store.dir),
-        actions: adminActions,
-        log,
-      });
-      log(`本地管理接口 http://${ADMIN_HOST}:${adminPort}（令牌 ${join(store.dir, "admin-token")}）`);
-      process.on("exit", () => adminServer?.close());
-    } catch (error) {
-      log(`本地管理接口启动失败：${error instanceof Error ? error.message : String(error)}`);
-    }
+  const adminPort = resolveAdminPort(store.dir, {
+    relayUrl: config.relayUrl,
+    legacyMeta: store.meta("admin_port"),
+  });
+  try {
+    adminServer = await startAdminServer({
+      port: adminPort,
+      token: ensureAdminToken(store.dir),
+      actions: adminActions,
+      log,
+    });
+    log(`本地管理接口 http://${ADMIN_HOST}:${adminPort}（令牌 ${join(store.dir, "admin-token")}）`);
+    process.on("exit", () => adminServer?.close());
+  } catch (error) {
+    log(`本地管理接口启动失败：${error instanceof Error ? error.message : String(error)}`);
   }
 
   let backoff = 1_000;
@@ -776,6 +806,9 @@ async function main(): Promise<void> {
       return;
     case "devtools":
       await commandDevtools(args);
+      return;
+    case "port":
+      await commandPort(args);
       return;
     case "status":
       await commandStatus();
