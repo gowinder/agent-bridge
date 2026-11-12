@@ -440,6 +440,8 @@ export interface SessionSummary {
   hostedState?: "running" | "idle" | "stopped";
   /** `hosted` only: the permission mode Bridge passes to the CLI. */
   permissionMode?: string;
+  /** `hosted` only: the --model Bridge passes to the CLI; absent means the CLI default. */
+  model?: string;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
@@ -550,6 +552,8 @@ export interface HostedCreateParams {
   /** Must equal one of `hosted.dirs`; absolute path or one already resolved there. */
   path: string;
   permissionMode?: HostedPermissionMode;
+  /** Claude Code `--model` value; omitted uses the CLI default. */
+  model?: string;
   title?: string;
 }
 

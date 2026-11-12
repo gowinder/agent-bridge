@@ -66,6 +66,8 @@ interface HostedRecord {
   cwd: string;
   title: string;
   permissionMode: HostedPermissionMode;
+  /** CLI `--model` value; undefined keeps the CLI default. */
+  model?: string;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -259,6 +261,7 @@ export class HostedSessionManager {
       environment: [
         { label: "工作目录", value: record.cwd },
         { label: "权限模式", value: record.permissionMode },
+        { label: "模型", value: record.model ?? "CLI 默认" },
         {
           label: "进程",
           value: live ? `运行中（pid ${live.child.pid ?? "?"}）` : "未运行（发送时 resume）",
@@ -274,6 +277,7 @@ export class HostedSessionManager {
   create(params: HostedCreateParams): SessionSummary {
     const cwd = this.allowedPath(params.path);
     const permissionMode = this.permissionMode(params.permissionMode);
+    const model = this.model(params.model);
     const now = Date.now();
     const id = randomUUID();
     const record: HostedRecord = {
@@ -281,6 +285,7 @@ export class HostedSessionManager {
       cwd,
       title: params.title?.trim() || "托管会话",
       permissionMode,
+      ...(model ? { model } : {}),
       createdAt: now,
       updatedAt: now,
       lastActiveAt: now,
@@ -402,6 +407,8 @@ export class HostedSessionManager {
     ];
     if (resume) args.push("--resume", record.id);
     else args.push("--session-id", record.id);
+    // 恢复也要带上同一个模型，否则续写会悄悄换回 CLI 默认模型。
+    if (record.model) args.push("--model", record.model);
     const child = this.spawnFn(cli, args, { cwd: record.cwd, env: process.env });
     const live: LiveProcess = { child, buffer: "", busy: false, pending: null, startedAt: Date.now() };
     this.live.set(record.id, live);
@@ -637,6 +644,7 @@ export class HostedSessionManager {
       hosted: true,
       hostedState: live ? "running" : "stopped",
       permissionMode: record.permissionMode,
+      ...(record.model ? { model: record.model } : {}),
       cwd: record.cwd,
     };
     if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
@@ -665,6 +673,16 @@ export class HostedSessionManager {
     if (!value) return "manual";
     if ((HOSTED_PERMISSION_MODES as string[]).includes(value)) return value as HostedPermissionMode;
     throw new RpcError("invalid_params", `不支持的权限模式：${value}`);
+  }
+
+  /** 模型名会原样进 argv：只收普通标识符形式，挡掉 `--flag` 这类参数注入。 */
+  private model(value: string | undefined): string | undefined {
+    const model = value?.trim();
+    if (!model) return undefined;
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/.test(model)) {
+      throw new RpcError("invalid_params", `模型名不合法：${value}`);
+    }
+    return model;
   }
 
   private touch(record: HostedRecord): void {
@@ -749,6 +767,10 @@ export class HostedSessionManager {
           permissionMode: this.permissionMode(
             typeof item["permissionMode"] === "string" ? item["permissionMode"] : "manual",
           ),
+          // 记录里的模型名不可信：校验不过就当没写，别让一条坏记录拖垮整个注册表。
+          ...(typeof item["model"] === "string" && /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/.test(item["model"])
+            ? { model: item["model"] }
+            : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
           updatedAt: numberOr(item["updatedAt"], Date.now()),
           lastActiveAt: numberOr(item["lastActiveAt"], Date.now()),

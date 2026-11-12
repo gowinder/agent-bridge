@@ -436,9 +436,11 @@ export class DeviceSession implements ChannelSession {
           );
         }
         const title = stringParam(params, "title");
+        const model = stringParam(params, "model");
         return this.options.adapters.hostedCreate({
           path,
           ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
+          ...(model ? { model } : {}),
           ...(title ? { title } : {}),
         });
       }
