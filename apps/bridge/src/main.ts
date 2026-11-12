@@ -661,6 +661,9 @@ async function commandServe(): Promise<void> {
     relay?.close(1000, "shutdown");
     adminServer?.close();
     adminServer?.closeAllConnections();
+    // 事件循环里还剩中继 WebSocket 的关闭握手、适配器持有的 UDS、子进程计时器等句柄，
+    // 关不干净时进程会一直停在“正在退出…”。给收尾一点时间后强制退出。
+    setTimeout(() => process.exit(0), 500).unref();
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
