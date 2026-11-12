@@ -35,6 +35,8 @@ const IDLE_SWEEP_MS = 60_000;
 const MAX_BLOCK_CHARS = 4_000;
 export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
+/** CLI 模型名允许的字符集：普通标识符 + 完整 ID 里的括号/点/冒号，且不能以 `-` 开头。 */
+const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/;
 
 export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
   "manual",
@@ -68,6 +70,8 @@ interface HostedRecord {
   permissionMode: HostedPermissionMode;
   /** CLI `--model` value; undefined keeps the CLI default. */
   model?: string;
+  /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
+  observedModel?: string;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -93,6 +97,8 @@ export interface HostedChild {
   stdout: NodeJS.ReadableStream | null;
   stderr: NodeJS.ReadableStream | null;
   on(event: "exit", listener: (code: number | null, signal: string | null) => void): void;
+  /** 二进制不存在时 Node 异步抛 ENOENT；没有监听会直接崩掉 Bridge。 */
+  on(event: "error", listener: (error: NodeJS.ErrnoException) => void): void;
   kill(signal?: NodeJS.Signals): boolean;
   pid?: number;
 }
@@ -261,7 +267,7 @@ export class HostedSessionManager {
       environment: [
         { label: "工作目录", value: record.cwd },
         { label: "权限模式", value: record.permissionMode },
-        { label: "模型", value: record.model ?? "CLI 默认" },
+        { label: "模型", value: modelLabel(record) },
         {
           label: "进程",
           value: live ? `运行中（pid ${live.child.pid ?? "?"}）` : "未运行（发送时 resume）",
@@ -390,7 +396,7 @@ export class HostedSessionManager {
   }
 
   private start(record: HostedRecord, resume: boolean): void {
-    const cli = this.config.cliPath ?? "claude";
+    const cli = this.cliBinary();
     const args = [
       "-p",
       "--input-format",
@@ -418,6 +424,22 @@ export class HostedSessionManager {
     child.stderr?.on("data", (chunk: string | Buffer) => {
       const line = String(chunk).trim();
       if (line && !line.startsWith("[claude-code:")) this.log(`hosted ${record.id} stderr: ${line.slice(0, 300)}`);
+    });
+    child.on("error", (error) => {
+      this.live.delete(record.id);
+      const detail =
+        error.code === "ENOENT"
+          ? `找不到 Claude Code CLI：${cli}。托管会话需要它在 PATH 或 AGENT_BRIDGE_CLAUDE_PATH 中。`
+          : `启动 Claude Code 失败：${error.message}`;
+      this.log(`hosted ${record.id} spawn error: ${detail}`);
+      this.appendRecord(record, {
+        messageId: randomUUID(),
+        sessionId: record.id,
+        role: "system",
+        createdAt: Date.now(),
+        blocks: [{ type: "text", text: detail }],
+      });
+      this.touch(record);
     });
     child.on("exit", (code, signal) => {
       this.live.delete(record.id);
@@ -504,6 +526,17 @@ export class HostedSessionManager {
       });
       this.touch(record);
       return;
+    }
+    if (type === "system") {
+      // init 事件里带着 CLI 实际加载的模型；记下来，老会话也能看到自己在用哪个。
+      if (event["subtype"] === "init") {
+        const model = event["model"];
+        if (typeof model === "string" && model && model !== record.observedModel) {
+          record.observedModel = model;
+          this.touch(record);
+        }
+        return;
+      }
     }
     if (type === "system" && event["subtype"] === "permission_denied") {
       const tool = typeof event["tool_name"] === "string" ? event["tool_name"] : "工具";
@@ -644,7 +677,7 @@ export class HostedSessionManager {
       hosted: true,
       hostedState: live ? "running" : "stopped",
       permissionMode: record.permissionMode,
-      ...(record.model ? { model: record.model } : {}),
+      ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       cwd: record.cwd,
     };
     if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
@@ -676,10 +709,28 @@ export class HostedSessionManager {
   }
 
   /** 模型名会原样进 argv：只收普通标识符形式，挡掉 `--flag` 这类参数注入。 */
-  private model(value: string | undefined): string | undefined {
-    const model = value?.trim();
+  /**
+   * 菜单栏/launchd 启动时 PATH 里通常没有 `claude`（它装在 ~/.local/bin），
+   * 直接 spawn "claude" 会 ENOENT。按显式配置、常见安装位置依次找一个存在的。
+   */
+  private cliBinary(): string {
+    const explicit = this.config.cliPath ?? process.env["AGENT_BRIDGE_CLAUDE_PATH"];
+    if (explicit) return explicit;
+    const candidates = [
+      join(homedir(), ".local", "bin", "claude"),
+      join(homedir(), ".claude", "local", "claude"),
+      "/opt/homebrew/bin/claude",
+      "/usr/local/bin/claude",
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return candidate;
+    }
+    return "claude";
+  }
+
+  private model(value: string | undefined): string | undefined {    const model = value?.trim();
     if (!model) return undefined;
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/.test(model)) {
+    if (!MODEL_PATTERN.test(model)) {
       throw new RpcError("invalid_params", `模型名不合法：${value}`);
     }
     return model;
@@ -768,8 +819,9 @@ export class HostedSessionManager {
             typeof item["permissionMode"] === "string" ? item["permissionMode"] : "manual",
           ),
           // 记录里的模型名不可信：校验不过就当没写，别让一条坏记录拖垮整个注册表。
-          ...(typeof item["model"] === "string" && /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/.test(item["model"])
-            ? { model: item["model"] }
+          ...(typeof item["model"] === "string" && MODEL_PATTERN.test(item["model"]) ? { model: item["model"] } : {}),
+          ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
+            ? { observedModel: item["observedModel"] }
             : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
           updatedAt: numberOr(item["updatedAt"], Date.now()),
@@ -794,6 +846,8 @@ export class HostedSessionManager {
               cwd: record.cwd,
               title: record.title,
               permissionMode: record.permissionMode,
+              ...(record.model ? { model: record.model } : {}),
+              ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               createdAt: record.createdAt,
               updatedAt: record.updatedAt,
               lastActiveAt: record.lastActiveAt,
@@ -813,6 +867,17 @@ export class HostedSessionManager {
 
 export function sessionKeyFor(id: string): string {
   return `hosted:${id}`;
+}
+
+/** 会话详情里的模型说明：请求值、CLI 实际报告值，或者两者都没有时的未知状态。 */
+function modelLabel(record: HostedRecord): string {
+  if (record.observedModel) {
+    return record.model && record.model !== record.observedModel
+      ? `${record.model}（实际 ${record.observedModel}）`
+      : record.observedModel;
+  }
+  if (record.model) return `${record.model}（尚未运行，实际模型未知）`;
+  return "CLI 默认（未记录，下次运行后自动显示）";
 }
 
 function stripPrefix(sessionId: string): string {
