@@ -35,10 +35,15 @@ test("preview and production get different default ports", () => {
     const dir = stateDir();
     assert.equal(resolveAdminPort(dir, { relayUrl: "https://agent-bridge.example.dev" }), DEFAULT_ADMIN_PORT);
     assert.equal(
-      resolveAdminPort(dir, { relayUrl: "https://agent-bridge-preview.gowinder.workers.dev" }),
+      resolveAdminPort(dir, { relayUrl: "https://agent-bridge-preview.craftstead.app" }),
       PREVIEW_ADMIN_PORT,
     );
     assert.equal(resolveAdminPort(dir, { relayUrl: "https://staging.example.dev" }), PREVIEW_ADMIN_PORT);
+    // 旧部署仍在 workers.dev 上，也要按 preview 处理。
+    assert.equal(
+      resolveAdminPort(dir, { relayUrl: "https://agent-bridge-preview.gowinder.workers.dev" }),
+      PREVIEW_ADMIN_PORT,
+    );
   });
 });
 

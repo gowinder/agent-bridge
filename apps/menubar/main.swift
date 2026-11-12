@@ -958,7 +958,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let defaults = UserDefaults.standard
         let relay = bridge?.relayUrl
             ?? defaults.string(forKey: "relayUrl")
-            ?? "https://agent-bridge-preview.gowinder.workers.dev"
+            ?? "https://agent-bridge-preview.craftstead.app"
 
         let dialog = NSAlert()
         dialog.messageText = "初始化 Agent Bridge"

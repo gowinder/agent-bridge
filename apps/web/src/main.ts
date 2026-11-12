@@ -1758,17 +1758,20 @@ function agentSwitcher(route: Route): HTMLElement | null {
 }
 
 /**
- * 落地页地址。预览客户端在 workers.dev 上，写不到 pages.dev 的 cookie，
+ * 落地页地址。预览客户端在自有预览域（旧部署仍在 workers.dev）上，写不到 pages.dev 的 cookie，
  * 所以回链用非敏感的 ?ab_paired=1 标记让落地页切到已配对状态；生产仍只靠 cookie。
  */
 function craftsteadLanding(paired: boolean): string {
-  if (!location.hostname.endsWith(".workers.dev")) return "https://craftstead.app/agent-bridge";
+  const preview =
+    location.hostname === "agent-bridge-preview.craftstead.app" ||
+    location.hostname.endsWith(".workers.dev");
+  if (!preview) return "https://craftstead.app/agent-bridge";
   const base = "https://develop.craftstead.pages.dev/agent-bridge";
   return paired ? base + "?ab_paired=1" : base;
 }
 
 function renderTopbar(crumbs: Crumb[]): HTMLElement {
-  // 预览部署在 workers.dev 上，回链也停在预览官网，别把试用的人送去生产。
+  // 预览部署在预览域上，回链也停在预览官网，别把试用的人送去生产。
   const landing = craftsteadLanding(true);
   const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
   crumbs.forEach((crumb, index) => {
