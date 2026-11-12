@@ -1449,6 +1449,30 @@ function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
 const RECENT_SESSIONS_KEY = "ab.recentSessions";
 const RECENT_LIMIT = 20;
 
+const TRAIL_LIMIT = 10;
+let trail: Array<{ hash: string; title: string }> = [];
+let trailIndex = -1;
+
+/**
+ * 记住看过的会话，顶部「上一个对话」靠它在两条会话之间来回切换。
+ * 用指针而不是简单出栈：点按钮先把指针回退再跳转，来回切换不会把轨迹撑满。
+ */
+function noteSessionTrail(hash: string, title: string): void {
+  const current = trail[trailIndex];
+  if (current?.hash === hash) {
+    current.title = title;
+    return;
+  }
+  trail = trail.slice(0, trailIndex + 1);
+  trail.push({ hash, title });
+  if (trail.length > TRAIL_LIMIT) trail.shift();
+  trailIndex = trail.length - 1;
+}
+
+function previousTrailEntry(): { hash: string; title: string } | null {
+  return trailIndex > 0 ? trail[trailIndex - 1] ?? null : null;
+}
+
 interface RecentSession {
   sessionId: string;
   title: string;
@@ -1617,6 +1641,27 @@ function recentSessionsButton(): HTMLElement | null {
   return wrap;
 }
 
+/** 顶栏「上一个对话」：跳回轨迹里的上一条会话，再点一下又能回到刚才那条。 */
+function previousSessionButton(): HTMLElement | null {
+  const prev = previousTrailEntry();
+  if (!prev) return null;
+  const node = button(
+    "",
+    () => {
+      const target = previousTrailEntry();
+      if (!target) return;
+      // 先把指针挪回去：目标页渲染时轨迹命中同一项，不会再往后追加。
+      trailIndex -= 1;
+      location.hash = target.hash;
+    },
+    "btn ghost small prev-session-btn",
+  );
+  node.append(icon("swap"), el("span", { className: "prev-session-label", text: "上一个对话" }));
+  node.setAttribute("aria-label", `返回上一个对话：${prev.title}`);
+  node.title = `返回上一个对话：${prev.title}`;
+  return node;
+}
+
 function agentSwitcher(route: Route): HTMLElement | null {
   const apps = snapshot?.apps ?? [];
   if (apps.length === 0) return null;
@@ -1717,6 +1762,10 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     right.append(chip);
   }
   if (connected) {
+    if (parseRoute().level === "chat") {
+      const previous = previousSessionButton();
+      if (previous) right.append(previous);
+    }
     const recents = recentSessionsButton();
     if (recents) right.append(recents);
     const switcher = agentSwitcher(parseRoute());
@@ -2449,6 +2498,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   }
   document.title = `${summary.title} · Agent Bridge`;
   rememberSession(summary);
+  noteSessionTrail(hashFor(route), summary.title);
   markRead(summary.sessionId);
 
   const note = el("p", { className: "hint" });
