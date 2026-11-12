@@ -1469,8 +1469,13 @@ function noteSessionTrail(hash: string, title: string): void {
   trailIndex = trail.length - 1;
 }
 
-function previousTrailEntry(): { hash: string; title: string } | null {
-  return trailIndex > 0 ? trail[trailIndex - 1] ?? null : null;
+function previousTrailEntry(): { hash: string; title: string; step: "back" | "forward" } | null {
+  const prev = trailIndex > 0 ? trail[trailIndex - 1] : undefined;
+  if (prev) return { ...prev, step: "back" };
+  // 刚通过按钮退到轨迹起点时，上一步就在后面：再点一下回到刚才那条会话。
+  const next = trail[trailIndex + 1];
+  if (trailIndex >= 0 && next) return { ...next, step: "forward" };
+  return null;
 }
 
 interface RecentSession {
@@ -1641,24 +1646,28 @@ function recentSessionsButton(): HTMLElement | null {
   return wrap;
 }
 
-/** 顶栏「上一个对话」：跳回轨迹里的上一条会话，再点一下又能回到刚才那条。 */
+/**
+ * 顶栏会话切换键：先回上一条会话，再点就回到刚才那条，
+ * 两条会话之间可以一直这样来回切。
+ */
 function previousSessionButton(): HTMLElement | null {
   const prev = previousTrailEntry();
   if (!prev) return null;
+  const label = prev.step === "back" ? "上一个对话" : "回到刚才";
   const node = button(
     "",
     () => {
       const target = previousTrailEntry();
       if (!target) return;
-      // 先把指针挪回去：目标页渲染时轨迹命中同一项，不会再往后追加。
-      trailIndex -= 1;
+      // 先把指针挪到目标上：那一页渲染时轨迹命中同一项，不会再往后追加。
+      trailIndex += target.step === "back" ? -1 : 1;
       location.hash = target.hash;
     },
     "btn ghost small prev-session-btn",
   );
-  node.append(icon("swap"), el("span", { className: "prev-session-label", text: "上一个对话" }));
-  node.setAttribute("aria-label", `返回上一个对话：${prev.title}`);
-  node.title = `返回上一个对话：${prev.title}`;
+  node.append(icon("swap"), el("span", { className: "prev-session-label", text: label }));
+  node.setAttribute("aria-label", `${label}：${prev.title}`);
+  node.title = `${label}：${prev.title}`;
   return node;
 }
 
