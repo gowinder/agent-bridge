@@ -21,7 +21,8 @@ import type {
   TransferCommitResult,
   TransferPrepareResult,
 } from "@craftstead/protocol";
-import { HostedSessionManager } from "../hosted/manager.js";
+import { HostedSessionManager, MAX_TITLE_CHARS } from "../hosted/manager.js";
+import type { Store } from "../store.js";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
@@ -47,17 +48,23 @@ interface PreparedTransfer {
 
 export class SessionAdapters {
   private readonly hostedManager = new HostedSessionManager();
-  private readonly adapters: SessionAdapter[] = [
-    new ClaudeCodeAdapter(),
-    new ClaudeCodeCliAdapter(),
-    new CodexAdapter(),
-    new CodexCliAdapter(),
-    new AntigravityAdapter(),
-    new AntigravityDesktopAdapter(),
-    new DshAdapter(),
-    new HostedAdapter(this.hostedManager),
-  ];
+  private readonly store: Store;
+  private readonly adapters: SessionAdapter[];
   private readonly transfers = new Map<string, PreparedTransfer>();
+
+  constructor(store: Store) {
+    this.store = store;
+    this.adapters = [
+      new ClaudeCodeAdapter(),
+      new ClaudeCodeCliAdapter(),
+      new CodexAdapter(),
+      new CodexCliAdapter(),
+      new AntigravityAdapter(),
+      new AntigravityDesktopAdapter(),
+      new DshAdapter(),
+      new HostedAdapter(this.hostedManager),
+    ];
+  }
 
   hostedDirs(): HostedDirsResult {
     return this.hostedManager.configForClient();
@@ -124,7 +131,7 @@ export class SessionAdapters {
       if (app.capabilities.enumerate !== "complete") {
         completeness = demote(completeness, app.capabilities.enumerate === "unknown" ? "unknown" : "partial");
       }
-      collected.push(...sessions);
+      collected.push(...sessions.map((session) => this.applyTitle(session, adapter.key)));
     }
     collected.sort((a, b) => b.updatedAt - a.updatedAt);
     const result: SessionListResult = {
@@ -143,7 +150,25 @@ export class SessionAdapters {
     const adapter = this.adapterFor(sessionId);
     const session = await adapter.session(sessionId);
     if (!session) throw new RpcError("not_found", "未知会话");
-    return { session };
+    return { session: this.applyTitle(session, adapter.key) };
+  }
+
+  /**
+   * 改显示名。Bridge 托管的会话直接改托管记录；其它来源只保存 Bridge 侧覆盖，
+   * 不动源应用里的标题，返回值同时带上原名。
+   */
+  async rename(sessionId: string, rawTitle: string | null): Promise<SessionGetResult> {
+    const adapter = this.adapterFor(sessionId);
+    const session = await adapter.session(sessionId);
+    if (!session) throw new RpcError("not_found", "未知会话");
+    const title = (rawTitle ?? "").trim().slice(0, MAX_TITLE_CHARS);
+    if (adapter.key === "hosted") {
+      if (!title) throw new RpcError("invalid_params", "标题不能为空");
+      return { session: this.hostedManager.rename(sessionId, title) };
+    }
+    if (!title) this.store.clearSessionTitle(adapter.key, sessionId);
+    else this.store.setSessionTitle(adapter.key, sessionId, title);
+    return { session: this.applyTitle(session, adapter.key) };
   }
 
   async messages(sessionId: string, params: { limit?: number; before?: string }): Promise<MessageListResult> {
@@ -312,6 +337,16 @@ export class SessionAdapters {
     const adapter = this.adapters.find((item) => item.key === key);
     if (!adapter) throw new RpcError("not_found", "未知会话来源");
     return adapter;
+  }
+
+  /**
+   * 有 Bridge 侧覆盖名时替换 title 并保留原名，否则原样返回。
+   * 覆盖名按 adapter key 存（rename 写入时用的也是它），读也必须用同一把 key。
+   */
+  private applyTitle(session: SessionSummary, adapterKey: string): SessionSummary {
+    const override = this.store.sessionTitle(adapterKey, session.sessionId);
+    if (override === null) return session;
+    return { ...session, title: override, originalTitle: session.title };
   }
 }
 

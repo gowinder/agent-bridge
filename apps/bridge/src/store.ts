@@ -101,6 +101,15 @@ export class Store {
          created_at INTEGER NOT NULL
        )`,
     );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS session_titles (
+         app_id TEXT NOT NULL,
+         session_id TEXT NOT NULL,
+         title TEXT NOT NULL,
+         updated_at INTEGER NOT NULL,
+         PRIMARY KEY(app_id, session_id)
+       )`,
+    );
   }
 
   meta(key: string): string | null {
@@ -253,6 +262,32 @@ export class Store {
 
   clearExpiredInvites(now = Date.now()): void {
     this.db.prepare("DELETE FROM invites WHERE expires_at < ?").run(now - 24 * 3600 * 1000);
+  }
+
+  /** Bridge 侧给非托管会话设置的显示名；没有覆盖时返回 null。 */
+  sessionTitle(appId: string, sessionId: string): string | null {
+    const row = this.db
+      .prepare("SELECT title FROM session_titles WHERE app_id = ? AND session_id = ?")
+      .get(appId, sessionId);
+    return row ? String(row["title"]) : null;
+  }
+
+  setSessionTitle(appId: string, sessionId: string, title: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO session_titles (app_id, session_id, title, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(app_id, session_id) DO UPDATE SET
+           title = excluded.title,
+           updated_at = excluded.updated_at`,
+      )
+      .run(appId, sessionId, title, Date.now());
+  }
+
+  clearSessionTitle(appId: string, sessionId: string): void {
+    this.db
+      .prepare("DELETE FROM session_titles WHERE app_id = ? AND session_id = ?")
+      .run(appId, sessionId);
   }
 
   hostName(): string {
