@@ -104,6 +104,7 @@ export const METHODS = [
   "session.rail",
   "session.models",
   "session.compact",
+  "session.rename",
   "hosted.dirs",
   "hosted.create",
   "hosted.stop",
@@ -417,6 +418,8 @@ export interface SessionSummary {
   projectId: string;
   kind: string;
   title: string;
+  /** 仅当显示名被 Bridge 覆盖时出现，值为源应用里的原标题。 */
+  originalTitle?: string;
   createdAt: number;
   updatedAt: number;
   archived: boolean;
@@ -508,6 +511,16 @@ export interface SessionListResult {
 }
 
 export interface SessionGetResult {
+  session: SessionSummary;
+}
+
+export interface SessionRenameParams {
+  sessionId: string;
+  /** null 或空串 = 清除覆盖，恢复原名 */
+  title: string | null;
+}
+
+export interface SessionRenameResult {
   session: SessionSummary;
 }
 

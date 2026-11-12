@@ -106,6 +106,7 @@ const ACTIVITY_METHODS = new Set([
   "hosted.stop",
   "hosted.resume",
   "session.compact",
+  "session.rename",
   "transfer.commit",
   "device.revoke",
   "device.rename",
@@ -126,6 +127,10 @@ function describeActivity(request: RequestMessage): string | null {
     const command = (stringParam(params, "command") ?? "").trim().split("\n")[0] ?? "";
     if (!command) return "执行命令";
     return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
+  }
+  if (request.method === "session.rename") {
+    const title = (stringParam(params, "title") ?? "").trim();
+    return title ? `重命名会话为「${title.length > 24 ? `${title.slice(0, 24)}…` : title}」${suffix}` : `恢复会话原名${suffix}`;
   }
   return request.method;
 }
@@ -406,6 +411,15 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.compact(sessionId);
+      }
+      case "session.rename": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["title"];
+        if (raw !== null && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "title must be string or null");
+        }
+        return this.options.adapters.rename(sessionId, raw);
       }
       case "hosted.dirs":
         return this.options.adapters.hostedDirs();

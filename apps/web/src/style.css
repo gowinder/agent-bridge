@@ -793,6 +793,11 @@ a.crumb:hover {
   overflow-wrap: anywhere;
 }
 
+/* 手机上头部空间不够时只显示短文案；见 720px 媒体查询。 */
+.create-label-short {
+  display: none;
+}
+
 /* ---------- lists ---------- */
 
 .list {
@@ -867,6 +872,15 @@ a.crumb:hover {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.row-original {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
 }
 
 .row-count {
@@ -3355,8 +3369,25 @@ body.has-file-preview {
   }
 
   /* The meta line already states the reason; the disabled entry would crowd the header. */
-  .create-btn {
+  .create-btn:disabled {
     display: none;
+  }
+
+  .create-label-full {
+    display: none;
+  }
+
+  .create-label-short {
+    display: inline;
+  }
+
+  .view-head {
+    flex-wrap: wrap;
+  }
+
+  /* 工程路径这类长串在窄屏必须能断行，否则 view-head 会把整页撑宽。 */
+  .view-head-main {
+    overflow-wrap: anywhere;
   }
 
   .row {

@@ -294,7 +294,7 @@ async function commandDevtools(args: string[]): Promise<void> {
   try {
     let local: Devtools | null = null;
     const localDevtools = (): Devtools => {
-      local ??= new Devtools(store, new SessionAdapters(), (line) => console.log(line));
+      local ??= new Devtools(store, new SessionAdapters(store), (line) => console.log(line));
       return local;
     };
     const first = args[0];
@@ -386,7 +386,7 @@ async function commandServe(): Promise<void> {
   const noise: Noise = await loadNoiseNode();
   const api = new RelayApi(config.relayUrl, config.roomId, config.bridgeToken);
   store.clearExpiredInvites();
-  const adapters = new SessionAdapters();
+  const adapters = new SessionAdapters(store);
   const uploads = new UploadStore(store.dir);
   const devtools = new Devtools(store, adapters, log);
   const pusher = new Pusher(store, log);

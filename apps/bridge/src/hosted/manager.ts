@@ -33,7 +33,7 @@ import { defaultStateDir } from "../store.js";
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const IDLE_SWEEP_MS = 60_000;
 const MAX_BLOCK_CHARS = 4_000;
-const MAX_TITLE_CHARS = 60;
+export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
 
 export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
@@ -289,6 +289,18 @@ export class HostedSessionManager {
     this.records.set(id, record);
     this.persistRecords();
     this.log(`hosted: created ${id} in ${cwd} (${permissionMode})`);
+    return this.summary(record);
+  }
+
+  /** 改托管会话的标题；空标题视为错误，清除覆盖只针对非托管会话。 */
+  rename(sessionId: string, title: string): SessionSummary {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    const next = title.trim().slice(0, MAX_TITLE_CHARS);
+    if (!next) throw new RpcError("invalid_params", "标题不能为空");
+    record.title = next;
+    record.updatedAt = Date.now();
+    this.persistRecords();
     return this.summary(record);
   }
 

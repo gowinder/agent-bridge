@@ -35,6 +35,7 @@ import type {
   SessionListResult,
   SessionModelsResult,
   SessionRailResult,
+  SessionRenameResult,
   SessionSummary,
   ShellCancelResult,
   ShellEventData,
@@ -1061,6 +1062,89 @@ function passwordDialog(options: {
   });
 }
 
+/**
+ * 重命名会话：Bridge 托管的会话直接改标题，其它来源只保存 Bridge 侧覆盖名，
+ * 因此弹层会同时展示源应用里的原名。
+ */
+function renameSessionSheet(summary: SessionSummary, onSaved: (session: SessionSummary) => void): void {
+  const input = el("input", {
+    className: "input",
+    attrs: { type: "text", maxlength: "60", placeholder: "会话名称" },
+  }) as HTMLInputElement;
+  input.value = summary.title;
+  const error = el("p", { className: "notice error hidden" });
+  const mask = el("div", { className: "sheet-mask" });
+  let busy = false;
+
+  const finish = (): void => {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") finish();
+  };
+  const fail = (message: string): void => {
+    error.textContent = message;
+    error.classList.remove("hidden");
+    busy = false;
+    save.disabled = false;
+  };
+  const submit = async (title: string | null): Promise<void> => {
+    if (busy) return;
+    busy = true;
+    save.disabled = true;
+    try {
+      const result = await call<SessionRenameResult>("session.rename", {
+        sessionId: summary.sessionId,
+        title,
+      });
+      finish();
+      onSaved(result.session);
+    } catch (failure) {
+      fail(messageOf(failure));
+    }
+  };
+  const save = button("保存", () => {
+    void submit(input.value.trim() || null);
+  }, "btn primary");
+  const reset = summary.originalTitle
+    ? button("恢复原名", () => {
+        void submit(null);
+      }, "btn ghost")
+    : null;
+  const cancel = button("取消", finish, "btn secondary");
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") void submit(input.value.trim() || null);
+  });
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask) finish();
+  });
+
+  mask.append(
+    el(
+      "aside",
+      { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": "重命名会话" } },
+      [
+        el("header", { className: "sheet-head" }, [el("h2", { className: "sheet-title", text: "重命名会话" })]),
+        el("label", { className: "field" }, [el("span", { text: "显示名称" }), input]),
+        ...(summary.originalTitle
+          ? [el("p", { className: "sheet-note", text: `原名：${summary.originalTitle}` })]
+          : []),
+        error,
+        el("footer", { className: "sheet-foot" }, [
+          ...(reset ? [el("div", {}, [reset])] : []),
+          el("div", { className: "actions" }, [cancel, save]),
+        ]),
+      ],
+    ),
+  );
+  document.body.append(mask);
+  input.focus();
+  input.select();
+}
+
 function showLocked(device: DeviceMeta): void {
   // 锁屏会替换掉聊天 DOM，旧的恢复闭包和连接状态必须一起丢掉，
   // 否则解锁后会被当成软重连，去恢复已经不存在的界面。
@@ -2008,6 +2092,9 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       ),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title", text: session.title }),
+        ...(session.originalTitle
+          ? [el("span", { className: "row-original", text: `原名：${session.originalTitle}` })]
+          : []),
         el("span", {
           className: "meta",
           text: busy
@@ -2042,6 +2129,14 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(el("li", {}, [row]));
   }
 
+  const createHosted = canCreateHosted ? button("", openCreate, "btn small create-btn") : null;
+  if (createHosted) {
+    createHosted.append(
+      el("span", { className: "create-label-full", text: "新建托管会话" }),
+      el("span", { className: "create-label-short", text: "新建" }),
+    );
+  }
+
   renderShell(
     el("main", { className: "main" }, [
       el("section", { className: "view-head" }, [
@@ -2056,7 +2151,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
               : `${sessions.length} 个会话 · 最近更新在前${createDetail ? " · 无法新建对话" : ""}`,
           }),
         ]),
-        ...(canCreateHosted ? [button("新建托管会话", openCreate, "btn small create-btn")] : []),
+        ...(createHosted ? [createHosted] : []),
         ...(createDetail && !isHosted
           ? [
               el("button", {
@@ -2727,6 +2822,29 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   railToggle.setAttribute("aria-label", "显示会话侧栏");
   railToggle.title = "显示环境、上下文、连接器与后台任务";
 
+  const chatMeta = summary.hosted
+    ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · ${
+        summary.live ? `进程运行中（${summary.permissionMode ?? "manual"}）` : "进程已停止，发送时自动恢复"
+      }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
+    : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`;
+  // Bridge 侧覆盖了显示名时同时展示原名，回源应用里仍能认出这条会话。
+  const rename = button("", () => {
+    renameSessionSheet(summary, (renamed) => {
+      if (snapshot) {
+        snapshot = {
+          ...snapshot,
+          sessions: snapshot.sessions.map((item) =>
+            item.sessionId === renamed.sessionId ? renamed : item,
+          ),
+        };
+      }
+      void renderRoute();
+    });
+  }, "icon-btn rename-btn");
+  rename.append(icon("pencil"));
+  rename.setAttribute("aria-label", "重命名会话");
+  rename.title = "重命名会话";
+
   head.append(
     back,
     el("div", { className: "view-head-main" }, [
@@ -2734,15 +2852,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("h1", { className: "display chat-title", text: summary.title }),
       el("p", {
         className: "meta",
-        text: summary.hosted
-          ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · ${
-              summary.live ? `进程运行中（${summary.permissionMode ?? "manual"}）` : "进程已停止，发送时自动恢复"
-            }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
-          : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`,
+        text: `${chatMeta}${summary.originalTitle ? ` · 原名：${summary.originalTitle}` : ""}`,
       }),
     ]),
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
+      rename,
       ...(summary.hosted ? [hostedControlButton(summary)] : []),
       railToggle,
       headToggle,
