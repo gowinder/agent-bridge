@@ -389,3 +389,36 @@ test("context usage survives a manager restart", (t) => {
     ["500", "1,500", "0", "10"],
   );
 });
+
+test("init reports slash commands without terminal-only entries", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({
+    type: "system",
+    subtype: "init",
+    model: "claude-sonnet-4-5",
+    slash_commands: ["compact", "seo-runbook", "focus", "seo-runbook", "superpowers:brainstorm"],
+    terminal_slash_commands: ["focus"],
+  });
+  assert.deepEqual(h.manager.messagesFor(session.sessionId, { limit: 10 }).slashCommands, [
+    "compact",
+    "seo-runbook",
+    "superpowers:brainstorm",
+  ]);
+});
+
+test("slash commands survive a manager restart", (t) => {
+  const h = harness();
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({
+    type: "system",
+    subtype: "init",
+    model: "claude-sonnet-4-5",
+    slash_commands: ["compact", "design"],
+  });
+  h.manager.dispose();
+  const next = new HostedSessionManager({ stateDir: h.stateDir, spawn: () => new FakeChild() });
+  t.after(() => next.dispose());
+  assert.deepEqual(next.messagesFor(session.sessionId, { limit: 10 }).slashCommands, ["compact", "design"]);
+});

@@ -2767,6 +2767,51 @@ body.has-file-preview {
   display: none;
 }
 
+/* ---------- 斜杠命令与技能提示 ---------- */
+
+.slash-menu {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(100% + 8px);
+  z-index: 30;
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.slash-menu[hidden] {
+  display: none;
+}
+
+.slash-item {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.4;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.slash-item:hover,
+.slash-item.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
 /* ---------- model chip ---------- */
 
 .model-wrap {
