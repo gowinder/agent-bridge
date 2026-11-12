@@ -47,7 +47,7 @@ interface PreparedTransfer {
 }
 
 export class SessionAdapters {
-  private readonly hostedManager = new HostedSessionManager();
+  private readonly hostedManager = new HostedSessionManager({ log: (line) => console.log(line) });
   private readonly store: Store;
   private readonly adapters: SessionAdapter[];
   private readonly transfers = new Map<string, PreparedTransfer>();
