@@ -13,6 +13,12 @@ export interface DeviceRecord {
   lastSeenAt: number | null;
 }
 
+/** 菜单栏「最近操作日志」的一条记录。 */
+export interface DeviceEventRecord {
+  at: number;
+  line: string;
+}
+
 export interface InviteRecord {
   id: string;
   token: string;
@@ -74,6 +80,17 @@ export class Store {
          expires_at INTEGER NOT NULL,
          used_at INTEGER
        )`,
+    );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS device_events (
+         id INTEGER PRIMARY KEY AUTOINCREMENT,
+         device_id TEXT NOT NULL,
+         at INTEGER NOT NULL,
+         line TEXT NOT NULL
+       )`,
+    );
+    this.db.exec(
+      "CREATE INDEX IF NOT EXISTS device_events_device ON device_events (device_id, id DESC)",
     );
     this.db.exec(
       `CREATE TABLE IF NOT EXISTS push_subscriptions (
@@ -150,6 +167,28 @@ export class Store {
 
   revokeDevice(id: string): void {
     this.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), id);
+  }
+
+  /** 每台设备只保留最近 `keep` 条，插入时顺手删掉更早的，菜单栏不用翻全量历史。 */
+  recordDeviceEvent(deviceId: string, line: string, keep = 200): void {
+    this.db
+      .prepare("INSERT INTO device_events (device_id, at, line) VALUES (?, ?, ?)")
+      .run(deviceId, Date.now(), line);
+    this.db
+      .prepare(
+        `DELETE FROM device_events WHERE device_id = ? AND id NOT IN (
+           SELECT id FROM device_events WHERE device_id = ? ORDER BY id DESC LIMIT ?
+         )`,
+      )
+      .run(deviceId, deviceId, keep);
+  }
+
+  /** 最新的在最前面。 */
+  deviceEvents(deviceId: string, limit = 200): DeviceEventRecord[] {
+    return this.db
+      .prepare("SELECT at, line FROM device_events WHERE device_id = ? ORDER BY id DESC LIMIT ?")
+      .all(deviceId, limit)
+      .map((row) => ({ at: Number(row["at"]), line: String(row["line"]) }));
   }
 
   saveInvite(invite: InviteRecord): void {

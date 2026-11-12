@@ -47,6 +47,8 @@ interface SessionOptions {
   channel: string;
   send: (frame: Uint8Array) => void;
   log: (line: string) => void;
+  /** 只有会改变状态或内容的请求才会走到这里，供菜单栏的「最近操作日志」记录。 */
+  activity?: (line: string) => void;
   close: () => void;
 }
 
@@ -89,6 +91,43 @@ function stringParam(params: Record<string, unknown>, name: string): string | un
 function numberParam(params: Record<string, unknown>, name: string): number | undefined {
   const value = params[name];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * 读接口（session.list、message.list、fs.* 等）每隔几秒就被轮询一次，记进操作日志
+ * 只会把真正做过的操作冲掉，所以只挑会改变状态或内容的请求。
+ */
+const ACTIVITY_METHODS = new Set([
+  "message.send",
+  "shell.exec",
+  "shell.cancel",
+  "file.upload.finish",
+  "hosted.create",
+  "hosted.stop",
+  "hosted.resume",
+  "session.compact",
+  "transfer.commit",
+  "device.revoke",
+  "device.rename",
+]);
+
+/** 把一次请求压缩成一行给人看的操作记录；不关心的请求返回 null。 */
+function describeActivity(request: RequestMessage): string | null {
+  if (!ACTIVITY_METHODS.has(request.method)) return null;
+  const params = isObject(request.params) ? request.params : {};
+  const sessionId = stringParam(params, "sessionId");
+  const suffix = sessionId ? `（会话 ${sessionId.slice(0, 8)}）` : "";
+  if (request.method === "message.send") {
+    const text = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
+    if (!text) return `发送附件${suffix}`;
+    return `发送消息「${text.length > 24 ? `${text.slice(0, 24)}…` : text}」${suffix}`;
+  }
+  if (request.method === "shell.exec") {
+    const command = (stringParam(params, "command") ?? "").trim().split("\n")[0] ?? "";
+    if (!command) return "执行命令";
+    return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
+  }
+  return request.method;
 }
 
 function composeMessage(text: string, attachments: MessageAttachment[]): string {
@@ -286,17 +325,21 @@ export class DeviceSession implements ChannelSession {
 
   private async handleRequest(request: RequestMessage): Promise<void> {
     let response: ResponseMessage;
+    const activity = describeActivity(request);
+    if (activity) this.options.activity?.(activity);
     try {
       response = { v: 1, kind: "response", id: request.id, ok: true, result: await this.dispatch(request) };
     } catch (error) {
+      const message = error instanceof RpcError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : "internal error";
+      if (activity) this.options.activity?.(`${request.method} 失败：${message}`);
       if (error instanceof RpcError) {
         response = errorResponse(request.id, error.code, error.message);
       } else {
-        response = errorResponse(
-          request.id,
-          "internal",
-          error instanceof Error ? error.message : "internal error",
-        );
+        response = errorResponse(request.id, "internal", message);
       }
     }
     this.respond(response);

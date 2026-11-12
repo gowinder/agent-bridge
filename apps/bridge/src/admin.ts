@@ -19,6 +19,8 @@ export interface AdminDevice {
   revokedAt: number | null;
   lastSeenAt: number | null;
   online: boolean;
+  /** 最近操作日志，最新的在最前面。 */
+  log: string[];
 }
 
 export interface AdminConnection {
@@ -56,6 +58,8 @@ export interface AdminActions {
   snapshot(): Promise<AdminSnapshot>;
   disconnectDevice(deviceId: string): Promise<{ closed: number }>;
   revokeDevice(deviceId: string): Promise<{ closed: number }>;
+  disconnectAll(): Promise<{ closed: number }>;
+  revokeAll(): Promise<{ revoked: number; closed: number; failed: string[] }>;
   createInvite(ttlSeconds: number): Promise<{ url: string; expiresAt: number }>;
   setDevtools(
     capability: DevtoolsCapabilityName,
@@ -173,6 +177,14 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           const enabled = body["enabled"] === true;
           const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : null;
           send(response, 200, await actions.setDevtools(capability, enabled, ttl));
+          return;
+        }
+        if (path === "/devices/disconnect-all" && request.method === "POST") {
+          send(response, 200, await actions.disconnectAll());
+          return;
+        }
+        if (path === "/devices/revoke-all" && request.method === "POST") {
+          send(response, 200, await actions.revokeAll());
           return;
         }
         const action = /^\/devices\/([A-Za-z0-9_-]{8,64})\/(disconnect|revoke)$/.exec(path);

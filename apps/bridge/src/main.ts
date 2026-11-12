@@ -368,6 +368,18 @@ function log(line: string): void {
   console.log(`[${new Date().toLocaleTimeString()}] ${line}`);
 }
 
+/** 菜单栏里的一天以内只显示时分，跨天的补上日期。 */
+function formatDeviceEvent(at: number, line: string): string {
+  const date = new Date(at);
+  const now = new Date();
+  const time = date.toLocaleTimeString("zh-CN", { hour12: false });
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  return sameDay ? `[${time}] ${line}` : `[${date.getMonth() + 1}-${date.getDate()} ${time}] ${line}`;
+}
+
 async function commandServe(): Promise<void> {
   const store = new Store();
   const config = requireConfig(store);
@@ -408,6 +420,16 @@ async function commandServe(): Promise<void> {
     return closed;
   };
 
+  /** 菜单栏的每设备操作日志；存在本地库里，Bridge 重启后还在。 */
+  const recordEvent = (deviceId: string, line: string): void => {
+    try {
+      store.recordDeviceEvent(deviceId, line);
+    } catch (error) {
+      // 写日志失败不能连累设备通道本身。
+      log(`操作日志写入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
   const adminActions: AdminActions = {
     async snapshot() {
       const devtoolsStatus = devtools.status();
@@ -427,6 +449,9 @@ async function commandServe(): Promise<void> {
           revokedAt: device.revokedAt,
           lastSeenAt: device.lastSeenAt,
           online: online.has(device.deviceId),
+          log: store
+            .deviceEvents(device.deviceId)
+            .map((event) => formatDeviceEvent(event.at, event.line)),
         }));
       } catch (cause) {
         error = cause instanceof Error ? cause.message : String(cause);
@@ -454,12 +479,42 @@ async function commandServe(): Promise<void> {
       };
     },
     async disconnectDevice(deviceId: string) {
-      return { closed: dropDevice(deviceId) };
+      const closed = dropDevice(deviceId);
+      if (closed > 0) recordEvent(deviceId, "已从菜单断开连接");
+      return { closed };
     },
     async revokeDevice(deviceId: string) {
       await api.revokeDevice(deviceId);
       store.revokeDevice(deviceId);
+      recordEvent(deviceId, "证书已作废（从菜单）");
       return { closed: dropDevice(deviceId) };
+    },
+    async disconnectAll() {
+      let closed = 0;
+      for (const entry of [...sessions.values()]) {
+        if (entry.deviceId) recordEvent(entry.deviceId, "已断开全部连接（从菜单）");
+        entry.session.dispose();
+        closed += 1;
+      }
+      return { closed };
+    },
+    async revokeAll() {
+      const pending = store.devices().filter((device) => device.revokedAt === null);
+      const failed: string[] = [];
+      let revoked = 0;
+      let closed = 0;
+      for (const device of pending) {
+        try {
+          await api.revokeDevice(device.id);
+          store.revokeDevice(device.id);
+          recordEvent(device.id, "证书已作废（从菜单全部作废）");
+          closed += dropDevice(device.id);
+          revoked += 1;
+        } catch (error) {
+          failed.push(`${device.name}：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      return { revoked, closed, failed };
     },
     async createInvite(ttlSeconds: number) {
       return mintInvite(api, store, config, ttlSeconds);
@@ -548,7 +603,11 @@ async function commandServe(): Promise<void> {
           roomId: config.roomId,
           channel: message.channel,
           send,
-          log,
+          log: (line) => {
+            log(line);
+            recordEvent(device.id, line);
+          },
+          activity: (line) => recordEvent(device.id, line),
           close,
           device,
           api,
@@ -566,7 +625,10 @@ async function commandServe(): Promise<void> {
       });
     },
     onChannelClose(channel) {
-      sessions.get(channel)?.session.dispose();
+      const entry = sessions.get(channel);
+      if (!entry) return;
+      if (entry.deviceId) recordEvent(entry.deviceId, "连接断开");
+      entry.session.dispose();
       sessions.delete(channel);
     },
     onPeerState() {
