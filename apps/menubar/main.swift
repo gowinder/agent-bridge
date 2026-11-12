@@ -330,6 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastError: String?
     private var bridgeProcess: Process?
     private var bridgeStartedAt: Date?
+    private var autoStartAttempted = false
     private var pairWindow: NSWindow?
     private var pairTimer: Timer?
     private var pairCodeLabel: NSTextField?
@@ -352,7 +353,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
         paint()
-        Task { await refresh() }
+        Task {
+            await refresh()
+            autoStartBridgeIfIdle()
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { await self?.refresh() }
         }
@@ -934,6 +938,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         bridge = BridgeCLI.info()
+        startBridge()
+    }
+
+    /// App 启动时如果已经初始化、Bridge 又没在跑，就直接拉起来，省得每次开机手动点。
+    /// 端口被别的实例占着、找不到 node 或脚本时保持静默，交给菜单里的「启动 Bridge」人工处理。
+    private func autoStartBridgeIfIdle() {
+        guard !autoStartAttempted else { return }
+        autoStartAttempted = true
+        guard !reachable, bridge?.initialized == true, bridgeProcess == nil else { return }
+        guard BridgeCLI.nodePath() != nil, BridgeCLI.scriptPath() != nil else { return }
+        guard !BridgeCLI.adminPortBusy(AdminClient.port) else { return }
         startBridge()
     }
 
