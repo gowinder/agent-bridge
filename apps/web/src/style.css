@@ -317,6 +317,19 @@ a.crumb:hover {
   display: contents;
 }
 
+.prev-session-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 160px;
+  white-space: nowrap;
+}
+
+.prev-session-btn .icon {
+  flex: none;
+  opacity: 0.7;
+}
+
 .recents-btn {
   display: inline-flex;
   align-items: center;
@@ -3340,6 +3353,11 @@ body.has-file-preview {
   .brand-name,
   .craftstead-name,
   .conn {
+    display: none;
+  }
+
+  /* 手机顶栏放不下文字，只留图标，语义由 aria-label 和 title 承担。 */
+  .prev-session-label {
     display: none;
   }
 
