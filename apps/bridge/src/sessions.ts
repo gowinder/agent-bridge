@@ -112,6 +112,7 @@ const ACTIVITY_METHODS = new Set([
   "hosted.interrupt",
   "session.compact",
   "session.rename",
+  "session.create",
   "transfer.commit",
   "device.revoke",
   "device.rename",
@@ -137,6 +138,12 @@ function describeActivity(request: RequestMessage): string | null {
     const path = (stringParam(params, "path") ?? "").trim();
     const verb = request.method === "hosted.addDir" ? "添加" : "移除";
     return path ? `${verb}托管目录「${path}」` : `${verb}托管目录`;
+  }
+  if (request.method === "session.create") {
+    const appId = stringParam(params, "appId") ?? "";
+    const text = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
+    const head = text.length > 24 ? `${text.slice(0, 24)}…` : text;
+    return `在 ${appId} 新建会话${head ? `「${head}」` : ""}`;
   }
   if (request.method === "session.rename") {
     const title = (stringParam(params, "title") ?? "").trim();
@@ -432,6 +439,14 @@ export class DeviceSession implements ChannelSession {
           throw new RpcError("invalid_params", "title must be string or null");
         }
         return this.options.adapters.rename(sessionId, raw);
+      }
+      case "session.create": {
+        const appId = stringParam(params, "appId");
+        const projectId = stringParam(params, "projectId");
+        const text = stringParam(params, "text") ?? "";
+        if (!appId) throw new RpcError("invalid_params", "appId required");
+        if (!projectId) throw new RpcError("invalid_params", "projectId required");
+        return this.options.adapters.createSession({ appId, projectId, text });
       }
       case "hosted.dirs":
         return this.options.adapters.hostedDirs();

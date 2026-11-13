@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-13
+
+### Added
+
+- 桌面客户端（DeepSeek Harness）可以从网页在工程里新建会话：工程页的「新对话」填第一条消息，Bridge 用 `dsh --profile headless` 在该工程目录启动一次运行，新会话随即能在网页继续发送。新增 `session.create`。
+
 ## [0.3.2] - 2026-11-13
 
 ### Fixed
