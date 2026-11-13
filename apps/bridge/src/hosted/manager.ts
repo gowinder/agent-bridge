@@ -48,6 +48,7 @@ import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
+import { piModelCatalog } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
 import { piSubagentTasks } from "./pi-subagents.js";
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
@@ -842,16 +843,18 @@ export class HostedSessionManager {
     if (models.length === 0) {
       result.note = "读不到模型目录（桌面端与 CLI 都没有缓存），只能使用 CLI 默认模型。";
     }
-    // 子代理模型只认 pi 自己报过的模型名：把已有 pi 会话的清单合并起来当选项。
+    // pi 的模型清单：先读 pi 自己的配置（新建时还没有进程可问），再补上跑过的会话报回来的。
     const piModels: ModelOption[] = [];
     const seen = new Set<string>();
+    const addPiModel = (item: ModelOption): void => {
+      if (seen.has(item.id)) return;
+      seen.add(item.id);
+      piModels.push(item);
+    };
+    for (const item of piModelCatalog()) addPiModel(item);
     for (const record of this.records.values()) {
       if (record.agent !== "pi") continue;
-      for (const item of record.piModels ?? []) {
-        if (seen.has(item.id)) continue;
-        seen.add(item.id);
-        piModels.push(item);
-      }
+      for (const item of record.piModels ?? []) addPiModel(item);
     }
     if (piModels.length > 0) result.piModels = piModels;
     return result;

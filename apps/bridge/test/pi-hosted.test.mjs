@@ -318,6 +318,31 @@ test("subagent model is refused for claude sessions and while a turn is running"
   assert.deepEqual(child.signals, []);
 });
 
+test("pi model catalog comes from pi's own config files", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  writeFileSync(
+    join(source, "models.json"),
+    JSON.stringify({ providers: { magpie: { models: [{ id: "group/dsgroup", name: "dsgroup · routing group" }] } } }),
+  );
+  writeFileSync(
+    join(source, "models-store.json"),
+    JSON.stringify({
+      xai: { models: [{ id: "grok-4.7", name: "Grok 4.7" }] },
+      deepseek: { models: [{ id: "deepseek-flash", name: "DeepSeek V4.1 Flash" }] },
+    }),
+  );
+  // 没登录的 provider 不进清单，和 pi 的 get_available_models 一致。
+  writeFileSync(join(source, "auth.json"), JSON.stringify({ deepseek: {} }));
+  withAgentDir(t, source);
+
+  assert.deepEqual(h.manager.options().piModels, [
+    { id: "magpie/group/dsgroup", name: "dsgroup · routing group" },
+    { id: "deepseek/deepseek-flash", name: "DeepSeek V4.1 Flash" },
+  ]);
+});
+
 test("pi background run artifacts become task messages", (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());

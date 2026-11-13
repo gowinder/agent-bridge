@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+## [0.11.0-rc.1] - 2026-11-13
+
+### Added
+
+- 新建 pi 托管会话可以选主模型：选 pi 时多一个「模型」选择框，按 provider 分组列出 pi 认识的模型，留空用 pi 默认。
+- pi 的模型清单改成直接读 pi 自己的配置（`models.json` 的自定义 provider，加上 `models-store.json` 里在 `auth.json` 有登录项的 provider），新建时不用等会话跑过就有清单；跑过的会话上报的模型仍会合并进来。
+
+### Changed
+
+- 「子代理模型」用同一份清单，变成按 provider 分组的选择框；读不到 pi 配置时仍退回手填 `厂商/模型`。
+
 ## [0.10.1-rc.1] - 2026-11-13
 
 ### Changed
