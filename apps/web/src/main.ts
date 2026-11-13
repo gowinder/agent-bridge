@@ -250,6 +250,10 @@ let hostedDraft: {
   mode: string;
   agent: HostedAgent;
   subagentModel: string;
+  /** pi 的思考等级（`--thinking`）；空串表示跟随 pi 设置。 */
+  piThinking: string;
+  /** 子代理的思考等级（`subagents.defaultThinking`）；空串表示跟随 pi 设置。 */
+  subagentThinking: string;
 } | null = null;
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
@@ -2688,6 +2692,8 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         mode: "manual",
         agent: "claude",
         subagentModel: "",
+        piThinking: "",
+        subagentThinking: "",
       };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
@@ -2890,9 +2896,20 @@ function hostedModelLabel(model: string | undefined): string {
 }
 
 function effortLabel(level: string): string {
-  const known: Record<string, string> = { low: "低", medium: "中", high: "高", xhigh: "更高", max: "最高" };
+  const known: Record<string, string> = {
+    off: "关闭",
+    minimal: "最少",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "更高",
+    max: "最高",
+  };
   return known[level] ? `${known[level]}（${level}）` : level;
 }
+
+/** pi 的思考等级：`pi --thinking` 与子代理的 `defaultThinking` 共用这一套取值。 */
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /** 新建托管会话时加的启动参数：列表与勾选状态都记在浏览器本地。 */
 interface HostedArgPref {
@@ -2945,6 +2962,8 @@ function hostedCreatePanel(
     mode: string;
     agent: HostedAgent;
     subagentModel: string;
+    piThinking: string;
+    subagentThinking: string;
   },
 ): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
@@ -2983,6 +3002,25 @@ function hostedCreatePanel(
   subagentModel.value = draft.subagentModel;
   subagentModel.addEventListener("input", () => {
     draft.subagentModel = subagentModel.value;
+  });
+  // pi 的思考等级：主模型用 `--thinking`，子代理写进 settings.json 的 defaultThinking。
+  const piThinking = el("select", { className: "input", attrs: { "aria-label": "pi 思考等级" } });
+  piThinking.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  piThinking.append(
+    ...PI_THINKING_LEVELS.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })),
+  );
+  piThinking.value = draft.piThinking;
+  piThinking.addEventListener("change", () => {
+    draft.piThinking = piThinking.value;
+  });
+  const subagentThinking = el("select", { className: "input", attrs: { "aria-label": "子代理思考等级" } });
+  subagentThinking.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  subagentThinking.append(
+    ...PI_THINKING_LEVELS.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })),
+  );
+  subagentThinking.value = draft.subagentThinking;
+  subagentThinking.addEventListener("change", () => {
+    draft.subagentThinking = subagentThinking.value;
   });
   let piModelList: ModelOption[] = [];
   const optionsHint = el("p", { className: "hint", text: "正在读取本机 CLI 支持的模型与思考程度…" });
@@ -3073,7 +3111,9 @@ function hostedCreatePanel(
       permissionMode,
       ...(chosenModel ? { model: chosenModel } : {}),
       ...(!piSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(piSelected && draft.piThinking.trim() ? { thinking: draft.piThinking.trim() } : {}),
       ...(piSelected && draft.subagentModel.trim() ? { subagentModel: draft.subagentModel.trim() } : {}),
+      ...(piSelected && draft.subagentThinking.trim() ? { subagentThinking: draft.subagentThinking.trim() } : {}),
       ...(extraArgs.length > 0 ? { args: extraArgs } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
@@ -3109,11 +3149,16 @@ function hostedCreatePanel(
   const modeField = el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]);
   const modelField = el("label", { className: "field" }, [el("span", { text: "模型" }), model]);
   const piModelField = el("label", { className: "field" }, [el("span", { text: "模型" }), piModel]);
+  const piThinkingField = el("label", { className: "field" }, [el("span", { text: "思考等级" }), piThinking]);
   const effortField = el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]);
   const subagentField = el("label", { className: "field" }, [
     el("span", { text: "子代理模型（可选）" }),
     subagentSelect,
     subagentModel,
+  ]);
+  const subagentThinkingField = el("label", { className: "field" }, [
+    el("span", { text: "子代理思考等级（可选）" }),
+    subagentThinking,
   ]);
   const subagentHint = el("p", { className: "hint" });
   const argsHint = el("p", { className: "hint" });
@@ -3123,7 +3168,9 @@ function hostedCreatePanel(
     // pi 没有权限模式与思考程度；模型清单也要等它跑过一次才拿得到，选 pi 时一并收起。
     for (const node of [modeField, modeHint, modelField, effortField, effortHint, optionsHint]) node.hidden = pi;
     piModelField.hidden = !pi;
+    piThinkingField.hidden = !pi;
     subagentField.hidden = !pi;
+    subagentThinkingField.hidden = !pi;
     subagentHint.hidden = !pi;
     const useSelect = piModelList.length > 0;
     subagentSelect.hidden = !useSelect;
@@ -3152,10 +3199,12 @@ function hostedCreatePanel(
     modeHint,
     modelField,
     piModelField,
+    piThinkingField,
     effortField,
     effortHint,
     optionsHint,
     subagentField,
+    subagentThinkingField,
     subagentHint,
     el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
     argsHint,

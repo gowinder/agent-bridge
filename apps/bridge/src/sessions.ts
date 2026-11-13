@@ -540,6 +540,8 @@ export class DeviceSession implements ChannelSession {
         const model = stringParam(params, "model");
         const effort = stringParam(params, "effort");
         const subagentModel = stringParam(params, "subagentModel");
+        const thinking = stringParam(params, "thinking");
+        const subagentThinking = stringParam(params, "subagentThinking");
         const rawArgs = params["args"];
         const args = Array.isArray(rawArgs)
           ? rawArgs.filter((item): item is string => typeof item === "string")
@@ -551,6 +553,8 @@ export class DeviceSession implements ChannelSession {
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
           ...(agent === "pi" && subagentModel ? { subagentModel } : {}),
+          ...(agent === "pi" && thinking ? { thinking } : {}),
+          ...(agent === "pi" && subagentThinking ? { subagentThinking } : {}),
           ...(args.length > 0 ? { args } : {}),
           ...(title ? { title } : {}),
         });

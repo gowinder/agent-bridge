@@ -280,6 +280,52 @@ test("pi subagent model gets its own agent dir instead of touching the user's", 
   assert.equal(rail.find((row) => row.label === "子代理模型")?.value, "group/dsgroup");
 });
 
+test("pi thinking levels go to --thinking and the subagent settings", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+
+  const session = h.manager.create({
+    path: h.repo,
+    agent: "pi",
+    model: "deepseek/deepseek-flash",
+    thinking: "High",
+    subagentModel: "group/dsgroup",
+    subagentThinking: "low",
+  });
+  const { args } = h.spawns[0];
+  assert.equal(args[args.indexOf("--thinking") + 1], "high");
+  const settings = JSON.parse(readFileSync(join(h.spawns[0].options.env.PI_CODING_AGENT_DIR, "settings.json"), "utf8"));
+  assert.equal(settings.subagents.defaultModel, "group/dsgroup");
+  assert.equal(settings.subagents.defaultThinking, "low");
+  // 只设思考等级时模型仍沿用用户自己的 settings.json。
+  const onlyThinking = h.manager.create({ path: h.repo, agent: "pi", subagentThinking: "medium" });
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  assert.equal(dir, join(h.stateDir, "pi-agent", onlyThinking.sessionId.replace("hosted:", "")));
+  const copied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(copied.subagents.defaultModel, "a/b");
+  assert.equal(copied.subagents.defaultThinking, "medium");
+
+  const rail = h.manager.rail(session.sessionId).environment;
+  assert.equal(rail.find((row) => row.label === "思考等级")?.value, "high");
+  assert.equal(rail.find((row) => row.label === "子代理思考等级")?.value, "low");
+
+  // 登记表里留着，Bridge 重启后还在。
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.thinking, "high");
+  assert.equal(record.subagentThinking, "low");
+});
+
+test("pi refuses unknown thinking levels", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  assert.throws(() => h.manager.create({ path: h.repo, agent: "pi", thinking: "ultra" }), /思考等级/);
+  assert.throws(() => h.manager.create({ path: h.repo, agent: "pi", subagentThinking: "ultra" }), /思考等级/);
+});
+
 test("changing the subagent model restarts the idle pi process with the new setting", async (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());

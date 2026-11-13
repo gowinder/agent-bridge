@@ -67,6 +67,8 @@ const TRANSCRIPT_TAIL_BYTES = 262_144;
  * 与 `组/子组`（例如 `ncncapi/claude-opus-5-5`、`group/dsgroup`）；不能以 `-` 开头。
  */
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$/;
+/** pi 的思考等级（`pi --thinking` 与 pi-subagents 的 `thinking` 同一套，从低到高）。 */
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
 const MAX_EXTRA_ARGS = 24;
 const MAX_EXTRA_ARG_CHARS = 200;
@@ -187,6 +189,10 @@ interface HostedRecord {
   args?: string[];
   /** pi 会话：新派生的子代理用哪个模型；缺省跟随 pi 自己的设置。 */
   subagentModel?: string;
+  /** pi 会话的思考等级（`--thinking`）；缺省跟随 pi 自己的设置。 */
+  thinking?: string;
+  /** pi 会话：新派生的子代理的思考等级（settings.json 的 `subagents.defaultThinking`）。 */
+  subagentThinking?: string;
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
@@ -568,7 +574,13 @@ export class HostedSessionManager {
               { label: "思考程度", value: record.effort ?? "CLI 默认" },
             ]),
         { label: "模型", value: modelLabel(record) },
-        ...(pi ? [{ label: "子代理模型", value: record.subagentModel ?? "跟随 pi 设置" }] : []),
+        ...(pi
+          ? [
+              { label: "思考等级", value: record.thinking ?? "跟随 pi 设置" },
+              { label: "子代理模型", value: record.subagentModel ?? "跟随 pi 设置" },
+              { label: "子代理思考等级", value: record.subagentThinking ?? "跟随 pi 设置" },
+            ]
+          : []),
         ...(record.args?.length ? [{ label: "启动参数", value: record.args.join(" ") }] : []),
         {
           label: "进程",
@@ -594,6 +606,8 @@ export class HostedSessionManager {
     const model = this.model(params.model);
     const effort = agent === "pi" ? undefined : this.effort(params.effort);
     const subagentModel = agent === "pi" ? this.model(params.subagentModel) : undefined;
+    const thinking = agent === "pi" ? this.thinkingLevel(params.thinking) : undefined;
+    const subagentThinking = agent === "pi" ? this.thinkingLevel(params.subagentThinking) : undefined;
     const extraArgs = this.extraArgs(params.args, agent);
     const now = Date.now();
     const id = randomUUID();
@@ -606,6 +620,8 @@ export class HostedSessionManager {
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
       ...(subagentModel ? { subagentModel } : {}),
+      ...(thinking ? { thinking } : {}),
+      ...(subagentThinking ? { subagentThinking } : {}),
       ...(extraArgs ? { args: extraArgs } : {}),
       createdAt: now,
       updatedAt: now,
@@ -790,8 +806,9 @@ export class HostedSessionManager {
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    if (model) {
-      if (!preparePiAgentDir(agentDir, model)) {
+    // 只改模型时思考等级沿用记录里的值；两个都没设才把目录清掉。
+    if (model || record.subagentThinking) {
+      if (!preparePiAgentDir(agentDir, { model, thinking: record.subagentThinking })) {
         throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理模型没有生效`);
       }
     } else {
@@ -1139,9 +1156,13 @@ export class HostedSessionManager {
       if (slash > 0) args.push("--provider", record.model.slice(0, slash), "--model", record.model.slice(slash + 1));
       else args.push("--model", record.model);
     }
+    if (record.thinking) args.push("--thinking", record.thinking);
     if (record.args?.length) args.push(...record.args);
-    // 子代理模型只认 settings.json：给这个会话单独准备一份 agent 目录，用环境变量指过去。
-    const agentDir = preparePiAgentDir(this.piAgentDirOf(record.id), record.subagentModel);
+    // 子代理模型与思考等级只认 settings.json：给这个会话单独准备一份 agent 目录，用环境变量指过去。
+    const agentDir = preparePiAgentDir(this.piAgentDirOf(record.id), {
+      model: record.subagentModel,
+      thinking: record.subagentThinking,
+    });
     const child = this.spawnProcess(
       binary,
       args,
@@ -1805,6 +1826,16 @@ export class HostedSessionManager {
     return effort;
   }
 
+  /** pi 的思考等级：`--thinking` 与 settings.json 的 `subagents.defaultThinking` 用同一套取值。 */
+  private thinkingLevel(value: string | undefined): string | undefined {
+    const level = value?.trim().toLowerCase();
+    if (!level) return undefined;
+    if (!PI_THINKING_LEVELS.includes(level)) {
+      throw new RpcError("invalid_params", `pi 不支持的思考等级：${value}（可用：${PI_THINKING_LEVELS.join("、")}）`);
+    }
+    return level;
+  }
+
   private touch(record: HostedRecord): void {
     record.lastActiveAt = Date.now();
     record.updatedAt = record.lastActiveAt;
@@ -1894,6 +1925,12 @@ export class HostedSessionManager {
           ...(typeof item["subagentModel"] === "string" && MODEL_PATTERN.test(item["subagentModel"])
             ? { subagentModel: item["subagentModel"] }
             : {}),
+          ...(typeof item["thinking"] === "string" && PI_THINKING_LEVELS.includes(item["thinking"])
+            ? { thinking: item["thinking"] }
+            : {}),
+          ...(typeof item["subagentThinking"] === "string" && PI_THINKING_LEVELS.includes(item["subagentThinking"])
+            ? { subagentThinking: item["subagentThinking"] }
+            : {}),
           ...(Array.isArray(item["args"]) ? { args: sanitizeExtraArgs(item["args"]) } : {}),
           ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
             ? { observedModel: item["observedModel"] }
@@ -1953,6 +1990,8 @@ export class HostedSessionManager {
               ...(record.model ? { model: record.model } : {}),
               ...(record.effort ? { effort: record.effort } : {}),
               ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
+              ...(record.thinking ? { thinking: record.thinking } : {}),
+              ...(record.subagentThinking ? { subagentThinking: record.subagentThinking } : {}),
               ...(record.args?.length ? { args: record.args } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),

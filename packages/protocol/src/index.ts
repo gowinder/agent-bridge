@@ -614,6 +614,10 @@ export interface HostedCreateParams {
   model?: string;
   /** pi only: 新派生的子代理用哪个模型；省略则跟随 pi 自己的设置。 */
   subagentModel?: string;
+  /** pi only: `--thinking` 的等级（off/minimal/low/medium/high/xhigh/max）；省略跟随 pi 设置。 */
+  thinking?: string;
+  /** pi only: 新派生的子代理的思考等级；省略跟随 pi 自己的设置。 */
+  subagentThinking?: string;
   /** Claude Code `--effort` level; omitted uses the CLI default. */
   effort?: string;
   /**

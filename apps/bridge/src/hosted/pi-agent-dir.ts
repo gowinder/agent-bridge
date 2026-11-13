@@ -23,16 +23,23 @@ export function piAgentSourceDir(env: NodeJS.ProcessEnv = process.env): string {
   return configured ? configured : join(homedir(), ".pi", "agent");
 }
 
+/** 子代理在 settings.json 里的覆盖项；都没设时不另建目录。 */
+export interface PiSubagentSettings {
+  model?: string;
+  thinking?: string;
+}
+
 /**
  * 准备这个会话专用的 pi agent 目录，返回要放进 `PI_CODING_AGENT_DIR` 的路径。
- * 没设子代理模型、或读不到用户的 agent 目录时返回 null：不覆盖，pi 用默认目录。
+ * 没设子代理模型与思考等级、或读不到用户的 agent 目录时返回 null：不覆盖，pi 用默认目录。
+ * 只覆盖传进来的项，其余沿用用户 settings.json 里的值（例如只设思考等级时模型仍跟随）。
  */
 export function preparePiAgentDir(
   target: string,
-  subagentModel: string | undefined,
+  options: PiSubagentSettings,
   source: string = piAgentSourceDir(),
 ): string | null {
-  if (!subagentModel) return null;
+  if (!options.model && !options.thinking) return null;
   // 指向自己就别动，否则会把真实目录清空。
   if (resolve(target) === resolve(source)) return null;
   let entries: string[];
@@ -66,7 +73,8 @@ export function preparePiAgentDir(
     typeof settings["subagents"] === "object" && settings["subagents"] !== null && !Array.isArray(settings["subagents"])
       ? { ...(settings["subagents"] as Record<string, unknown>) }
       : {};
-  subagents["defaultModel"] = subagentModel;
+  if (options.model) subagents["defaultModel"] = options.model;
+  if (options.thinking) subagents["defaultThinking"] = options.thinking;
   settings["subagents"] = subagents;
   try {
     writeFileSync(join(target, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
