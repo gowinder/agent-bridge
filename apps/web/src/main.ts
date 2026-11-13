@@ -3106,6 +3106,18 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   });
   input.value = draftFor(summary.sessionId);
 
+  // 截图直接粘贴：把剪贴板里的图片文件交给现有上传流程，文本粘贴保持原样。
+  input.addEventListener("paste", (event) => {
+    const items = [...(event.clipboardData?.items ?? [])];
+    const files = items
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addFiles(files);
+  });
+
   const slashMenu = el("div", { className: "slash-menu" });
   slashMenu.hidden = true;
   let slashItems: string[] = [];
@@ -3546,7 +3558,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   });
   void loadModels();
 
-  const collapsed = window.matchMedia("(max-width: 720px)").matches;
+  // 桌面端也默认收起，把高度让给聊天记录；需要时点「展开」。
+  const collapsed = true;
   const head = el("section", { className: `view-head chat-head${collapsed ? " is-collapsed" : ""}` });
   const headToggle = button("", () => {
     const isCollapsed = head.classList.toggle("is-collapsed");
