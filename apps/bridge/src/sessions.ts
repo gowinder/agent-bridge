@@ -57,6 +57,8 @@ export interface PairingOptions extends SessionOptions {
   api: RelayApi;
   store: Store;
   hostName: string;
+  /** Bridge 自身版本，配对与 host.info 都会原样报给客户端。 */
+  version: string;
   deviceTtlSeconds: number | null;
   /** The code the user must see on both screens; shown in the menu bar while pairing. */
   onConfirmCode?: (code: string) => void;
@@ -243,7 +245,7 @@ export class PairingSession implements ChannelSession {
       confirmCode: this.expectedCode,
       bridge: {
         name: this.options.hostName,
-        version: "0.1.0",
+        version: this.options.version,
         platform: `${process.platform} ${process.arch}`,
       },
     };
@@ -277,6 +279,8 @@ export interface DeviceSessionOptions extends SessionOptions {
   api: RelayApi;
   store: Store;
   hostName: string;
+  /** Bridge 自身版本，配对与 host.info 都会原样报给客户端。 */
+  version: string;
   adapters: SessionAdapters;
   uploads: UploadStore;
   devtools: Devtools;
@@ -357,7 +361,7 @@ export class DeviceSession implements ChannelSession {
       case "host.info": {
         const info: HostInfoResult = {
           name: this.options.hostName,
-          version: "0.1.0",
+          version: this.options.version,
           platform: `${process.platform} ${process.arch}`,
           adapters: this.options.adapters.hostAdapters(),
           devtools: this.options.devtools.status(),
