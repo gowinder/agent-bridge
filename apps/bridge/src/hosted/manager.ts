@@ -39,6 +39,7 @@ import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js
 import { effortLevels } from "../effort.js";
 import { modelCatalog } from "../model-catalog.js";
 import { defaultStateDir } from "../store.js";
+import { SessiondBridge } from "./sessiond/bridge.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const IDLE_SWEEP_MS = 60_000;
@@ -110,6 +111,10 @@ interface HostedRecord {
   pendingText?: string;
   /** 已经自动续跑过几次：反复中断的会话不能无限重启。 */
   resumeAttempts?: number;
+  /** sessiond 已经处理到的 stdout 序号；重连时从这里之后补齐断线输出。 */
+  stdoutSeq?: number;
+  /** 最后一条还没应答的权限请求原始行：Bridge 重连后重新投给解析流程。 */
+  pendingLine?: string;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -152,7 +157,7 @@ export interface HostedChild {
 export type HostedSpawn = (
   command: string,
   args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv },
+  options: { cwd: string; env: NodeJS.ProcessEnv; sessionId: string },
 ) => HostedChild;
 
 export interface HostedManagerOptions {
@@ -172,24 +177,48 @@ export interface HostedManagerOptions {
  */
 export class HostedSessionManager {
   private readonly stateDir: string;
-  private readonly spawnFn: HostedSpawn;
+  /** 注入的 spawn 只给测试用；为 null 时走 sessiond。 */
+  private readonly spawnFn: HostedSpawn | null;
+  private readonly sessiond: SessiondBridge | null;
   private readonly log: (line: string) => void;
   private config: HostedConfig;
   private readonly records = new Map<string, HostedRecord>();
   private readonly messages = new Map<string, MessageRecord[]>();
   private readonly live = new Map<string, LiveProcess>();
   private sweeper: NodeJS.Timeout | null = null;
-  private readonly exitHandler = (): void => this.stopAll();
+  /** stdout 很密，注册表最多两秒写一次。 */
+  private lastPersistAt = 0;
+  // Bridge 退出只断开 sessiond 连接：子进程继续由守护进程持有，重启后 attach 接上。
+  private readonly exitHandler = (): void => {
+    this.sessiond?.close();
+  };
 
   constructor(options: HostedManagerOptions = {}) {
     this.stateDir = options.stateDir ?? defaultStateDir();
-    this.spawnFn = options.spawn ?? (nodeSpawn as unknown as HostedSpawn);
     this.log = options.log ?? (() => undefined);
+    this.spawnFn = options.spawn ?? null;
+    // 默认把进程交给 sessiond；显式注入 spawn 时完全不碰守护进程。
+    this.sessiond = this.spawnFn
+      ? null
+      : new SessiondBridge(this.stateDir, {
+          log: this.log,
+          // 守护进程起不来时退回原来的本机 spawn，托管不能整体不可用。
+          fallback: (command, args, spawnOptions) =>
+            (nodeSpawn as unknown as HostedSpawn)(command, args, {
+              cwd: spawnOptions.cwd,
+              env: process.env,
+              sessionId: spawnOptions.sessionId,
+            }),
+        });
     this.config = readConfig(this.stateDir);
     this.loadRecords();
+    // 只恢复启动瞬间就存在的未完成轮次：recover 是异步的，期间新建/刚发出的会话不能被重放。
+    const interrupted = new Set(
+      [...this.records.values()].filter((record) => record.pendingText).map((record) => record.id),
+    );
     this.backfillContext();
-    // 上次 Bridge 退出时正在跑的那一轮已经随子进程一起断了，启动后接着跑。
-    this.resumeInterrupted();
+    // 先向 sessiond 要回还在跑的会话，再让旧的 --resume 兜底处理剩下的。
+    void this.recover(interrupted);
     this.sweeper = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
     this.sweeper.unref();
     process.once("exit", this.exitHandler);
@@ -506,12 +535,13 @@ export class HostedSessionManager {
     }
     // 停在没有回答的批准请求上时，先拒绝它，否则这一轮还在等输入。
     if (live.pending) {
-      this.respondControl(live, live.pending.requestId, {
+      this.respondControl(record, live, live.pending.requestId, {
         behavior: "deny",
         message: "用户停止了当前回合",
       });
       live.pending = null;
     }
+    record.pendingLine = undefined;
     live.child.stdin?.write(
       `${JSON.stringify({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } })}\n`,
     );
@@ -554,7 +584,7 @@ export class HostedSessionManager {
         return { accepted: true, delivered: true, detail: "已答复待批准的操作" };
       }
       // Not an answer to the prompt: deny it and deliver the text as a user turn.
-      this.respondControl(live, live.pending.requestId, {
+      this.respondControl(record, live, live.pending.requestId, {
         behavior: "deny",
         message: "用户没有批准这次调用，改为直接回复",
       });
@@ -570,9 +600,64 @@ export class HostedSessionManager {
     return { accepted: true, delivered: true };
   }
 
+  /**
+   * Bridge 重启后的恢复：sessiond 还活着的会话直接 attach 回去，补上断线期间的输出，
+   * 并把没应答的权限请求重新挂上；sessiond 里没有的会话再退回 --resume 重放。
+   */
+  private async recover(interrupted: ReadonlySet<string>): Promise<void> {
+    const sessiond = this.sessiond;
+    if (!sessiond) {
+      this.resumeInterrupted(interrupted);
+      return;
+    }
+    try {
+      await sessiond.ensure();
+      const infos = await sessiond.list();
+      const running = new Set(infos.filter((info) => info.running).map((info) => info.sessionId));
+      for (const record of this.records.values()) {
+        if (!running.has(record.id) || this.live.has(record.id)) continue;
+        const result = await sessiond.attach(record.id, record.stdoutSeq ?? 0);
+        const child = sessiond.remoteChild(record.id);
+        if (!result.running || !child) continue;
+        const live = this.track(record, child, true, this.cliBinary());
+        if (result.gap) {
+          this.appendRecord(record, {
+            messageId: randomUUID(),
+            sessionId: record.id,
+            role: "system",
+            createdAt: Date.now(),
+            blocks: [{ type: "text", text: "Bridge 重启期间会话输出过多，中间一段已丢弃" }],
+          });
+        }
+        // 先喂 backlog，再放行持有的事件：两者按 seq 顺序进入同一条解析缓冲。
+        for (const chunk of result.backlog) this.onStdout(record, live, chunk.data, chunk.seq);
+        child.release();
+        // 这一轮还没收尾：保持 busy，否则 sweepIdle 会把正在跑的进程当空闲杀掉。
+        if (record.pendingText) live.busy = true;
+        // 重投没有应答的权限请求；存的原始行没有换行，补上才能进解析缓冲。
+        const pending = record.pendingLine;
+        if (pending && !live.finished) {
+          this.onStdout(record, live, `${pending}\n`);
+          live.busy = true;
+        }
+        this.log(
+          `hosted: reattached ${record.id} (backlog ${result.backlog.length}, gap=${result.gap})`,
+        );
+      }
+    } catch (error) {
+      // 守护进程没起来或协议出错：退回原来的 --resume 兜底，不能把 Bridge 卡死。
+      this.log(`hosted: sessiond recover failed: ${String(error)}`);
+    }
+    this.resumeInterrupted(interrupted);
+  }
+
   /** Bridge 重启时子进程会被一起杀掉，已写入但没等到 result 的那一轮只能靠 --resume 重放。 */
-  private resumeInterrupted(): void {
-    for (const record of this.records.values()) {
+  private resumeInterrupted(interrupted: ReadonlySet<string>): void {
+    for (const id of interrupted) {
+      const record = this.records.get(id);
+      if (!record) continue;
+      // sessiond 里还活着的会话已经 attach 回来了，不能再起第二个进程。
+      if (this.live.has(record.id)) continue;
       const text = record.pendingText;
       if (!text) continue;
       const attempts = record.resumeAttempts ?? 0;
@@ -624,6 +709,7 @@ export class HostedSessionManager {
     this.sweeper = null;
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
+    this.sessiond?.close();
   }
 
   private start(record: HostedRecord, resume: boolean): void {
@@ -649,7 +735,19 @@ export class HostedSessionManager {
     // 恢复也要带上同一个模型与思考程度，否则续写会悄悄换回 CLI 默认值。
     if (record.model) args.push("--model", record.model);
     if (record.effort) args.push("--effort", record.effort);
-    const child = this.spawnFn(cli, args, { cwd: record.cwd, env: process.env });
+    const child = this.spawnProcess(cli, args, record.cwd, record.id);
+    this.track(record, child, resume, cli);
+  }
+
+  /** 默认交给 sessiond 持有；注入 spawn 的测试和守护进程不可用时走本机。 */
+  private spawnProcess(command: string, args: string[], cwd: string, sessionId: string): HostedChild {
+    if (this.spawnFn) return this.spawnFn(command, args, { cwd, env: process.env, sessionId });
+    if (this.sessiond) return this.sessiond.spawnChild(command, args, { cwd, sessionId });
+    return nodeSpawn(command, args, { cwd, env: process.env }) as unknown as HostedChild;
+  }
+
+  /** 把子进程挂进 live 表并接好事件；新建与重连共用同一套退出/错误处理。 */
+  private track(record: HostedRecord, child: HostedChild, resume: boolean, cli: string): LiveProcess {
     const live: LiveProcess = {
       child,
       buffer: "",
@@ -661,7 +759,10 @@ export class HostedSessionManager {
     };
     this.live.set(record.id, live);
     child.stdout?.setEncoding?.("utf8");
-    child.stdout?.on("data", (chunk: string | Buffer) => this.onStdout(record, live, String(chunk)));
+    // RemoteChild 会把 sessiond 的 seq 作为第二个参数带上，用来推进 ack。
+    child.stdout?.on("data", (chunk: string | Buffer, seq?: number) =>
+      this.onStdout(record, live, String(chunk), seq),
+    );
     child.stderr?.setEncoding?.("utf8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
       const line = String(chunk).trim();
@@ -719,9 +820,10 @@ export class HostedSessionManager {
       });
       this.touch(record);
     });
+    return live;
   }
 
-  private onStdout(record: HostedRecord, live: LiveProcess, chunk: string): void {
+  private onStdout(record: HostedRecord, live: LiveProcess, chunk: string, seq?: number): void {
     live.buffer += chunk;
     let index = live.buffer.indexOf("\n");
     while (index >= 0) {
@@ -736,11 +838,25 @@ export class HostedSessionManager {
         continue;
       }
       if (!isRecord(payload)) continue;
-      this.handleEvent(record, live, payload);
+      this.handleEvent(record, live, payload, line);
+    }
+    if (seq !== undefined) {
+      record.stdoutSeq = seq;
+      this.sessiond?.ack(record.id, seq);
+      // 输出很密：两秒内合并成一次写盘，重启时最多重放这一小段。
+      if (Date.now() - this.lastPersistAt > 2_000) {
+        this.lastPersistAt = Date.now();
+        this.persistRecords();
+      }
     }
   }
 
-  private handleEvent(record: HostedRecord, live: LiveProcess, event: Record<string, unknown>): void {
+  private handleEvent(
+    record: HostedRecord,
+    live: LiveProcess,
+    event: Record<string, unknown>,
+    line: string,
+  ): void {
     const type = event["type"];
     if (type === "assistant") {
       const message = isRecord(event["message"]) ? event["message"] : {};
@@ -781,6 +897,13 @@ export class HostedSessionManager {
       const questions = toolName === "AskUserQuestion" ? questionsFromInput(input) : undefined;
       live.pending = { requestId, toolName, input, ...(questions ? { questions } : {}) };
       live.busy = true;
+      // 重连后重投的是同一条待批准请求：transcript 里那一条还在，不再追加一份。
+      const replay = record.pendingLine === line && this.alreadyAsked(record, toolName);
+      record.pendingLine = line;
+      if (replay) {
+        this.touch(record);
+        return;
+      }
       const block = questions
         ? ({
             type: "ask",
@@ -838,6 +961,7 @@ export class HostedSessionManager {
     if (type === "result") {
       live.busy = false;
       live.pending = null;
+      record.pendingLine = undefined;
       // 这一轮正常收尾：不再需要续跑，配额也清零给下一轮用。
       record.pendingText = undefined;
       record.resumeAttempts = 0;
@@ -859,12 +983,24 @@ export class HostedSessionManager {
     }
   }
 
+  /** 重投的权限请求是否已经在 transcript 末尾留过一条待批准消息（避免重启后重复追加）。 */
+  private alreadyAsked(record: HostedRecord, toolName: string): boolean {
+    const list = this.messagesOf(record.id);
+    const last = list[list.length - 1];
+    if (!last) return false;
+    return last.blocks.some(
+      (block) =>
+        block.type === "ask" ||
+        (block.type === "next-step" && (block.ask ?? block.text).includes(toolName)),
+    );
+  }
+
   private answerPermission(record: HostedRecord, live: LiveProcess, text: string): boolean {
     const pending = live.pending;
     if (!pending) return false;
     if (pending.questions && pending.questions.length > 0) {
       const answers = answersFromText(text, pending.questions);
-      this.respondControl(live, pending.requestId, {
+      this.respondControl(record, live, pending.requestId, {
         behavior: "allow",
         updatedInput: { ...pending.input, answers },
       });
@@ -875,14 +1011,14 @@ export class HostedSessionManager {
     }
     const trimmed = text.trim();
     if (/^(允许|批准|同意|可以|allow|yes|y)$/i.test(trimmed)) {
-      this.respondControl(live, pending.requestId, { behavior: "allow", updatedInput: pending.input });
+      this.respondControl(record, live, pending.requestId, { behavior: "allow", updatedInput: pending.input });
       live.pending = null;
       live.busy = true;
       this.touch(record);
       return true;
     }
     if (/^(拒绝|不允许|不同意|deny|no|n)$/i.test(trimmed)) {
-      this.respondControl(live, pending.requestId, { behavior: "deny", message: "用户拒绝" });
+      this.respondControl(record, live, pending.requestId, { behavior: "deny", message: "用户拒绝" });
       live.pending = null;
       live.busy = false;
       this.touch(record);
@@ -891,7 +1027,14 @@ export class HostedSessionManager {
     return false;
   }
 
-  private respondControl(live: LiveProcess, requestId: string, response: Record<string, unknown>): void {
+  /** 应答一条权限请求，并清掉断线恢复用的原始行：这条请求已经有结论了。 */
+  private respondControl(
+    record: HostedRecord,
+    live: LiveProcess,
+    requestId: string,
+    response: Record<string, unknown>,
+  ): void {
+    record.pendingLine = undefined;
     live.child.stdin?.write(
       `${JSON.stringify({ type: "control_response", response: { subtype: "success", request_id: requestId, response } })}\n`,
     );
@@ -1150,6 +1293,12 @@ export class HostedSessionManager {
           ...(typeof item["resumeAttempts"] === "number" && item["resumeAttempts"] > 0
             ? { resumeAttempts: Math.floor(item["resumeAttempts"]) }
             : {}),
+          ...(typeof item["stdoutSeq"] === "number" && item["stdoutSeq"] > 0
+            ? { stdoutSeq: Math.floor(item["stdoutSeq"]) }
+            : {}),
+          ...(typeof item["pendingLine"] === "string" && item["pendingLine"]
+            ? { pendingLine: item["pendingLine"] }
+            : {}),
           ...(context ? { context } : {}),
           ...(slashCommands ? { slashCommands } : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
@@ -1194,6 +1343,8 @@ export class HostedSessionManager {
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),
               ...(record.pendingText ? { pendingText: record.pendingText } : {}),
               ...(record.resumeAttempts ? { resumeAttempts: record.resumeAttempts } : {}),
+              ...(record.stdoutSeq ? { stdoutSeq: record.stdoutSeq } : {}),
+              ...(record.pendingLine ? { pendingLine: record.pendingLine } : {}),
               ...(record.context ? { context: record.context } : {}),
               ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
               createdAt: record.createdAt,
