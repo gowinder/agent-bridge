@@ -1,5 +1,15 @@
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  fstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createZstdDecompress, zstdDecompressSync } from "node:zlib";
@@ -30,6 +40,12 @@ const CREATE_WAIT_MS = 30_000;
 const CREATE_INDEX_WAIT_MS = 6_000;
 const MAX_STDERR_CHARS = 4_000;
 const TITLE_CHARS = 120;
+/** 判断是否还在跑一轮时，从日志尾部读取的字节窗口。 */
+const TAIL_BYTES = 128 * 1024;
+const TAIL_FALLBACK_BYTES = 1024 * 1024;
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+/** 超过这个时间没写入的会话不再做尾部检查，避免每次列表都对全量历史做 IO。 */
+const BUSY_WINDOW_MS = 30 * 60_000;
 
 interface SessionHeader {
   type?: string;
@@ -289,6 +305,85 @@ function parseLog(path: string, sessionId: string): ParsedLog {
   return { messages, firstTime, lastTime, lastTurnReason, busy: openTurn, texts };
 }
 
+/**
+ * 从日志尾部读若干字节，判断最后一轮是否已结束：最后一条 turn 级事件是 turn/start 就是还在跑。
+ * 返回 true/false 表示找到了 turn 事件；窗口内没有 turn 事件时返回 null。
+ */
+function tailTurnState(path: string, window: number): boolean | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const length = Math.min(window, size);
+    if (length <= 0) return null;
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const count = readSync(fd, buffer, read, length - read, size - length + read);
+      if (count <= 0) break;
+      read += count;
+    }
+    const tail = buffer.subarray(0, read);
+    const stateOf = (chunk: Buffer): boolean | null => {
+      const raw = zstdDecompressSync(chunk);
+      let state: boolean | null = null;
+      for (const line of raw.toString("utf8").split("\n")) {
+        if (!line) continue;
+        let event: JsonEvent;
+        try {
+          event = JSON.parse(line) as JsonEvent;
+        } catch {
+          continue;
+        }
+        if (event.type === "turn/start") state = true;
+        else if (event.type === "turn/end") state = false;
+      }
+      return state;
+    };
+    // 日志是每帧一个事件拼接的 zstd，窗口起点可能落在一帧中间，从第一个 magic 开始解。
+    let from = tail.indexOf(ZSTD_MAGIC);
+    while (from !== -1) {
+      try {
+        const state = stateOf(tail.subarray(from));
+        if (state !== null) return state;
+        break;
+      } catch {
+        // 日志正在写时尾部可能停在半帧里，先丢掉最后一个 magic 之后的部分再试。
+        const last = tail.lastIndexOf(ZSTD_MAGIC);
+        if (last > from) {
+          try {
+            const state = stateOf(tail.subarray(from, last));
+            if (state !== null) return state;
+            break;
+          } catch {
+            // 丢掉尾帧后仍然解不开，继续换起点。
+          }
+        }
+        from = tail.indexOf(ZSTD_MAGIC, from + 1);
+      }
+    }
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 关闭失败不影响判断结果。
+      }
+    }
+  }
+}
+
+function tailOpenTurn(path: string): boolean {
+  try {
+    const state = tailTurnState(path, TAIL_BYTES);
+    if (state !== null) return state;
+    return tailTurnState(path, TAIL_FALLBACK_BYTES) ?? false;
+  } catch {
+    return false;
+  }
+}
+
 function findBinary(): string | null {
   const candidates = [join(homedir(), ".local", "bin", "dsh"), "/opt/homebrew/bin/dsh", "/usr/local/bin/dsh"];
   for (const path of candidates) {
@@ -305,6 +400,7 @@ export class DshAdapter implements SessionAdapter {
   readonly key = "dsh";
   private headCache = new Map<string, { stamp: string; head: HeadInfo | null }>();
   private logCache = new Map<string, { stamp: string; parsed: ParsedLog }>();
+  private busyCache = new Map<string, { stamp: string; busy: boolean }>();
   private sendQueues = new Map<string, Promise<unknown>>();
   private binaryCache: { at: number; path: string | null } | null = null;
 
@@ -644,7 +740,21 @@ export class DshAdapter implements SessionAdapter {
       live: false,
       canSend: binary !== null,
       sendBlockedReason: binary ? undefined : "未找到 dsh 可执行文件",
+      ...(this.recentBusy(entry) ? { busy: true } : {}),
     };
+  }
+
+  /** 只有近期还在写入的会话才读日志尾部，判断最后一轮是否没结束。 */
+  private recentBusy(entry: Entry): boolean {
+    const cached = this.busyCache.get(entry.path);
+    if (cached && cached.stamp === entry.stamp) return cached.busy;
+    let busy = false;
+    if (entry.updatedAt && Date.now() - entry.updatedAt <= BUSY_WINDOW_MS) {
+      busy = tailOpenTurn(entry.path);
+    }
+    if (this.busyCache.size > 4000) this.busyCache.clear();
+    this.busyCache.set(entry.path, { stamp: entry.stamp, busy });
+    return busy;
   }
 
   private projectIdFor(cwd: string): string {
