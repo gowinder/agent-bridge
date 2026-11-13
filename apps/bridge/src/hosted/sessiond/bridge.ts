@@ -50,6 +50,18 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 决定「这个进程到底跑的是什么」的旗标：只要对不上，接回就等于用错模型。 */
+const LAUNCH_FLAGS = ["--model", "--provider", "--effort", "--permission-mode"];
+
+function flagValue(args: readonly string[], flag: string): string | undefined {
+  const index = args.lastIndexOf(flag);
+  return index >= 0 && index + 1 < args.length ? args[index + 1] : undefined;
+}
+
+function launchFlagsDiffer(running: readonly string[], wanted: readonly string[]): boolean {
+  return LAUNCH_FLAGS.some((flag) => flagValue(running, flag) !== flagValue(wanted, flag));
+}
+
 /** 守护进程退出时会删掉 socket 文件，用它判断旧实例是否收摊完毕。 */
 function socketGone(socketPath: string): boolean {
   try {
@@ -89,6 +101,8 @@ export class RemoteChild extends EventEmitter implements HostedChild {
   private inputEnded = false;
   private killPending = false;
   private killSignal: NodeJS.Signals = "SIGTERM";
+  /** 主动杀掉旧进程、准备按新参数重启时预期的退出事件数。 */
+  private expectedExits = 0;
 
   constructor(
     private readonly bridge: SessiondBridge,
@@ -121,6 +135,17 @@ export class RemoteChild extends EventEmitter implements HostedChild {
     if (this.closed) return;
     this.client = client;
     this.ack = options.ack ?? 0;
+    await this.launch(client, command, args, options, true);
+  }
+
+  /** 发一次 start；守护进程里已有同 id 进程时交给 attachRunning 决定接回还是重启。 */
+  private async launch(
+    client: SessiondClient,
+    command: string,
+    args: string[],
+    options: HostedCommandOptions,
+    retry: boolean,
+  ): Promise<void> {
     try {
       const reply = await client.request<{ pid?: number | null }>({
         op: "start",
@@ -135,48 +160,78 @@ export class RemoteChild extends EventEmitter implements HostedChild {
       this.flushReady();
       this.release();
     } catch (error) {
-      // 守护进程里这个会话还在跑（上一代 Bridge 留下的、或并发启动）：start 起不来，
-      // 只能接回去，否则每一条消息都会撞上 already running。
-      if (messageOf(error) === "already running") {
-        await this.adopt();
+      // 守护进程里这个会话还在跑（上一代 Bridge 留下的、或并发启动）：start 起不来。
+      if (messageOf(error) !== "already running") {
+        this.fail(error);
         return;
       }
-      this.fail(error);
+      let outcome: "adopted" | "restart" | "failed";
+      try {
+        outcome = await this.attachRunning(client, args);
+      } catch (attachError) {
+        this.fail(attachError);
+        return;
+      }
+      if (outcome !== "restart" || this.closed) return;
+      if (!retry) {
+        this.fail(new Error("会话已在守护进程里运行，旧进程停不掉"));
+        return;
+      }
+      await this.launch(client, command, args, options, false);
     }
   }
 
-  /** 接管守护进程里已经在跑的同一个会话：先补 backlog，再放行实时事件与排队输入。 */
-  private async adopt(): Promise<void> {
-    const client = this.client;
-    if (!client) {
-      this.fail(new Error("会话已在守护进程里运行，但连接已断开"));
-      return;
-    }
-    try {
-      const result = await client.request<SessiondAttachResult>({
-        op: "attach",
-        sessionId: this.sessionId,
-        ack: this.ack,
-      });
-      if (this.closed) return;
-      if (!result.running) {
-        // 刚好在这一刻退出了：让上层照旧报错，下一次发送会重新 start。
-        this.fail(new Error("会话进程已退出"));
-        return;
+  /**
+   * 守护进程里已经在跑同一个会话：参数一致就接回（补 backlog、放行排队输入），
+   * 参数不一致说明换过模型而旧进程没停掉，先杀掉再让上层按新参数重起。
+   */
+  private async attachRunning(
+    client: SessiondClient,
+    args: string[],
+  ): Promise<"adopted" | "restart" | "failed"> {
+    const result = await client.request<SessiondAttachResult>({
+      op: "attach",
+      sessionId: this.sessionId,
+      ack: this.ack,
+    });
+    if (this.closed) return "failed";
+    // 刚好在这一刻退出了：直接重起。
+    if (!result.running) return "restart";
+    if (result.args && launchFlagsDiffer(result.args, args)) {
+      // 不杀的话这条消息会落到旧模型上，报 403 却看不出是没切换过去。
+      this.bridge.report(`会话 ${this.sessionId} 仍按旧参数在跑，停掉后按新参数重启`);
+      // 这次退出是我们要的，别让 manager 收尾成「托管进程已结束」。
+      this.expectedExits += 1;
+      // 旧进程的残留输出丢掉，重启期间的输入先排队，等新进程起来再发。
+      this.held = [];
+      this.ready = false;
+      let killed: boolean;
+      try {
+        killed = await this.bridge.killSession(this.sessionId);
+      } catch (error) {
+        this.expectedExits = 0;
+        throw error;
       }
-      this.pidValue = result.pid ?? undefined;
-      this.ready = true;
-      this.bridge.report(`会话 ${this.sessionId} 已在守护进程里运行，改为接回`);
-      for (const chunk of result.backlog) this.out.emit("data", chunk.data, chunk.seq);
-      this.flushReady();
-      this.release();
-    } catch (error) {
-      this.fail(error);
+      if (!killed) {
+        this.expectedExits = 0;
+        this.fail(new Error("旧进程停不掉，换的模型没有生效"));
+        return "failed";
+      }
+      return "restart";
     }
+    this.pidValue = result.pid ?? undefined;
+    this.ready = true;
+    this.bridge.report(`会话 ${this.sessionId} 已在守护进程里运行，改为接回`);
+    for (const chunk of result.backlog) this.out.emit("data", chunk.data, chunk.seq);
+    this.flushReady();
+    this.release();
+    return "adopted";
   }
 
   /** attach 回来的进程：pid 已知，但 backlog 仍由 manager 先喂进解析流程。 */
-  attached(pid: number | undefined): void {
+  attached(client: SessiondClient, pid: number | undefined): void {
+    // 不绑客户端的话，接回来的进程 stdin 与 kill 都发不出去：发消息丢、换模型停不掉。
+    this.client = client;
     this.pidValue = pid;
     this.ready = true;
   }
@@ -184,6 +239,8 @@ export class RemoteChild extends EventEmitter implements HostedChild {
   /** backlog 喂完后再放行持有的事件，顺序才不会乱。 */
   release(): void {
     this.holding = false;
+    // 接回期间排队的输入（以及可能的 kill）也要补发，否则第一条消息会静默丢掉。
+    this.flushReady();
     const events = this.held.splice(0);
     for (const event of events) this.applyEvent(event);
   }
@@ -202,6 +259,11 @@ export class RemoteChild extends EventEmitter implements HostedChild {
       return;
     }
     this.applyEvent(event);
+  }
+
+  /** 换参数重启时旧进程的 exit 会被吞掉，这条不能当成「会话结束」处理。 */
+  get closedNow(): boolean {
+    return this.closed;
   }
 
   kill(signal?: NodeJS.Signals): boolean {
@@ -224,6 +286,11 @@ export class RemoteChild extends EventEmitter implements HostedChild {
         this.err.emit("data", event.data);
         return;
       case "exit":
+        // 换参数重启时自己杀掉的进程：退出是预期内的，照旧跟踪同一个会话。
+        if (this.expectedExits > 0) {
+          this.expectedExits -= 1;
+          return;
+        }
         this.closed = true;
         this.emit("exit", event.code, event.signal);
         return;
@@ -396,7 +463,7 @@ export class SessiondBridge {
     this.children.set(sessionId, child);
     try {
       const result = await client.request<SessiondAttachResult>({ op: "attach", sessionId, ack });
-      if (result.running) child.attached(result.pid ?? undefined);
+      if (result.running) child.attached(client, result.pid ?? undefined);
       else this.dropChild(sessionId, child);
       return result;
     } catch (error) {
@@ -427,7 +494,8 @@ export class SessiondBridge {
       await delay(KILL_WAIT_MS);
       if (!(await stillRunning())) return true;
     }
-    return true;
+    // 没杀掉就如实说：调用方以为停了，下一次发消息会接回旧进程、旧模型。
+    throw new Error("会话进程没有在超时内退出");
   }
 
   /** 告诉守护进程这段输出已经处理，断线时不必再回放。 */
@@ -452,7 +520,11 @@ export class SessiondBridge {
     const child = this.children.get(event.sessionId);
     if (!child) return;
     child.deliver(event);
-    if ((event.op === "exit" || event.op === "error") && this.children.get(event.sessionId) === child) {
+    if (
+      (event.op === "exit" || event.op === "error") &&
+      child.closedNow &&
+      this.children.get(event.sessionId) === child
+    ) {
       // 进程已经结束：从分发表里摘掉，下一次 spawn 会登记新监听者。
       this.children.delete(event.sessionId);
     }

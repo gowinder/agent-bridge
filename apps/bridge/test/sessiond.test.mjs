@@ -4,6 +4,7 @@ import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { SESSIOND_VERSION } from "../dist/hosted/sessiond/protocol.js";
 import { startSessiondServer } from "../dist/hosted/sessiond/server.js";
 
 const ECHO_SCRIPT =
@@ -56,7 +57,7 @@ async function harness(t, options = {}) {
 let nextId = 0;
 const id = (prefix) => `${prefix}-${++nextId}`;
 
-function hello(c, version = 1) {
+function hello(c, version = SESSIOND_VERSION) {
   const messageId = id("hello");
   c.send({ id: messageId, op: "hello", version });
   return messageId;
@@ -72,7 +73,7 @@ test("sessiond: start、stdin 回显、ack 裁剪 backlog、kill 退出", async 
   const { dir, client } = await harness(t);
   assert.equal(hello(client), "hello-1");
   const helloReply = await waitFor(client.messages, (m) => m.id === "hello-1", "hello 回执");
-  assert.deepEqual(helloReply, { id: "hello-1", ok: true, result: { version: 1 } });
+  assert.deepEqual(helloReply, { id: "hello-1", ok: true, result: { version: SESSIOND_VERSION } });
 
   const sessionId = "session-echo";
   const startId = start(client, sessionId, process.execPath, ["-e", ECHO_SCRIPT], dir);

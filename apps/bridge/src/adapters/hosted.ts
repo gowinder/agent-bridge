@@ -27,7 +27,8 @@ export class HostedAdapter implements SessionAdapter {
       appId: HOSTED_APP_ID,
       provider: "anthropic",
       kind: "hosted",
-      name: "Claude Code · Bridge 托管",
+      // 这里既能托管 Claude Code 也能托管 pi，别再写死引擎名。
+      name: "Bridge 托管",
       mode: "cli",
       status: "ready",
       capabilities: {

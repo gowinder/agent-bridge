@@ -457,6 +457,8 @@ export interface SessionSummary {
   hostedState?: "running" | "idle" | "stopped";
   /** `hosted` only: the permission mode Bridge passes to the CLI. */
   permissionMode?: string;
+  /** `hosted` only: which CLI holds the process. Absent means Claude Code. */
+  hostedAgent?: HostedAgent;
   /** `hosted` only: the --model Bridge passes to the CLI; absent means the CLI default. */
   model?: string;
   /** `hosted` only: the --effort level Bridge passes to the CLI; absent means the CLI default. */
@@ -563,6 +565,17 @@ export interface SessionCreateResult {
 /** Permission modes the CLI accepts; `default` is only a UI alias for `manual`. */
 export type HostedPermissionMode = "manual" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan";
 
+/** Bridge 托管会话可以由哪个 CLI 持有：Claude Code（stream-json）或 pi（rpc）。 */
+export type HostedAgent = "claude" | "pi";
+
+/** 新建面板里可选的托管引擎；available 为 false 时按钮置灰并显示 detail。 */
+export interface HostedAgentOption {
+  id: HostedAgent;
+  label: string;
+  available: boolean;
+  detail?: string;
+}
+
 /** One directory the local Bridge allowlists for hosted sessions. */
 export interface HostedDirInfo {
   path: string;
@@ -591,6 +604,8 @@ export interface HostedDirParams {
 export interface HostedCreateParams {
   /** Must equal one of `hosted.dirs`; absolute path or one already resolved there. */
   path: string;
+  /** 由哪个 CLI 持有进程；省略即 Claude Code。pi 没有权限模式与思考程度。 */
+  agent?: HostedAgent;
   permissionMode?: HostedPermissionMode;
   /** Claude Code `--model` value; omitted uses the CLI default. */
   model?: string;
@@ -610,6 +625,8 @@ export interface HostedOptionsResult {
   models: ModelOption[];
   /** `--effort` 的可用档位，按从低到高排列。 */
   efforts: string[];
+  /** 可选的托管引擎，第一个是默认项。 */
+  agents?: HostedAgentOption[];
   note?: string;
 }
 

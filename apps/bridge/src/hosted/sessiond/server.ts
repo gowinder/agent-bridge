@@ -54,6 +54,8 @@ export interface SessiondServer {
 interface SessionState {
   sessionId: string;
   child: ChildProcessLike;
+  /** 启动参数：Bridge 接回旧进程时靠它判断模型是不是换过了。 */
+  args: string[];
   pid: number | null;
   running: boolean;
   lastSeq: number;
@@ -159,6 +161,7 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
       lastSeq: session.lastSeq,
       backlog: session.backlog.map((chunk) => ({ ...chunk })),
       gap: session.gap,
+      args: [...session.args],
     };
   };
 
@@ -186,6 +189,7 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
     const session: SessionState = {
       sessionId: message.sessionId,
       child,
+      args: [...message.args],
       pid: child.pid ?? null,
       running: true,
       lastSeq: 0,

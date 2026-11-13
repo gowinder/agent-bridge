@@ -531,6 +531,7 @@ export class DeviceSession implements ChannelSession {
           );
         }
         const title = stringParam(params, "title");
+        const agent = stringParam(params, "agent");
         const model = stringParam(params, "model");
         const effort = stringParam(params, "effort");
         const rawArgs = params["args"];
@@ -539,6 +540,7 @@ export class DeviceSession implements ChannelSession {
           : [];
         return this.options.adapters.hostedCreate({
           path,
+          ...(agent === "pi" ? { agent: "pi" as const } : {}),
           ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),

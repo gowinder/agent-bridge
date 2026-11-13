@@ -19,6 +19,8 @@ import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import type {
   ContextUsage,
+  HostedAgent,
+  HostedAgentOption,
   HostedCreateParams,
   HostedDirInfo,
   HostedDirsResult,
@@ -29,7 +31,9 @@ import type {
   MessageBlock,
   MessageListResult,
   MessageQuestion,
+  MessageQuestionOption,
   MessageRecord,
+  ModelOption,
   MessageSendResult,
   ProjectInfo,
   SessionModelsResult,
@@ -42,6 +46,8 @@ import { effortLevels } from "../effort.js";
 import { modelCatalog } from "../model-catalog.js";
 import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
+import { piBinary } from "./pi-binary.js";
+import { PiSession, type PiPending } from "./pi-session.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -78,6 +84,24 @@ const BLOCKED_EXTRA_ARGS = new Set([
   "--dangerously-skip-permissions",
   // settings 文件里能写 permissions.allow 和 hooks，等于绕过上面的模式门禁。
   "--settings",
+]);
+
+/** pi 这边同理：会话身份、协议模式与信任开关由 Bridge 决定。 */
+const BLOCKED_PI_ARGS = new Set([
+  "--mode",
+  "--session",
+  "--session-id",
+  "--session-dir",
+  "--no-session",
+  "--fork",
+  "-c",
+  "--continue",
+  "-r",
+  "--resume",
+  "-a",
+  "--approve",
+  "-na",
+  "--no-approve",
 ]);
 
 /** 读注册表时用：手改过的记录也不能塞进上面那些旗标，坏数据丢掉而不是整表读失败。 */
@@ -136,6 +160,8 @@ interface HostedRecord {
   id: string;
   cwd: string;
   title: string;
+  /** 持有进程的 CLI；缺省（老记录）是 Claude Code。 */
+  agent?: HostedAgent;
   permissionMode: HostedPermissionMode;
   /** CLI `--model` value; undefined keeps the CLI default. */
   model?: string;
@@ -149,6 +175,8 @@ interface HostedRecord {
   context?: ContextUsage;
   /** CLI init 事件报告的斜杠命令与技能，网页输入「/」时用来提示。 */
   slashCommands?: string[];
+  /** pi 会话能用的模型清单（get_available_models），换模型时给网页用。 */
+  piModels?: ModelOption[];
   /** 网页上归档的会话：记录留着，只是不在列表里显示。 */
   archived?: boolean;
   /** 最近一轮被「停止」中断：下一次发送用户消息前一直成立，网页重开也能显示「已中断」。 */
@@ -178,6 +206,10 @@ interface LiveProcess {
   buffer: string;
   busy: boolean;
   pending: PendingPermission | null;
+  /** pi 会话的协议客户端；Claude Code 会话没有。 */
+  pi?: PiSession;
+  /** pi 扩展正在等网页回答的提问。 */
+  piPending?: PiPending;
   startedAt: number;
   /** 最后一条 stderr，进程非零退出时拼进系统消息，避免只剩一个光秃秃的退出码。 */
   stderrTail: string;
@@ -486,12 +518,17 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
+    const pi = record.agent === "pi";
     return {
       environment: [
         { label: "工作目录", value: record.cwd },
-        { label: "权限模式", value: record.permissionMode },
+        ...(pi
+          ? [{ label: "引擎", value: "pi 托管" }]
+          : [
+              { label: "权限模式", value: record.permissionMode },
+              { label: "思考程度", value: record.effort ?? "CLI 默认" },
+            ]),
         { label: "模型", value: modelLabel(record) },
-        { label: "思考程度", value: record.effort ?? "CLI 默认" },
         ...(record.args?.length ? [{ label: "启动参数", value: record.args.join(" ") }] : []),
         {
           label: "进程",
@@ -509,17 +546,20 @@ export class HostedSessionManager {
 
   create(params: HostedCreateParams): SessionSummary {
     const cwd = this.allowedPath(params.path);
-    const permissionMode = this.permissionMode(params.permissionMode);
+    const agent: HostedAgent = params.agent === "pi" ? "pi" : "claude";
+    // pi 没有权限模式与思考程度：记录里留 manual，只当作占位。
+    const permissionMode = agent === "pi" ? "manual" : this.permissionMode(params.permissionMode);
     this.assertModeAllowed(permissionMode);
     const model = this.model(params.model);
-    const effort = this.effort(params.effort);
-    const extraArgs = this.extraArgs(params.args);
+    const effort = agent === "pi" ? undefined : this.effort(params.effort);
+    const extraArgs = this.extraArgs(params.args, agent);
     const now = Date.now();
     const id = randomUUID();
     const record: HostedRecord = {
       id,
       cwd,
       title: params.title?.trim() || "托管会话",
+      ...(agent === "pi" ? { agent } : {}),
       permissionMode,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
@@ -536,7 +576,7 @@ export class HostedSessionManager {
       if (error instanceof RpcError) throw error;
       throw new RpcError(
         "adapter_unavailable",
-        `无法启动 Claude Code：${error instanceof Error ? error.message : String(error)}`,
+        `无法启动 ${agent === "pi" ? "pi" : "Claude Code"}：${error instanceof Error ? error.message : String(error)}`,
       );
     }
     this.records.set(id, record);
@@ -601,7 +641,7 @@ export class HostedSessionManager {
         if (error instanceof RpcError) throw error;
         throw new RpcError(
           "adapter_unavailable",
-          `无法 resume Claude Code：${error instanceof Error ? error.message : String(error)}`,
+          `无法 resume ${record.agent === "pi" ? "pi" : "Claude Code"}：${error instanceof Error ? error.message : String(error)}`,
         );
       }
       record.lastActiveAt = Date.now();
@@ -626,6 +666,20 @@ export class HostedSessionManager {
   models(sessionId: string): SessionModelsResult {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
+    if (record.agent === "pi") {
+      const models = record.piModels ?? [];
+      const current = record.model ?? record.observedModel;
+      const result: SessionModelsResult = { models, canSwitch: true };
+      if (current) {
+        result.current = current;
+        result.currentName = models.find((item) => item.id === current)?.name ?? current;
+      }
+      result.note =
+        models.length > 0
+          ? "换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话。"
+          : "pi 的模型清单要等会话跑过一次才拿得到。";
+      return result;
+    }
     const models = modelCatalog();
     const current = record.model ?? record.observedModel;
     const result: SessionModelsResult = { models, canSwitch: true };
@@ -644,29 +698,36 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
-    if (live?.busy || live?.pending) {
+    if (live?.busy || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
     }
     const model = this.model(value?.trim() || undefined);
+    // 先停进程再改记录：停不掉就报错，别让界面显示新模型而进程还跑着旧的。
+    if (live) this.kill(record.id);
+    // 换模型必须让旧进程真的退出，否则下一条消息会接回还在跑的那一个，模型没换。
+    // 守护进程里没有跟踪到的旧进程（上一代 Bridge 留下的）也只能由它杀掉。
+    await this.stopInSessiond(record.id, true);
     if (model) record.model = model;
     else delete record.model;
     // 实际模型是上一轮 init 报的，换了模型旧值就作废，下次运行重新记录。
     delete record.observedModel;
-    if (live) this.kill(record.id);
-    // 换模型必须让旧进程真的退出，否则下一条消息会接回还在跑的那一个，模型没换。
-    // 守护进程里没有跟踪到的旧进程（上一代 Bridge 留下的）也只能由它杀掉。
-    await this.stopInSessiond(record.id);
     this.touch(record);
     return this.summary(record);
   }
 
-  /** 让守护进程停掉这个会话的进程（没有就不做），并等它退出。 */
-  private async stopInSessiond(id: string): Promise<boolean> {
+  /** 让守护进程停掉这个会话的进程（没有就不做），并等它退出；strict 时停不掉就抛错。 */
+  private async stopInSessiond(id: string, strict = false): Promise<boolean> {
     if (!this.sessiond) return false;
     try {
       return await this.sessiond.killSession(id);
     } catch (error) {
       this.log(`hosted: kill ${id} in sessiond failed: ${String(error)}`);
+      if (strict) {
+        throw new RpcError(
+          "conflict",
+          `旧进程没停掉，模型没有切换：${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       return false;
     }
   }
@@ -674,9 +735,20 @@ export class HostedSessionManager {
   /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
   options(): HostedOptionsResult {
     const models = modelCatalog();
+    const pi = piBinary();
+    const agents: HostedAgentOption[] = [
+      { id: "claude", label: "Claude Code", available: true },
+      {
+        id: "pi",
+        label: "pi",
+        available: pi !== null,
+        ...(pi === null ? { detail: "未找到 pi 可执行文件（~/.bun/bin/pi 或 AGENT_BRIDGE_PI_PATH）" } : {}),
+      },
+    ];
     const result: HostedOptionsResult = {
       models,
       efforts: effortLevels(this.cliBinary()),
+      agents,
     };
     if (models.length === 0) {
       result.note = "读不到模型目录（桌面端与 CLI 都没有缓存），只能使用 CLI 默认模型。";
@@ -692,8 +764,25 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
-    if (!live || (!live.busy && !live.pending)) {
+    if (!live || (!live.busy && !live.pending && !live.piPending)) {
       return { interrupted: false, session: this.summary(record) };
+    }
+    if (record.agent === "pi") {
+      if (live.piPending) live.pi?.cancel();
+      live.pi?.abort();
+      live.busy = false;
+      record.interrupted = true;
+      record.pendingText = undefined;
+      this.appendRecord(record, {
+        messageId: randomUUID(),
+        sessionId: record.id,
+        role: "system",
+        createdAt: Date.now(),
+        blocks: [{ type: "text", text: "已停止当前回合" }],
+      });
+      this.log(`hosted: interrupt ${record.id}`);
+      this.touch(record);
+      return { interrupted: true, session: this.summary(record) };
     }
     // 停在没有回答的批准请求上时，先拒绝它，否则这一轮还在等输入。
     if (live.pending) {
@@ -738,6 +827,25 @@ export class HostedSessionManager {
     // `origin` names the paired device for logs only: hosted stdin carries a real
     // user turn, so the transcript must not gain a peer-style sender label.
     if (origin) this.log(`hosted: send from ${origin}`);
+    if (record.agent === "pi") {
+      const pi = live.pi;
+      if (!pi) throw new RpcError("adapter_unavailable", "pi 协议还没就绪，稍后再发");
+      if (live.piPending) {
+        const pending = live.piPending;
+        pi.answer(pending, text);
+        this.recordUser(record, text);
+        this.touch(record);
+        return { accepted: true, delivered: true, detail: "已答复 pi 的提问" };
+      }
+      pi.prompt(text, live.busy);
+      this.recordUser(record, text);
+      // 这一轮要等 agent_settled 才算结束；中途 Bridge 退出就靠它续跑。
+      record.pendingText = text;
+      record.interrupted = false;
+      live.busy = true;
+      this.touch(record);
+      return { accepted: true, delivered: true };
+    }
     if (live.pending) {
       const handled = this.answerPermission(record, live, text);
       if (handled) {
@@ -792,13 +900,13 @@ export class HostedSessionManager {
           });
         }
         // 先喂 backlog，再放行持有的事件：两者按 seq 顺序进入同一条解析缓冲。
-        for (const chunk of result.backlog) this.onStdout(record, live, chunk.data, chunk.seq);
+        for (const chunk of result.backlog) this.feedChild(record, live, chunk.data, chunk.seq);
         child.release();
         // 这一轮还没收尾：保持 busy，否则 sweepIdle 会把正在跑的进程当空闲杀掉。
         if (record.pendingText) live.busy = true;
         // 重投没有应答的权限请求；存的原始行没有换行，补上才能进解析缓冲。
         const pending = record.pendingLine;
-        if (pending && !live.finished) {
+        if (pending && record.agent !== "pi" && !live.finished) {
           this.onStdout(record, live, `${pending}\n`);
           live.busy = true;
         }
@@ -844,7 +952,8 @@ export class HostedSessionManager {
         this.start(record, true);
         const live = this.live.get(record.id);
         if (live) {
-          this.writeUserTurn(live, text);
+          if (record.agent === "pi") live.pi?.prompt(text, false);
+          else this.writeUserTurn(live, text);
           live.busy = true;
           record.interrupted = false;
           this.touch(record);
@@ -875,6 +984,10 @@ export class HostedSessionManager {
   }
 
   private start(record: HostedRecord, resume: boolean): void {
+    if (record.agent === "pi") {
+      this.startPi(record, resume);
+      return;
+    }
     // 已有记录可能是在开关打开时建的：关掉开关后不允许再用 bypass 启动。
     this.assertModeAllowed(record.permissionMode);
     const cli = this.cliBinary();
@@ -903,6 +1016,30 @@ export class HostedSessionManager {
     this.track(record, child, resume, cli);
   }
 
+  /**
+   * pi 用 `--mode rpc` 常驻：一行一条命令，回复与事件也从 stdout 一行一条回来。
+   * `--session-id` 带 Bridge 的会话 id，首次创建、之后 resume 都是同一条命令。
+   */
+  private startPi(record: HostedRecord, resume: boolean): void {
+    const binary = piBinary();
+    if (!binary) {
+      throw new RpcError(
+        "adapter_unavailable",
+        "未找到 pi 可执行文件：托管 pi 会话需要它在 ~/.bun/bin、/opt/homebrew/bin 或 AGENT_BRIDGE_PI_PATH 中。",
+      );
+    }
+    const args = ["--mode", "rpc", "--session-id", record.id, "--approve"];
+    // 模型记成 `provider/modelId`，启动时拆回两个旗标。
+    if (record.model) {
+      const slash = record.model.indexOf("/");
+      if (slash > 0) args.push("--provider", record.model.slice(0, slash), "--model", record.model.slice(slash + 1));
+      else args.push("--model", record.model);
+    }
+    if (record.args?.length) args.push(...record.args);
+    const child = this.spawnProcess(binary, args, record.cwd, record.id, record.stdoutSeq ?? 0);
+    this.track(record, child, resume, binary);
+  }
+
   /** 默认交给 sessiond 持有；注入 spawn 的测试和守护进程不可用时走本机。 */
   private spawnProcess(
     command: string,
@@ -928,10 +1065,11 @@ export class HostedSessionManager {
       resumed: resume,
     };
     this.live.set(record.id, live);
+    if (record.agent === "pi") this.attachPi(record, live);
     child.stdout?.setEncoding?.("utf8");
     // RemoteChild 会把 sessiond 的 seq 作为第二个参数带上，用来推进 ack。
     child.stdout?.on("data", (chunk: string | Buffer, seq?: number) =>
-      this.onStdout(record, live, String(chunk), seq),
+      this.feedChild(record, live, String(chunk), seq),
     );
     child.stderr?.setEncoding?.("utf8");
     child.stderr?.on("data", (chunk: string | Buffer) => {
@@ -946,10 +1084,11 @@ export class HostedSessionManager {
       if (current === live) this.live.delete(record.id);
       if (live.finished) return;
       live.finished = true;
+      const label = record.agent === "pi" ? "pi" : "Claude Code";
       const detail =
         error.code === "ENOENT"
-          ? `找不到 Claude Code CLI：${cli}。托管会话需要它在 PATH 或 AGENT_BRIDGE_CLAUDE_PATH 中。`
-          : `启动 Claude Code 失败：${error.message}`;
+          ? `找不到 ${label} 可执行文件：${cli}`
+          : `启动 ${label} 失败：${error.message}`;
       this.log(`hosted ${record.id} spawn error: ${detail}`);
       this.appendRecord(record, {
         messageId: randomUUID(),
@@ -968,7 +1107,14 @@ export class HostedSessionManager {
       live.finished = true;
       // 会话记录从来没生成过（例如上次 spawn 直接失败）时，--resume 会立刻退出；
       // 这种会话改走 --session-id 新建一次，用户不必手动删掉重来。
-      if (!live.killed && !signal && code !== 0 && live.resumed && /no conversation found/i.test(live.stderrTail)) {
+      if (
+        record.agent !== "pi" &&
+        !live.killed &&
+        !signal &&
+        code !== 0 &&
+        live.resumed &&
+        /no conversation found/i.test(live.stderrTail)
+      ) {
         this.log(`hosted ${record.id}: 会话记录不存在，改为新建`);
         try {
           this.start(record, false);
@@ -1010,15 +1156,157 @@ export class HostedSessionManager {
       if (!isRecord(payload)) continue;
       this.handleEvent(record, live, payload, line);
     }
-    if (seq !== undefined) {
-      record.stdoutSeq = seq;
-      this.sessiond?.ack(record.id, seq);
-      // 输出很密：两秒内合并成一次写盘，重启时最多重放这一小段。
-      if (Date.now() - this.lastPersistAt > 2_000) {
-        this.lastPersistAt = Date.now();
-        this.persistRecords();
-      }
+    if (seq !== undefined) this.advanceSeq(record, seq);
+  }
+
+  /** 子进程输出进哪条解析路径：pi 走协议客户端，Claude Code 走 stream-json 解析。 */
+  private feedChild(record: HostedRecord, live: LiveProcess, chunk: string, seq?: number): void {
+    if (live.pi) {
+      live.pi.feed(chunk);
+      if (seq !== undefined) this.advanceSeq(record, seq);
+      return;
     }
+    this.onStdout(record, live, chunk, seq);
+  }
+
+  /** sessiond 已经送到第 seq 段输出：记账、ack，顺带合并写盘。 */
+  private advanceSeq(record: HostedRecord, seq: number): void {
+    record.stdoutSeq = seq;
+    this.sessiond?.ack(record.id, seq);
+    // 输出很密：两秒内合并成一次写盘，重启时最多重放这一小段。
+    if (Date.now() - this.lastPersistAt > 2_000) {
+      this.lastPersistAt = Date.now();
+      this.persistRecords();
+    }
+  }
+
+  /** pi 会话：把子进程的 stdin 交给协议客户端，事件回写到托管记录。 */
+  private attachPi(record: HostedRecord, live: LiveProcess): void {
+    const pi = new PiSession(
+      (line) => {
+        try {
+          live.child.stdin?.write(`${line}\n`);
+        } catch {
+          // 进程刚退出时写不进去：下一轮发送会重新拉起。
+        }
+      },
+      {
+        assistant: (blocks) => {
+          if (record.title === "托管会话") {
+            const text = blocks.find((block) => block.type === "text" && block.text.trim());
+            if (text) record.title = truncateTitle(text.text);
+          }
+          this.appendRecord(record, {
+            messageId: randomUUID(),
+            sessionId: record.id,
+            role: "assistant",
+            createdAt: Date.now(),
+            blocks,
+          });
+          this.touch(record);
+        },
+        system: (text) => {
+          // pi 会自动重试，同一条错误会连着报好几次：只留第一条。
+          const list = this.messagesOf(record.id);
+          const last = list[list.length - 1];
+          if (
+            last &&
+            last.role === "system" &&
+            last.blocks.length === 1 &&
+            last.blocks[0]?.type === "text" &&
+            last.blocks[0].text === truncate(text, MAX_BLOCK_CHARS).text
+          ) {
+            return;
+          }
+          this.appendRecord(record, {
+            messageId: randomUUID(),
+            sessionId: record.id,
+            role: "system",
+            createdAt: Date.now(),
+            blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+          });
+          this.touch(record);
+        },
+        context: (usage) => {
+          record.context = usage;
+          this.touch(record);
+        },
+        pending: (pending) => this.onPiPending(record, live, pending),
+        busy: (busy) => {
+          live.busy = busy;
+          this.touch(record);
+        },
+        settled: (aborted) => {
+          // 这一轮收尾：不再需要续跑，配额清零给下一轮用。
+          record.pendingText = undefined;
+          record.resumeAttempts = 0;
+          if (aborted) record.interrupted = true;
+          this.touch(record);
+        },
+        title: (name) => {
+          if (record.title !== "托管会话") return;
+          record.title = name.slice(0, MAX_TITLE_CHARS);
+          this.touch(record);
+        },
+        commands: (names) => {
+          record.slashCommands = names;
+          this.touch(record);
+        },
+        models: (models) => {
+          record.piModels = models;
+          this.touch(record);
+        },
+        model: (id) => {
+          if (!MODEL_PATTERN.test(id)) return;
+          record.observedModel = id;
+          // 第一次跑起来就把实际模型钉住，之后续写仍按同一个模型启动。
+          if (!record.model) record.model = id;
+          this.touch(record);
+        },
+        log: (line) => this.log(line),
+      },
+    );
+    live.pi = pi;
+    pi.prime();
+  }
+
+  /** pi 扩展要用户选/确认/输入：挂到 pending 上，网页作答后回 extension_ui_response。 */
+  private onPiPending(record: HostedRecord, live: LiveProcess, pending: PiPending | null): void {
+    if (!pending) {
+      live.piPending = undefined;
+      this.touch(record);
+      return;
+    }
+    live.piPending = pending;
+    live.busy = true;
+    const options: MessageQuestionOption[] =
+      pending.method === "confirm"
+        ? [{ label: "是" }, { label: "否" }]
+        : pending.options.map((label) => ({ label }));
+    const question: MessageQuestion = { question: pending.title, options };
+    // 需要自由输入（input/editor）时给一句提示，选项为空，答案直接打字发过来。
+    const block: MessageBlock =
+      question.options.length > 0
+        ? {
+            type: "ask",
+            text: pending.title,
+            ask: pending.title,
+            questions: [question],
+          }
+        : {
+            type: "next-step",
+            text: pending.message || pending.title,
+            ask: pending.title,
+            pending: true,
+          };
+    this.appendRecord(record, {
+      messageId: randomUUID(),
+      sessionId: record.id,
+      role: "assistant",
+      createdAt: Date.now(),
+      blocks: [block],
+    });
+    this.touch(record);
   }
 
   private handleEvent(
@@ -1284,10 +1572,11 @@ export class HostedSessionManager {
       archived: record.archived === true,
       live: Boolean(live),
       busy: live?.busy ?? false,
-      needsDecision: Boolean(live?.pending),
+      needsDecision: Boolean(live?.pending || live?.piPending),
       canSend: dirExists,
       hosted: true,
       hostedState: live ? "running" : "stopped",
+      ...(record.agent === "pi" ? { hostedAgent: "pi" as const } : {}),
       permissionMode: record.permissionMode,
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
@@ -1361,8 +1650,9 @@ export class HostedSessionManager {
   }
 
   /** 网页加的启动参数：每项按空格拆成 argv，挡掉 Bridge 自己那套会话与权限旗标。 */
-  private extraArgs(values: string[] | undefined): string[] | undefined {
+  private extraArgs(values: string[] | undefined, agent: HostedAgent = "claude"): string[] | undefined {
     const tokens: string[] = [];
+    const blocked = agent === "pi" ? BLOCKED_PI_ARGS : BLOCKED_EXTRA_ARGS;
     for (const value of values ?? []) {
       if (typeof value !== "string") continue;
       if (value.length > MAX_EXTRA_ARG_CHARS) {
@@ -1371,7 +1661,7 @@ export class HostedSessionManager {
       for (const token of value.trim().split(/\s+/)) {
         if (!token) continue;
         const flag = token.split("=")[0] ?? token;
-        if (BLOCKED_EXTRA_ARGS.has(flag)) {
+        if (blocked.has(flag)) {
           throw new RpcError("invalid_params", `启动参数不接受 ${flag}：会话身份与权限由 Bridge 按会话记录设置`);
         }
         tokens.push(token);
@@ -1443,6 +1733,8 @@ export class HostedSessionManager {
       if (now - record.lastActiveAt <= this.config.idleTimeoutMs) continue;
       this.log(`hosted: idle timeout, stopping ${id}`);
       this.kill(id);
+      // 接回过的子进程万一没停掉，守护进程里还会留着：下次发消息就会接回旧进程。
+      void this.stopInSessiond(id);
     }
   }
 
@@ -1473,6 +1765,7 @@ export class HostedSessionManager {
           id: item["id"],
           cwd: item["cwd"],
           title: typeof item["title"] === "string" ? item["title"] : "托管会话",
+          ...(item["agent"] === "pi" ? { agent: "pi" as const } : {}),
           permissionMode: this.permissionMode(
             typeof item["permissionMode"] === "string" ? item["permissionMode"] : "manual",
           ),
@@ -1535,6 +1828,7 @@ export class HostedSessionManager {
               id: record.id,
               cwd: record.cwd,
               title: record.title,
+              ...(record.agent ? { agent: record.agent } : {}),
               permissionMode: record.permissionMode,
               ...(record.model ? { model: record.model } : {}),
               ...(record.effort ? { effort: record.effort } : {}),

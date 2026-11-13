@@ -13,6 +13,7 @@ import type {
   FsReadResult,
   FsRoot,
   FsRootsResult,
+  HostedAgent,
   HostedDirsResult,
   HostedInterruptResult,
   HostedOptionsResult,
@@ -239,7 +240,14 @@ let pollTimer: number | null = null;
 let renderToken = 0;
 let deferredListRender = false;
 /** 新建托管会话表单的草稿：中途重连重绘时把已填内容还回去，不打断输入。 */
-let hostedDraft: { projectId: string; title: string; model: string; effort: string; mode: string } | null = null;
+let hostedDraft: {
+  projectId: string;
+  title: string;
+  model: string;
+  effort: string;
+  mode: string;
+  agent: HostedAgent;
+} | null = null;
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
 /** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
@@ -2668,7 +2676,14 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       desktopDraft = { projectId: project.projectId, text: "" };
       panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
     } else {
-      hostedDraft = { projectId: project.projectId, title: "", model: "", effort: "", mode: "manual" };
+      hostedDraft = {
+        projectId: project.projectId,
+        title: "",
+        model: "",
+        effort: "",
+        mode: "manual",
+        agent: "claude",
+      };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
     panelHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
@@ -2679,7 +2694,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(
       el("li", {}, [
         isHosted
-          ? emptyState("还没有托管会话", "点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 进程。")
+          ? emptyState("还没有托管会话", "点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 或 pi 进程。")
           : canCreateDesktop
             ? emptyState("这个工程还没有会话", `点「新对话」，由这台 Mac 上的 Bridge 启动一次 ${appInfo?.name ?? "桌面客户端"}。`)
             : emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。"),
@@ -2704,7 +2719,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           : (session.sendBlockedReason ?? "只读");
     // 托管会话的模型和权限模式在列表里也常驻显示，不必点进侧栏才知道。
     const hostedFacts = session.hosted
-      ? ` · 模型 ${hostedModelLabel(session.model)} · 权限 ${hostedModeShort(session.permissionMode)}`
+      ? ` · 模型 ${hostedModelLabel(session.model)} · ${hostedModeFact(session)}`
       : "";
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
       el(
@@ -2859,6 +2874,11 @@ function hostedModeShort(mode: string | undefined): string {
   return HOSTED_MODE_HELP[mode]?.short ?? mode;
 }
 
+/** 托管会话的权限事实：pi 没有权限模式，写引擎名，免得显示一个不生效的 manual。 */
+function hostedModeFact(session: SessionSummary): string {
+  return session.hostedAgent === "pi" ? "pi 托管" : `权限 ${hostedModeShort(session.permissionMode)}`;
+}
+
 /** 托管会话的模型：记录过就用记录值，否则说明沿用 CLI 默认。 */
 function hostedModelLabel(model: string | undefined): string {
   return model ? model : "CLI 默认";
@@ -2912,10 +2932,12 @@ function saveHostedArgPrefs(): void {
 
 function hostedCreatePanel(
   project: ProjectInfo,
-  draft: { title: string; model: string; effort: string; mode: string },
+  draft: { title: string; model: string; effort: string; mode: string; agent: HostedAgent },
 ): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
+  const agent = el("select", { className: "input", attrs: { "aria-label": "托管引擎" } });
+  agent.append(el("option", { text: "Claude Code", attrs: { value: "claude" } }));
   const mode = el("select", { className: "input" });
   const modeHint = el("p", { className: "hint" });
   const model = el("select", { className: "input", attrs: { "aria-label": "模型" } });
@@ -2999,14 +3021,16 @@ function hostedCreatePanel(
     if (!cwd) return;
     submit.disabled = true;
     status.classList.remove("error");
-    status.textContent = "正在启动 Claude Code…";
+    const piSelected = draft.agent === "pi";
+    status.textContent = `正在启动 ${piSelected ? "pi" : "Claude Code"}…`;
     const permissionMode = (mode.value || "manual") as HostedPermissionMode;
     const extraArgs = loadHostedArgPrefs().filter((item) => item.enabled).map((item) => item.value);
     void call<SessionGetResult>("hosted.create", {
       path: cwd,
+      agent: draft.agent,
       permissionMode,
-      ...(model.value.trim() ? { model: model.value.trim() } : {}),
-      ...(effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(!piSelected && model.value.trim() ? { model: model.value.trim() } : {}),
+      ...(!piSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
       ...(extraArgs.length > 0 ? { args: extraArgs } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
@@ -3039,27 +3063,48 @@ function hostedCreatePanel(
     draft.mode = mode.value;
     syncModeHint();
   });
+  const modeField = el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]);
+  const modelField = el("label", { className: "field" }, [el("span", { text: "模型" }), model]);
+  const effortField = el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]);
+  const argsHint = el("p", { className: "hint" });
+  const agentHint = el("p", { className: "hint" });
+  const syncAgent = (): void => {
+    const pi = draft.agent === "pi";
+    // pi 没有权限模式与思考程度；模型清单也要等它跑过一次才拿得到，选 pi 时一并收起。
+    for (const node of [modeField, modeHint, modelField, effortField, effortHint, optionsHint]) node.hidden = pi;
+    argsHint.textContent = pi
+      ? "打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。"
+      : "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。";
+    agentHint.textContent = pi
+      ? "pi 用 `pi --mode rpc` 常驻，斜杠命令、扩展提问与换模型都能在网页里用。"
+      : "";
+    agentHint.hidden = !pi;
+  };
+  agent.addEventListener("change", () => {
+    draft.agent = agent.value === "pi" ? "pi" : "claude";
+    syncAgent();
+  });
   form.append(
     el("p", { className: "panel-title", text: "新建 Bridge 托管会话" }),
     el("label", { className: "field" }, [
       el("span", { text: "工作目录（仅限 Mac 上的允许列表）" }),
       el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
     ]),
-    el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]),
+    el("label", { className: "field" }, [el("span", { text: "托管引擎" }), agent]),
+    agentHint,
+    modeField,
     modeHint,
-    el("label", { className: "field" }, [el("span", { text: "模型" }), model]),
-    el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]),
+    modelField,
+    effortField,
     effortHint,
     optionsHint,
     el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
-    el("p", {
-      className: "hint",
-      text: "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。",
-    }),
+    argsHint,
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
     status,
     el("div", { className: "row-actions" }, [submit]),
   );
+  syncAgent();
   void call<HostedOptionsResult>("hosted.options")
     .then((info) => {
       const groups: Array<[string, ModelOption[]]> = [
@@ -3091,6 +3136,24 @@ function hostedCreatePanel(
 
       optionsHint.textContent = info.note ?? "";
       optionsHint.hidden = !info.note;
+
+      const agentOptions = info.agents ?? [{ id: "claude" as const, label: "Claude Code", available: true }];
+      agent.replaceChildren(
+        ...agentOptions.map((item) =>
+          el("option", {
+            text: item.available ? item.label : `${item.label}（不可用）`,
+            attrs: {
+              value: item.id,
+              ...(item.available ? {} : { disabled: "" }),
+              ...(item.detail ? { title: item.detail } : {}),
+            },
+          }),
+        ),
+      );
+      const usable = agentOptions.filter((item) => item.available).map((item) => item.id);
+      if (!usable.includes(draft.agent)) draft.agent = usable[0] ?? "claude";
+      agent.value = draft.agent;
+      syncAgent();
     })
     .catch((error) => {
       optionsHint.classList.add("error");
@@ -4001,7 +4064,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const chatMeta = summary.hosted
     ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · 模型 ${hostedModelLabel(
         summary.model,
-      )} · 权限 ${hostedModeShort(summary.permissionMode)} · ${
+      )} · ${hostedModeFact(summary)} · ${
         summary.live ? "进程运行中" : "进程已停止，发送时自动恢复"
       }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
     : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`;

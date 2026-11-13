@@ -14,6 +14,7 @@ import type {
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
+import { piBinary } from "../hosted/pi-binary.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 /**
@@ -403,14 +404,8 @@ export class PiAdapter implements SessionAdapter {
     }
   }
 
-  /** pi 装在 bun 的全局目录里，菜单栏 app 拉起的 Bridge 未必继承到那条 PATH。 */
   private binary(): string | null {
-    const explicit = process.env["AGENT_BRIDGE_PI_PATH"];
-    if (explicit) return existsSync(explicit) ? explicit : null;
-    for (const candidate of [join(homedir(), ".bun", "bin", "pi"), "/opt/homebrew/bin/pi", "/usr/local/bin/pi"]) {
-      if (existsSync(candidate)) return candidate;
-    }
-    return null;
+    return piBinary();
   }
 }
 

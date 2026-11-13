@@ -876,6 +876,11 @@ details[open] > .dock-project-head::before {
   color: var(--muted);
 }
 
+/* display: flex 会盖掉 UA 的 [hidden]，pi 选中时要能真正收起这两个字段。 */
+.field[hidden] {
+  display: none;
+}
+
 .input {
   width: 100%;
   padding: 12px 14px;
