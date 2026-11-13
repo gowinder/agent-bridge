@@ -1267,7 +1267,8 @@ details[open] > .dock-project-head::before {
   opacity: 0.62;
 }
 
-.row-actions {
+/* 注意：.row-actions 是表单里横排按钮的老类名，行内浮层必须用自己的类名。 */
+.row-menu {
   position: absolute;
   top: 50%;
   right: 8px;
@@ -1284,8 +1285,8 @@ details[open] > .dock-project-head::before {
   transition: opacity 160ms ease;
 }
 
-.row-item:hover .row-actions,
-.row-item:focus-within .row-actions {
+.row-item:hover .row-menu,
+.row-item:focus-within .row-menu {
   opacity: 1;
   pointer-events: auto;
 }
@@ -1296,12 +1297,21 @@ details[open] > .dock-project-head::before {
 }
 
 @media (hover: none) {
-  .row-actions {
+  .row-menu {
     opacity: 1;
     pointer-events: auto;
     background: transparent;
     box-shadow: none;
   }
+}
+
+/* 置顶过的会话在标题前留一个钉子，列表排序之外也能一眼认出来。 */
+.row-title .pin-mark {
+  color: var(--accent);
+  width: 12px;
+  height: 12px;
+  margin-right: 5px;
+  vertical-align: -1px;
 }
 
 .row-action {

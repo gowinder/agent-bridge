@@ -36,6 +36,7 @@ import { CodexAdapter } from "./codex.js";
 import { CodexCliAdapter } from "./codex-cli.js";
 import { DshAdapter } from "./dsh.js";
 import { HostedAdapter } from "./hosted.js";
+import { PiAdapter } from "./pi.js";
 import { RpcError, type SessionAdapter } from "./types.js";
 
 const DEFAULT_SESSION_LIMIT = 200;
@@ -67,6 +68,7 @@ export class SessionAdapters {
       new AntigravityAdapter(),
       new AntigravityDesktopAdapter(),
       new DshAdapter(),
+      new PiAdapter(),
       new HostedAdapter(this.hostedManager),
     ];
   }

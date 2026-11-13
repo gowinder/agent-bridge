@@ -152,9 +152,9 @@ const ICONS = {
   more:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.4" cy="8" r="1.25"/></svg>',
   pin:
-    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.6 2.2 13.8 6.4l-1.7.5-2.4 2.4-.3 2.4-1.6-1.6-3.6 3.6"/><path d="m7.8 3.9 4.3 4.3-1.2 1.2a2 2 0 0 1-1.4.6H6.6l-2.3 2.3"/></svg>',
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.2 1.9h5.6"/><path d="M6.4 1.9v3.3L4.5 7.5a.9.9 0 0 0-.45.78v.42h7.9v-.42a.9.9 0 0 0-.45-.78L9.6 5.2V1.9"/><path d="M8 8.7v5.4"/></svg>',
   pinOff:
-    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.6 2.2 13.8 6.4l-1.7.5-2.4 2.4-.3 2.4-1.6-1.6-3.6 3.6"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.2 1.9h5.6"/><path d="M6.4 1.9v3.3L4.5 7.5a.9.9 0 0 0-.45.78v.42h7.9v-.42a.9.9 0 0 0-.45-.78L9.6 5.2V1.9"/><path d="M8 8.7v5.4"/><path d="m2.4 2.4 11.2 11.2"/></svg>',
   archive:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3" width="11.2" height="3" rx="1"/><path d="M3.6 6v6.4c0 .6.4 1 1 1h6.8c.6 0 1-.4 1-1V6"/><path d="M6.4 8.6h3.2"/></svg>',
   unarchive:
@@ -812,6 +812,9 @@ function renderDeviceRow(device: DeviceMeta): HTMLElement {
         });
       }, "btn small"),
       button("移除", () => {
+        if (!window.confirm(`移除「${device.bridge?.name ?? device.name}」？这台设备的配对凭据会从浏览器里删掉，要连回来得重新配对。`)) {
+          return;
+        }
         void removeDevice(device.relayUrl, device.roomId).then(() => showHome());
       }, "btn ghost small"),
     ]),
@@ -844,10 +847,18 @@ async function beginPairing(link: PairingLink): Promise<void> {
 }
 
 function showConfirm(challenge: PairingChallenge): void {
+  const remembered = rememberedDeviceName();
+  const initial = remembered || defaultDeviceName();
   const nameInput = el("input", {
     className: "input",
-    attrs: { type: "text", value: defaultDeviceName(), maxlength: "64" },
+    attrs: { type: "text", value: initial, maxlength: "64" },
   });
+  // UA-CH 的高熵值要异步取，拿到更具体的机型／系统版本后再补；用户已经动过输入框就不覆盖。
+  if (!remembered) {
+    void suggestedDeviceName().then((suggested) => {
+      if (nameInput.value === initial) nameInput.value = suggested;
+    });
+  }
   const error = el("p", { className: "notice error hidden" });
   const confirm = button("确认码一致，完成配对", () => {
     const name = nameInput.value.trim();
@@ -863,6 +874,7 @@ function showConfirm(challenge: PairingChallenge): void {
       await finishPairing(challenge, name);
     })()
       .then(() => {
+        rememberDeviceName(name);
         justPaired = true;
         showHome();
       })
@@ -885,7 +897,7 @@ function showConfirm(challenge: PairingChallenge): void {
       el("div", { className: "code", text: challenge.confirmCode }),
       el("p", { className: "hint", text: relayTargetText(challenge.link.relayUrl) }),
       el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
-      el("p", { className: "hint", text: "浏览器读不到电脑名称和机型，默认值只能按系统、浏览器和屏幕区分；两台设备看起来一样时，改成你认得出的名字。" }),
+      el("p", { className: "hint", text: "浏览器拿不到电脑名称，默认值只能取设备类型、系统版本和浏览器；改成你认得出的名字，Mac 菜单栏和其它设备都会按它显示，之后也能随时改。" }),
       error,
       el("div", { className: "actions" }, [confirm, cancel]),
     ]),
@@ -907,23 +919,107 @@ function relayTargetText(relayUrl: string): string {
   return `中继：${url.host}，注意：不是你当前所在的站点`;
 }
 
+const DEVICE_NAME_KEY = "ab.deviceName";
+
+/** 上一次给这台浏览器起的名字，下次配对时直接沿用。 */
+function rememberedDeviceName(): string {
+  try {
+    return (localStorage.getItem(DEVICE_NAME_KEY) ?? "").trim().slice(0, 64);
+  } catch {
+    return "";
+  }
+}
+
+function rememberDeviceName(name: string): void {
+  try {
+    localStorage.setItem(DEVICE_NAME_KEY, name);
+  } catch {
+    // 隐私模式下写不了本地存储，只影响下次的默认值。
+  }
+}
+
+interface NameParts {
+  kind: string;
+  os: string;
+  browser: string;
+}
+
 /**
- * 默认名称取设备类型 + 浏览器 + 屏幕逻辑分辨率。浏览器拿不到机型和主机名，
- * 但同品牌两台设备往往浏览器或屏幕不同，这样列表里至少能分辨。
+ * 浏览器读不到电脑名称和主机名（隐私限制），能拿到的只有设备类型、系统版本和浏览器。
+ * Android / ChromeOS 的 UA-CH 高熵值还能给出具体机型，桌面端和 Safari 没有。
  */
-function defaultDeviceName(): string {
+function nameParts(): NameParts {
   const ua = navigator.userAgent;
   const touch = navigator.maxTouchPoints > 1;
-  let kind: string;
+  let kind = "浏览器";
   if (/iPhone/.test(ua)) kind = "iPhone";
   else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) kind = "iPad";
   else if (/Android/.test(ua)) kind = "Android 设备";
   else if (/Macintosh|Mac OS X/.test(ua)) kind = "Mac";
   else if (/Windows/.test(ua)) kind = "Windows";
   else if (/Linux/.test(ua)) kind = "Linux";
-  else kind = "浏览器";
-  const screenSize = `${Math.round(screen.width)}×${Math.round(screen.height)}`;
-  return [kind, browserLabel(), screenSize].filter(Boolean).join(" · ");
+
+  let os = "";
+  const ios = /(?:iPhone|CPU) OS (\d+)[._](\d+)/.exec(ua);
+  const android = /Android (\d+)/.exec(ua);
+  const mac = /Mac OS X (\d+)[._](\d+)/.exec(ua);
+  if (ios) os = `iOS ${ios[1]}.${ios[2]}`;
+  else if (android) os = `Android ${android[1]}`;
+  else if (kind === "Mac" && mac) os = `macOS ${mac[1]}.${mac[2]}`;
+  return { kind, os, browser: browserLabel() };
+}
+
+function composeDeviceName(parts: NameParts): string {
+  return [parts.kind, parts.os, parts.browser].filter(Boolean).join(" · ").slice(0, 64);
+}
+
+function defaultDeviceName(): string {
+  return composeDeviceName(nameParts());
+}
+
+interface UaHints {
+  model: string;
+  platform: string;
+  platformVersion: string;
+}
+
+async function highEntropyHints(): Promise<UaHints | null> {
+  const data = (navigator as unknown as {
+    userAgentData?: { getHighEntropyValues?: (hints: string[]) => Promise<Record<string, unknown>> };
+  }).userAgentData;
+  if (!data?.getHighEntropyValues) return null;
+  try {
+    const values = await data.getHighEntropyValues(["model", "platform", "platformVersion"]);
+    const text = (key: string): string => (typeof values[key] === "string" ? (values[key] as string).trim() : "");
+    return { model: text("model"), platform: text("platform"), platformVersion: text("platformVersion") };
+  } catch {
+    return null;
+  }
+}
+
+/** UA-CH 报的是 Windows 的平台版本号：13 起是 Windows 11，之前是 Windows 10。 */
+function osLabel(platform: string, version: string): string {
+  const major = Number.parseInt(version, 10);
+  if (!Number.isFinite(major)) return "";
+  const minor = version.split(".")[1];
+  const withMinor = minor && minor !== "0" ? `.${minor}` : "";
+  if (platform === "macOS") return `macOS ${major}${withMinor}`;
+  if (platform === "iOS") return `iOS ${major}${withMinor}`;
+  if (platform === "Android") return `Android ${major}`;
+  if (platform === "Windows") return major >= 13 ? "Windows 11" : "Windows 10";
+  if (platform === "Chrome OS") return `ChromeOS ${major}`;
+  return "";
+}
+
+/** UA-CH 是异步的，能拿到具体机型和系统版本时用它盖掉 UA 里的粗粒度信息。 */
+async function suggestedDeviceName(): Promise<string> {
+  const parts = nameParts();
+  const hints = await highEntropyHints();
+  if (!hints) return composeDeviceName(parts);
+  if (hints.model) parts.kind = hints.model;
+  const os = osLabel(hints.platform, hints.platformVersion);
+  if (os) parts.os = os;
+  return composeDeviceName(parts);
 }
 
 /** Chromium 的 UA 里 Chrome/Safari 互相嵌套，顺序不能换。 */
@@ -1586,6 +1682,7 @@ function agentLabel(kind: string): string {
   if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "ChatGPT";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "Antigravity";
   if (kind === "dsh") return "DeepSeek";
+  if (kind === "pi") return "pi";
   if (kind === "hosted") return "托管";
   return "Claude";
 }
@@ -1777,6 +1874,7 @@ function shortAgentName(app: AppInfo): string {
   if (app.kind === "codex-cli") return "Codex CLI";
   if (app.kind === "antigravity" || app.kind === "antigravity-desktop") return "Antigravity";
   if (app.kind === "dsh") return "DeepSeek";
+  if (app.kind === "pi") return "pi";
   return app.name.split(/[·\s]/)[0] ?? app.name;
 }
 
@@ -1784,6 +1882,7 @@ function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
   if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "CX";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "AG";
   if (kind === "dsh") return "DS";
+  if (kind === "pi") return "PI";
   return "CC";
 }
 
@@ -2422,6 +2521,7 @@ function renderClients(): void {
   renderShell(
     el("main", { className: "main" }, [
       viewHead("客户端", "已连接的客户端", `${data.apps.length} 个客户端 · ${totalProjects} 个工程 · ${totalSessions} 个会话`),
+      ...(connected ? [selfDeviceCard()] : []),
       list,
       button("刷新列表", () => {
         snapshot = null;
@@ -2615,7 +2715,10 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           : [document.createTextNode(agentMark(session.kind))],
       ),
       el("span", { className: "row-main" }, [
-        el("strong", { className: "row-title", text: session.title }),
+        el("strong", { className: "row-title" }, [
+          ...(session.pinned ? [icon("pin", "icon pin-mark")] : []),
+          document.createTextNode(session.title),
+        ]),
         ...(session.originalTitle
           ? [el("span", { className: "row-original", text: `原名：${session.originalTitle}` })]
           : []),
@@ -2638,7 +2741,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
     );
     // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
-    const actions = el("div", { className: "row-actions" }, [
+    const actions = el("div", { className: "row-menu" }, [
       rowAction(
         session.pinned ? icon("pinOff") : icon("pin"),
         session.pinned ? "取消置顶" : "置顶",
@@ -3083,6 +3186,53 @@ function desktopCreatePanel(project: ProjectInfo, appInfo: AppInfo, draft: { tex
   return form;
 }
 
+/** 首页的「本设备」卡片：显示这台浏览器在 Bridge 里的名字，并且就地改名。 */
+function selfDeviceCard(): HTMLElement {
+  const panel = el("section", { className: "panel self-device" });
+  const showName = (): void => {
+    const name = connected?.device.name ?? "";
+    panel.replaceChildren(
+      el("h2", { className: "panel-title", text: "本设备" }),
+      el("p", { className: "hint", text: "这台浏览器在 Bridge 里的名字，Mac 菜单栏和其它设备都按它显示。" }),
+      el("div", { className: "row-main" }, [el("strong", { className: "row-title", text: name })]),
+      el("div", { className: "actions" }, [button("改名", showForm, "btn ghost small")]),
+    );
+  };
+  const showForm = (): void => {
+    const input = el("input", {
+      className: "input",
+      attrs: { type: "text", value: connected?.device.name ?? "", maxlength: "64" },
+    });
+    const error = el("p", { className: "notice error hidden" });
+    const save = button("保存", () => {
+      const name = input.value.trim();
+      if (!name) {
+        error.textContent = "请输入设备名称";
+        error.classList.remove("hidden");
+        return;
+      }
+      save.disabled = true;
+      void renameSelfDevice(name)
+        .then(showName)
+        .catch((failure: unknown) => {
+          save.disabled = false;
+          error.textContent = messageOf(failure);
+          error.classList.remove("hidden");
+        });
+    }, "btn small");
+    panel.replaceChildren(
+      el("h2", { className: "panel-title", text: "本设备" }),
+      el("label", { className: "field" }, [el("span", { text: "设备名称" }), input]),
+      error,
+      el("div", { className: "actions" }, [save, button("取消", showName, "btn ghost small")]),
+    );
+    input.focus();
+    input.select();
+  };
+  showName();
+  return panel;
+}
+
 function renderDevices(): void {
   const state = connected!;
   document.title = "已授权设备 · Agent Bridge";
@@ -3135,6 +3285,22 @@ function renderDevices(): void {
   );
 }
 
+/**
+ * 只改当前设备自己的名字：先让 Bridge 改记录，再同步本地凭据和内存里的状态，
+ * Mac 菜单栏、其它设备和首页列表都按新名字显示，不用重连。
+ */
+async function renameSelfDevice(name: string): Promise<void> {
+  const local = connected?.device;
+  if (!local) throw new Error("还没有连接 Bridge");
+  await call<{ ok: boolean }>("device.rename", { deviceId: local.deviceId, name });
+  local.name = name;
+  for (const item of connected?.devices ?? []) {
+    if (item.deviceId === local.deviceId) item.name = name;
+  }
+  rememberDeviceName(name);
+  await renameDevice(local.relayUrl, local.roomId, name).catch(() => undefined);
+}
+
 /** 只改当前设备自己的名字，改完同步本地记录，首页列表不用重连就能看到新名字。 */
 function beginRename(item: DeviceSummary, label: HTMLElement): void {
   const input = el("input", {
@@ -3151,16 +3317,8 @@ function beginRename(item: DeviceSummary, label: HTMLElement): void {
     }
     save.disabled = true;
     cancel.disabled = true;
-    void call<{ ok: boolean }>("device.rename", { deviceId: item.deviceId, name })
-      .then(async () => {
-        item.name = name;
-        const local = connected?.device;
-        if (local?.deviceId === item.deviceId) {
-          local.name = name;
-          await renameDevice(local.relayUrl, local.roomId, name).catch(() => undefined);
-        }
-        renderDevices();
-      })
+    void renameSelfDevice(name)
+      .then(() => renderDevices())
       .catch((failure: unknown) => {
         save.disabled = false;
         cancel.disabled = false;
