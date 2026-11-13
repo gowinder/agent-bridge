@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-13
+
+### Fixed
+
+- 新建托管会话选 `modelPicker.options` 里的路由器模型（`ncncapi/claude-opus-5-5`、`group/dsgroup`、`grok/grok-4.7`）报「模型名不合法」：模型名校验原先不允许 `/`，而 CLI 本身接受这种 `厂商/模型` 写法。现在放行 `/`，仍挡掉以 `-` 开头和带空白的注入形式。
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

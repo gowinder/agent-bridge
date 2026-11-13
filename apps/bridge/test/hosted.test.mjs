@@ -86,6 +86,23 @@ test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   assert.equal(options.cwd, realpathSync(h.repo));
 });
 
+test("router model names with a slash reach argv and survive a restart", (t) => {
+  const h = harness();
+  const session = h.manager.create({ path: h.repo, model: "ncncapi/claude-opus-5-5" });
+  assert.equal(h.spawns[0].args[h.spawns[0].args.indexOf("--model") + 1], "ncncapi/claude-opus-5-5");
+  h.manager.dispose();
+  const next = new HostedSessionManager({ stateDir: h.stateDir, spawn: () => new FakeChild() });
+  t.after(() => next.dispose());
+  assert.equal(next.sessions().find((item) => item.sessionId === session.sessionId)?.model, "ncncapi/claude-opus-5-5");
+});
+
+test("model names that could inject argv are rejected", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  assert.throws(() => h.manager.create({ path: h.repo, model: "--dangerously-skip-permissions" }), /模型名不合法/);
+  assert.throws(() => h.manager.create({ path: h.repo, model: "a b" }), /模型名不合法/);
+});
+
 test("bypassPermissions is off by default and rejected at create", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
