@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-11-13
+
+### Added
+
+- 网页顶栏的连接徽标显示 Bridge 版本号。
+
+### Fixed
+
+- 托管会话新建面板的模型清单补上 `~/.claude/settings.json` 里 `modelPicker.options` 配置的自定义模型（例如 magpie 的路由模型），单独成「自定义」一组并排在最前。
+
 ## [0.2.0] - 2026-11-13
 
 ### Added
