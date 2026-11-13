@@ -1501,13 +1501,34 @@ function dockActive(route: Route): { appId?: string; projectId?: string; session
   };
 }
 
+/**
+ * 侧栏行上的状态：正在跑、等用户回答、有你没看过的新回复，
+ * 与会话列表页的口径保持一致，免得左栏看起来「都一样」。
+ */
+function dockStatePills(session: SessionSummary): HTMLElement[] {
+  const pills: HTMLElement[] = [];
+  if (session.busy) {
+    pills.push(
+      el("span", { className: "pill tiny busy" }, [el("span", { className: "spinner" }), document.createTextNode("运行中")]),
+    );
+  } else if (session.needsDecision) {
+    pills.push(el("span", { className: "pill tiny warn", text: "待回答" }));
+  }
+  if (unreadAt(session.sessionId) !== undefined) {
+    pills.push(el("span", { className: "pill tiny unread", text: "未读" }));
+  }
+  return pills;
+}
+
 function dockSessionButton(session: SessionSummary, active: boolean): HTMLButtonElement {
+  const pills = dockStatePills(session);
   const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
     el("span", {
       className: `mark ${session.busy ? "busy" : session.live ? "live" : ""}`,
       text: agentMark(session.kind),
     }),
     el("span", { className: "dock-session-title", text: session.title }),
+    ...(pills.length > 0 ? [el("span", { className: "dock-session-pills" }, pills)] : []),
   ]);
   node.title = session.title;
   if (active) node.setAttribute("aria-current", "page");
@@ -1600,10 +1621,13 @@ function dockHistory(): HTMLElement {
     const current = active.sessionId === session.sessionId;
     const node = el("button", { className: `dock-history-row${current ? " is-active" : ""}`, attrs: { type: "button" } }, [
       el("span", { className: "dock-history-title", text: session.title }),
-      el("span", {
-        className: "dock-history-meta",
-        text: `${agentLabel(session.kind)} · ${recentTime(session.updatedAt)}`,
-      }),
+      el("span", { className: "dock-history-facts" }, [
+        el("span", {
+          className: "dock-history-meta",
+          text: `${agentLabel(session.kind)} · ${recentTime(session.updatedAt)}`,
+        }),
+        ...dockStatePills(session),
+      ]),
     ]);
     node.title = `${session.title}\n${session.projectId}`;
     if (current) node.setAttribute("aria-current", "page");
