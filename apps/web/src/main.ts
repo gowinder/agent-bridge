@@ -1452,7 +1452,10 @@ function crumbsFor(route: Route): Crumb[] {
 function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
   app.replaceChildren(
     renderTopbar(crumbs),
-    el("div", { className: "shell" }, [dockSidebar(parseRoute()), content]),
+    el("div", { className: "shell" }, [
+      dockSidebar(parseRoute()),
+      el("div", { className: "shell-main" }, [content]),
+    ]),
   );
 }
 
