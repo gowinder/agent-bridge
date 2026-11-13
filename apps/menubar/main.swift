@@ -613,7 +613,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if updater.isBusy {
             menu.addItem(disabled(updater.summary))
         } else {
-            menu.addItem(disabled("当前版本 v\(Updater.currentVersion)"))
+            menu.addItem(disabled("菜单栏 app v\(Updater.currentVersion)"))
             if let failure = updater.lastFailure {
                 menu.addItem(disabled("检查更新失败：\(failure)"))
             }
@@ -678,7 +678,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         promptedUpdate = release.tag
         let prompt = NSAlert()
         prompt.messageText = "发现新版本 \(release.tag)"
-        prompt.informativeText = "当前版本 v\(Updater.currentVersion)。点「立即更新」会下载 DMG、替换应用，完成后自动重启。"
+        prompt.informativeText = "菜单栏 app 当前 v\(Updater.currentVersion)。点「立即更新」会下载 DMG、替换应用，完成后自动重启。"
         prompt.addButton(withTitle: "立即更新")
         prompt.addButton(withTitle: "稍后")
         NSApp.activate(ignoringOtherApps: true)

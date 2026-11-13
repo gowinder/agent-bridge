@@ -2640,6 +2640,47 @@ function effortLabel(level: string): string {
   return known[level] ? `${known[level]}（${level}）` : level;
 }
 
+/** 新建托管会话时加的启动参数：列表与勾选状态都记在浏览器本地。 */
+interface HostedArgPref {
+  value: string;
+  enabled: boolean;
+}
+
+const HOSTED_ARGS_KEY = "ab.hostedArgs";
+const MAX_HOSTED_ARGS = 24;
+let hostedArgPrefs: HostedArgPref[] | null = null;
+
+function loadHostedArgPrefs(): HostedArgPref[] {
+  if (hostedArgPrefs) return hostedArgPrefs;
+  let items: HostedArgPref[] = [];
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(HOSTED_ARGS_KEY) ?? "[]");
+    if (Array.isArray(raw)) {
+      items = raw
+        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+        .map((item) => ({
+          value: String(item["value"] ?? "").trim(),
+          enabled: item["enabled"] !== false,
+        }))
+        .filter((item) => item.value !== "")
+        .slice(0, MAX_HOSTED_ARGS);
+    }
+  } catch {
+    items = [];
+  }
+  hostedArgPrefs = items;
+  return items;
+}
+
+function saveHostedArgPrefs(): void {
+  if (!hostedArgPrefs) return;
+  try {
+    localStorage.setItem(HOSTED_ARGS_KEY, JSON.stringify(hostedArgPrefs));
+  } catch {
+    // 隐私模式下写不进去：这一次照样生效，只是下次不再记住。
+  }
+}
+
 function hostedCreatePanel(
   project: ProjectInfo,
   draft: { title: string; model: string; effort: string; mode: string },
@@ -2668,6 +2709,62 @@ function hostedCreatePanel(
   title.addEventListener("input", () => {
     draft.title = title.value;
   });
+  const argsInput = el("input", {
+    className: "input",
+    attrs: { type: "text", placeholder: "例如 --agent mix-agent，回车添加", "aria-label": "启动参数" },
+  });
+  const argsList = el("div", { className: "arg-list" });
+  const renderArgs = (): void => {
+    const prefs = loadHostedArgPrefs();
+    if (prefs.length === 0) {
+      argsList.replaceChildren(el("p", { className: "hint", text: "还没有保存过启动参数。" }));
+      return;
+    }
+    argsList.replaceChildren(
+      ...prefs.map((pref) => {
+        const box = el("input", { attrs: { type: "checkbox" } });
+        box.checked = pref.enabled;
+        box.addEventListener("change", () => {
+          pref.enabled = box.checked;
+          saveHostedArgPrefs();
+        });
+        const remove = button("×", () => {
+          const list = loadHostedArgPrefs();
+          const at = list.indexOf(pref);
+          if (at >= 0) list.splice(at, 1);
+          saveHostedArgPrefs();
+          renderArgs();
+        }, "arg-remove");
+        remove.title = "删除这个参数";
+        remove.setAttribute("aria-label", `删除 ${pref.value}`);
+        return el("div", { className: "arg-row" }, [
+          el("label", { className: "arg-check" }, [box, el("span", { className: "arg-value", text: pref.value })]),
+          remove,
+        ]);
+      }),
+    );
+  };
+  const addArg = (raw: string): void => {
+    const value = raw.trim();
+    if (!value) return;
+    const prefs = loadHostedArgPrefs();
+    const existing = prefs.find((item) => item.value === value);
+    if (existing) {
+      existing.enabled = true;
+    } else if (prefs.length < MAX_HOSTED_ARGS) {
+      prefs.push({ value, enabled: true });
+    }
+    saveHostedArgPrefs();
+    renderArgs();
+  };
+  argsInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    // 回车只加参数，不提交表单。
+    event.preventDefault();
+    addArg(argsInput.value);
+    argsInput.value = "";
+  });
+  renderArgs();
   const submit = button("创建", () => {
     const cwd = project.cwd;
     if (!cwd) return;
@@ -2675,11 +2772,13 @@ function hostedCreatePanel(
     status.classList.remove("error");
     status.textContent = "正在启动 Claude Code…";
     const permissionMode = (mode.value || "manual") as HostedPermissionMode;
+    const extraArgs = loadHostedArgPrefs().filter((item) => item.enabled).map((item) => item.value);
     void call<SessionGetResult>("hosted.create", {
       path: cwd,
       permissionMode,
       ...(model.value.trim() ? { model: model.value.trim() } : {}),
       ...(effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(extraArgs.length > 0 ? { args: extraArgs } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
       .then((result) => {
@@ -2723,6 +2822,11 @@ function hostedCreatePanel(
     el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]),
     effortHint,
     optionsHint,
+    el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
+    el("p", {
+      className: "hint",
+      text: "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。",
+    }),
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
     status,
     el("div", { className: "row-actions" }, [submit]),

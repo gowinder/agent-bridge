@@ -112,7 +112,8 @@ final class Updater {
         case .downloading: return "正在下载 \(available?.tag ?? "新版本")…"
         case .installing: return "正在安装，安装完成后会自动重启"
         case .failed(let reason): return "更新失败：\(reason)"
-        case .idle: return "当前版本 v\(Self.currentVersion)"
+        // 菜单顶部那行是 Bridge 的版本；这里写清楚是菜单栏 app 自己的版本，两者会分开升级。
+        case .idle: return "菜单栏 app v\(Self.currentVersion)"
         }
     }
 

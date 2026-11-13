@@ -1318,6 +1318,57 @@ details[open] > .dock-project-head::before {
   gap: 8px;
 }
 
+/* ---------- 托管会话的启动参数 ---------- */
+
+.arg-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.arg-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.arg-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.arg-value {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.arg-remove {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.arg-remove:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+
 /* ---------- pills ---------- */
 
 .pill {

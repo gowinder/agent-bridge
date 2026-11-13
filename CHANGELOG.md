@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-13
+
+### Added
+
+- 网页新建托管会话可以加 CLI 启动参数：输入后回车加一条（例如 `--agent mix-agent`），可逐条打钩或点 × 删除；列表与勾选状态记在浏览器本地，下次进来默认按上次的勾选恢复。参数随会话记录保存，resume 时原样带上。Bridge 只挡掉会话身份、输出协议与权限相关的旗标（`--session-id`、`--resume`、`--permission-mode`、`--dangerously-skip-permissions` 等）。
+
+### Fixed
+
+- 菜单栏底部的「当前版本」改为「菜单栏 app v…」：它显示的是菜单栏 app 自己的版本，与顶部那行的 Bridge 版本分开升级，两个数字不一样不是出错。
+
 ## [0.3.9] - 2026-11-13
 
 ### Changed
