@@ -5345,6 +5345,8 @@ let filePreviewOverlay: HTMLElement | null = null;
 let filePreviewBody: HTMLElement | null = null;
 let filePreviewTitle: HTMLElement | null = null;
 let filePreviewNote: HTMLElement | null = null;
+/** 预览头部右侧的操作区：文本文档放「复制」，图片等二进制不放。 */
+let filePreviewActions: HTMLElement | null = null;
 /** Increments per open/close so a late response cannot overwrite a newer preview. */
 let previewRequest = 0;
 
@@ -5361,10 +5363,11 @@ function ensureFilePreview(): HTMLElement {
   close.addEventListener("click", closeFilePreview);
   filePreviewBody = el("div", { className: "file-preview-body" });
   filePreviewNote = el("p", { className: "file-preview-note" });
+  filePreviewActions = el("span", { className: "file-preview-actions" });
   overlay.append(
     backdrop,
     el("div", { className: "file-preview-card" }, [
-      el("header", { className: "file-preview-head" }, [filePreviewTitle, close]),
+      el("header", { className: "file-preview-head" }, [filePreviewTitle, filePreviewActions, close]),
       filePreviewBody,
       filePreviewNote,
     ]),
@@ -5383,6 +5386,7 @@ function closeFilePreview(): void {
   filePreviewOverlay.hidden = true;
   document.body.classList.remove("has-file-preview");
   filePreviewBody?.replaceChildren();
+  filePreviewActions?.replaceChildren();
 }
 
 async function openFilePreview(path: string): Promise<void> {
@@ -5395,6 +5399,7 @@ async function openFilePreview(path: string): Promise<void> {
     filePreviewTitle.title = path;
   }
   if (filePreviewNote) filePreviewNote.textContent = "";
+  filePreviewActions?.replaceChildren();
   filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: "正在读取…" }));
   try {
     const file = await readLocalFile(path);
@@ -5409,6 +5414,10 @@ async function openFilePreview(path: string): Promise<void> {
       filePreviewBody?.replaceChildren(body);
     } else {
       filePreviewBody?.replaceChildren(el("pre", { className: "file-preview-text", text: file.text ?? "" }));
+    }
+    // 复制的是文件原文（markdown、svg 也复制源码）；位图这类二进制没有可复制的文本。
+    if (filePreviewActions && typeof file.text === "string" && file.text.length > 0) {
+      filePreviewActions.replaceChildren(copyButton(file.text, "复制全部内容"));
     }
     if (filePreviewNote) {
       filePreviewNote.textContent = `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`;
@@ -5444,11 +5453,11 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
 }
 
 /** 复制一段输出；写剪贴板失败时给出可见反馈，不静默。 */
-function copyButton(text: string): HTMLButtonElement {
+function copyButton(text: string, title = "复制这段输出"): HTMLButtonElement {
   const label = el("span", { text: "复制" });
   const copy = el("button", {
     className: "share-btn copy-btn",
-    attrs: { type: "button", title: "复制这段输出", "aria-label": "复制这段输出" },
+    attrs: { type: "button", title, "aria-label": title },
   }, [icon("copy"), label]);
   const flash = (next: string): void => {
     label.textContent = next;
