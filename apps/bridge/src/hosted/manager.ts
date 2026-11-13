@@ -48,8 +48,11 @@ export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
 /** 补算老会话的上下文用量时只读转录尾部这么多字节。 */
 const TRANSCRIPT_TAIL_BYTES = 262_144;
-/** CLI 模型名允许的字符集：普通标识符 + 完整 ID 里的括号/点/冒号，且不能以 `-` 开头。 */
-const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/;
+/**
+ * CLI 模型名允许的字符集：普通标识符 + 完整 ID 里的括号/点/冒号，再加路由器的 `厂商/模型`
+ * 与 `组/子组`（例如 `ncncapi/claude-opus-5-5`、`group/dsgroup`）；不能以 `-` 开头。
+ */
+const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$/;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
 const MAX_EXTRA_ARGS = 24;
 const MAX_EXTRA_ARG_CHARS = 200;
