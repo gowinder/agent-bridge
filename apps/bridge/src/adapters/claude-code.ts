@@ -1171,9 +1171,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const interrupted = lastInterruptOrder > lastContentOrder;
     const running = isBusy(busy) && !interrupted;
     const pendingAsk = pendingAsks.size > 0;
-    const askQuestions = pendingAsk
-      ? askBlock([...pendingAsks.values()].pop(), MAX_BLOCK_CHARS)?.questions
-      : undefined;
+    // 中断（Esc）过的提问也不会有 tool_result：那种“待答”不是真在等，别拿去代答。
+    const askQuestions =
+      running && pendingAsk
+        ? askBlock([...pendingAsks.values()].pop(), MAX_BLOCK_CHARS)?.questions
+        : undefined;
     this.messageCache.set(path, {
       mtimeMs,
       size,

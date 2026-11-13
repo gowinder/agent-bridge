@@ -4979,8 +4979,10 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     .filter((labels): labels is string[] => labels !== undefined);
   // 提问在等答案时回合仍在跑；回合结束后的旧提问不能再点，否则会当新消息重发。
   // 终端会话靠 herdr 往面板 pty 按键代答，所以 canSend 为 false 时选项仍可点。
-  const canAnswer =
-    state !== null && state.busy && (state.session.canSend || state.session.askChannel === "herdr");
+  // herdr 只代答单题单选，多题多选仍要在终端里答。
+  const herdrSingle =
+    state?.session.askChannel === "herdr" && questions.length === 1 && !questions[0]?.multiSelect;
+  const canAnswer = state !== null && state.busy && (state.session.canSend || herdrSingle);
   // 一个问题：点选即发送。多个问题：逐个选完，最后统一提交一条消息。
   const batch = questions.length > 1;
   const picks = new Map<string, Set<string>>();
@@ -5115,7 +5117,9 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
               : state?.session.askChannel === "herdr"
                 ? "点选后会在终端面板里替你按键选中这个选项。"
                 : "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
-            : (state?.session.sendBlockedReason ?? "请在桌面端回答这个提问"),
+            : state?.session.askChannel === "herdr"
+              ? "这个提问有多道题或是多选，请在终端里回答"
+              : (state?.session.sendBlockedReason ?? "请在桌面端回答这个提问"),
     }),
   );
   return box;
