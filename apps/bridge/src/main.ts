@@ -20,6 +20,11 @@ import {
   type AdminDevice,
 } from "./admin.js";
 import { Devtools, isDevtoolsCapability } from "./devtools.js";
+import {
+  SESSIOND_ALREADY_RUNNING,
+  startSessiondServer,
+  type SessiondServer,
+} from "./hosted/sessiond/server.js";
 import { SessionNotifier } from "./notify.js";
 import { Pusher } from "./push.js";
 import {
@@ -788,6 +793,34 @@ async function commandServe(): Promise<void> {
   store.close();
 }
 
+/**
+ * 隐藏子命令：常驻的 sessiond，持有托管会话子进程的 stdio。
+ * Bridge 重启只断开这条 UDS 连接，正在跑的那一轮不受影响。
+ */
+async function commandServeSessiond(): Promise<void> {
+  let server: SessiondServer;
+  try {
+    server = await startSessiondServer({
+      stateDir: defaultStateDir(),
+      log: (line) => console.log(line),
+    });
+  } catch (error) {
+    // 已有实例在跑时安静退出，避免拉起第二份守护进程。
+    if (error instanceof Error && error.message === SESSIOND_ALREADY_RUNNING) return;
+    throw error;
+  }
+  console.log(`sessiond 监听 ${server.socketPath}`);
+  const shutdown = (): void => {
+    // close 里先给所有子进程发 SIGTERM，再留一点收尾时间退出。
+    void server.close().finally(() => process.exit(0));
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  await new Promise<void>(() => {
+    // 常驻，直到信号触发。
+  });
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
@@ -799,6 +832,9 @@ async function main(): Promise<void> {
       return;
     case "serve":
       await commandServe();
+      return;
+    case "serve-sessiond":
+      await commandServeSessiond();
       return;
     case "devices":
       await commandDevices(args);
