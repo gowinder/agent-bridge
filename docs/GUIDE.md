@@ -84,8 +84,8 @@ a developer must build it before the daemon or the web client can pair.
 
 | Purpose | Pattern | Initiator | Responder |
 | --- | --- | --- | --- |
-| First pairing | `Noise_xxpsk3_25519_ChaChaPoly_BLAKE2s` | browser | bridge |
-| Reconnect | `Noise_ik_25519_ChaChaPoly_BLAKE2s` | browser | bridge |
+| First pairing | `Noise_XXpsk3_25519_ChaChaPoly_SHA256` | browser | bridge |
+| Reconnect | `Noise_IK_25519_ChaChaPoly_SHA256` | browser | bridge |
 
 `xxpsk3` is used for pairing because neither side knows the other's static key
 yet, and the PSK binds the handshake to the invite. `ik` is used afterwards
@@ -159,7 +159,8 @@ bridge init --relay <url> [--web <url>] [--name <name>]
 - Calls `GET /v1/health` and aborts on failure.
 - Generates a room id (UUID), a bridge token (32 random bytes, base64url), and a
   Noise static key pair.
-- Writes `identity.json`, `bridge.db` meta rows, and the default device TTL.
+- Writes the Noise identity and config into `bridge.db` meta, plus the default
+  device TTL.
 - The room is *claimed* by the first bridge that connects with a given room id
   and token. The relay stores `SHA-256(token)` as `bridge_hash` (trust on first
   use). A different bridge presenting the same room id is rejected.
@@ -237,7 +238,6 @@ device at a time, so a slow adapter call cannot interleave with another.
 | `channel.open` | both | Open a channel with a given 16-byte id |
 | `channel.close` | both | Close a channel |
 | `peer.state` | relay | Peer online/offline changes |
-| `ping` / `pong` | both | Keepalive |
 
 Limits: relay frame max 64 KiB, control message max 8 KiB, `hello` timeout 5 s.
 
@@ -283,13 +283,18 @@ allows 20 s per request by default.
 | --- | --- |
 | Host | `host.info`, `host.capabilities`, `app.list`, `project.list` |
 | Sessions | `session.list`, `session.get`, `session.rail`, `session.models`, `session.compact`, `session.rename` |
-| Messages | `message.list`, `message.send`, `turn.cancel`, `approval.respond`, `task.messages` |
-| Hosted | `hosted.dirs.create`, `hosted.stop`, `hosted.resume` |
-| Files | `file.upload.begin`, `file.upload.chunk`, `file.upload.finish`, `transfer.prepare`, `transfer.commit`, `fs.roots.list`, `fs.roots.read` |
+| Messages | `message.list`, `message.send`, `task.messages` |
+| Hosted | `hosted.dirs`, `hosted.create`, `hosted.stop`, `hosted.resume` |
+| Files | `file.upload.begin`, `file.upload.chunk`, `file.upload.finish`, `transfer.prepare`, `transfer.commit`, `fs.roots`, `fs.list`, `fs.read` |
 | Shell | `shell.exec`, `shell.cancel` |
 | Devices | `device.list`, `device.revoke`, `device.rename` |
 | Push | `push.info`, `push.subscribe`, `push.unsubscribe` |
-| Declared, not dispatched | `pair.request` (handled by the pairing session), `session.subscribe`, `session.unsubscribe`, `sync.resume`, `operation.get` |
+| Declared, not dispatched | `session.subscribe`, `session.unsubscribe`, `sync.resume`, `operation.get`, `turn.cancel`, `approval.respond` |
+
+Approval buttons in the UI are not a separate RPC: they call `message.send` with
+the button label (or "clicked X, please do this step"), and a hosted session
+recognises `allow`/`deny`-style replies. `approval.respond` and `turn.cancel`
+exist in `METHODS` but no adapter handles them yet.
 
 ### 6.3 Events
 
@@ -362,7 +367,7 @@ session, so the UI hides what an agent cannot do.
   `thread-follower-start-turn`; only works for a thread that is currently open in
   the app.
 - **Compact:** native, via `thread-follower-compact-thread`.
-- **Read:** full for the visible thread. **Create:** no.
+- **Read:** partial for the visible thread. **Create:** no.
 
 ### `codex-cli` — Codex · CLI
 
@@ -385,7 +390,7 @@ session, so the UI hides what an agent cannot do.
 
 - **Data:** `~/.dsh/sessions/*.jsonl.zstd` (zstd-compressed JSONL).
 - **Send:** `dsh --profile headless --session-id <id>`.
-- **Read:** full. **Create:** no.
+- **Read:** partial. **Create:** no.
 
 ### `hosted` — Claude Code · Hosted by Bridge
 
@@ -450,7 +455,7 @@ Two independent switches, both **off by default**, both with a TTL of 60 s to
 24 h:
 
 ```
-agent-bridge devtools [files|terminal|all] [on|off|status] [--ttl 60..86400]
+agent-bridge devtools [files|terminal] [on|off|status] [--ttl 60..86400]
 ```
 
 ### Files
@@ -512,10 +517,10 @@ the Mac (except when creating a hosted session).
 
 ### Content security
 
-`index.html` declares a strict CSP: `default-src 'self'`,
+`public/_headers` ships a strict CSP: `default-src 'self'`,
 `script-src 'self' 'wasm-unsafe-eval'`, `connect-src https: wss:`,
-`frame-ancestors 'none'`. The service worker only handles push and
-notification clicks for same-origin URLs.
+`object-src 'none'`, `frame-ancestors 'none'`. The service worker only handles
+push and notification clicks for same-origin URLs.
 
 ## 11. Notifications
 
@@ -539,8 +544,7 @@ Default state directory:
 
 | Path | Contents |
 | --- | --- |
-| `bridge.db` | SQLite, WAL: `meta`, `devices`, `invites`, `device_events` (last 200 per device), `push_subscriptions`, `session_titles` |
-| `identity.json` | Noise static identity |
+| `bridge.db` | SQLite, WAL: `meta`, `devices`, `invites`, `device_events` (last 200 per device), `push_subscriptions`, `session_titles`; the Noise static identity lives in `meta` as `identity_private` / `identity_public` |
 | `hosted.json` | Hosted allowlist and policy (you create this) |
 | `hosted/<id>.jsonl` | Hosted transcripts |
 | `hosted/sessions.json` | Hosted session registry |
@@ -552,8 +556,8 @@ The directory is created 0700 and the database 0600.
 - **Backup:** copy the whole directory while the daemon is stopped. Device pairs
   and hosted transcripts survive; the noise identity must be preserved, or every
   device must re-pair.
-- **Reset pairings:** delete `bridge.db` (and `identity.json`) and run `init`
-  again, or revoke devices individually.
+- **Reset pairings:** delete `bridge.db` and run `init` again (this also replaces
+  the Noise identity), or revoke devices individually.
 - **Preview vs production on one Mac:** use a different `AGENT_BRIDGE_HOME` per
   environment. The admin port file is per state directory, which is why both can
   run at once (47825 production, 47826 preview).
@@ -646,9 +650,10 @@ an already-paired device.
 
 ### Protocol
 
-- `session.subscribe`, `session.unsubscribe`, `sync.resume` and `operation.get`
-  are in `METHODS` but not dispatched by `apps/bridge/src/sessions.ts`. Calling
-  them returns an unsupported-method error.
+- `session.subscribe`, `session.unsubscribe`, `sync.resume`, `operation.get`,
+  `turn.cancel` and `approval.respond` are in `METHODS` but not dispatched by
+  `apps/bridge/src/sessions.ts`. Calling them returns an unsupported-method
+  error; the UI sends approvals and next-step actions as normal messages.
 - Only `shell.output` is emitted as an event. Chat and list views poll.
 - No protocol negotiation beyond `PROTOCOL_VERSION`; a mismatched client and
   bridge fail at the first unknown method rather than downgrading.

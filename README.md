@@ -80,17 +80,19 @@ differs by agent because each one stores and accepts messages differently.
 
 | Adapter key | Display name | List | Read | Send | Create | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| `hosted` | Claude Code · Hosted by Bridge | ✅ | ✅ | ✅ | ✅ | Bridge owns the CLI process; approvals work end to end |
-| `claude-code` | Claude Desktop · Code | ✅ | partial | ✅ | ❌ | Wakes the desktop app and injects a peer message |
-| `claude-code-cli` | Claude Code · CLI | ✅ | partial | ✅ | ❌ | Running CLI via local socket, otherwise `claude --resume -p` |
-| `codex` | ChatGPT Desktop · Codex | ✅ | ✅ | ✅ | ❌ | Only threads that are open in the app; native compact |
-| `codex-cli` | Codex · CLI | ✅ | partial | ✅ | ❌ | `codex queue` when running, otherwise `codex exec resume` |
-| `antigravity` | Antigravity CLI | ✅ | partial | ✅ | ❌ | Cannot send while the session is running |
-| `antigravity-desktop` | Antigravity Desktop | ✅ | ✅ | ❌ | ❌ | Read-only |
-| `dsh` | DeepSeek Harness | ✅ | ✅ | ✅ | ❌ | Headless profile |
+| `hosted` | Claude Code · Bridge 托管 | full | full | ✅ | ✅ | Bridge owns the CLI process; approvals work end to end |
+| `claude-code` | Claude Desktop · Code | partial | partial | ✅ | ❌ | Wakes the desktop app and injects a peer message |
+| `claude-code-cli` | Claude Code · CLI | partial | partial | ✅ | ❌ | Running CLI via local socket, otherwise `claude --resume -p` |
+| `codex` | ChatGPT Desktop · Codex | partial | partial | ✅ | ❌ | Only threads that are open in the app; native compact |
+| `codex-cli` | Codex · CLI | partial | partial | ✅ | ❌ | `codex queue` when running, otherwise `codex exec resume` |
+| `antigravity` | Antigravity CLI | partial | partial | ✅ | ❌ | Cannot send while the session is running |
+| `antigravity-desktop` | Antigravity 桌面版 | full | full | ❌ | ❌ | Read-only |
+| `dsh` | DeepSeek Harness | partial | partial | ✅ | ❌ | Headless profile |
 
-"Partial" read means the adapter recovers the visible conversation but may not
-expose tool output, attachments or every historical turn. See
+"Partial" reflects the adapter's own `capabilities` declaration
+(`Completeness = complete | partial | unknown | unavailable`), not a bug: none of
+these agents publish a stable session API, so list and read may miss tool
+output, attachments or historical turns. See
 [docs/GUIDE.md](docs/GUIDE.md#7-adapters) for the data source and send mechanism of
 each adapter.
 
@@ -241,7 +243,8 @@ default, both with a TTL**:
 npm run bridge -- devtools                 # show status
 npm run bridge -- devtools files on --ttl 3600
 npm run bridge -- devtools terminal on --ttl 600
-npm run bridge -- devtools all off
+npm run bridge -- devtools files off
+npm run bridge -- devtools terminal off
 ```
 
 The file browser is read-only and confined to the session's project directory.
@@ -256,7 +259,7 @@ agent-bridge invite [--ttl 30..600]
 agent-bridge serve
 agent-bridge devices [ttl manual|1h|24h|7d|30d]
 agent-bridge revoke <deviceId>
-agent-bridge devtools [files|terminal|all] [on|off|status] [--ttl 60..86400]
+agent-bridge devtools [files|terminal] [on|off|status] [--ttl 60..86400]
 agent-bridge port [<port>]
 agent-bridge status
 agent-bridge info
@@ -289,8 +292,8 @@ device you are using; other devices are managed on the Mac.
 State directory contents:
 
 ```
-bridge.db          SQLite: devices, invites, push subscriptions, titles, events
-identity.json      Noise static key pair
+bridge.db          SQLite: devices, invites, push subscriptions, titles, events,
+                   and the Noise static identity (identity_private / identity_public)
 hosted.json        hosted-session allowlist and policy
 hosted/            hosted transcripts (*.jsonl) and sessions.json
 admin-port         loopback admin port for this state directory
@@ -338,10 +341,11 @@ These are properties of the current design, not bugs to be worked around:
 - **Browsers can only create hosted sessions.** Every other adapter attaches to
   sessions that already exist on the Mac.
 - **Antigravity Desktop is read-only.**
-- **`session.subscribe`, `session.unsubscribe`, `sync.resume` and
-  `operation.get` are declared in the protocol but not dispatched** by the
-  bridge yet. The UI polls instead of subscribing to server-pushed events; only
-  `shell.output` is emitted as a real event.
+- **`session.subscribe`, `session.unsubscribe`, `sync.resume`,
+  `operation.get`, `turn.cancel` and `approval.respond` are declared in the
+  protocol but not dispatched** by the bridge yet. The UI polls instead of
+  subscribing to server-pushed events; only `shell.output` is emitted as a real
+  event, and approval buttons are sent as ordinary messages.
 - **The web client UI is Chinese only** (`zh-CN`). There is no i18n layer.
 - **The relay is a single Cloudflare Worker + Durable Object per room.** Room
   data lives in that object; idle rooms are cleaned after 30 days, keeping only
