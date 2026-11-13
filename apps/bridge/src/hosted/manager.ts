@@ -2,9 +2,13 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
+  readdirSync,
   readFileSync,
+  readSync,
   realpathSync,
   renameSync,
   statSync,
@@ -41,6 +45,8 @@ const IDLE_SWEEP_MS = 60_000;
 const MAX_BLOCK_CHARS = 4_000;
 export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
+/** 补算老会话的上下文用量时只读转录尾部这么多字节。 */
+const TRANSCRIPT_TAIL_BYTES = 262_144;
 /** CLI 模型名允许的字符集：普通标识符 + 完整 ID 里的括号/点/冒号，且不能以 `-` 开头。 */
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/;
 
@@ -177,6 +183,7 @@ export class HostedSessionManager {
     this.log = options.log ?? (() => undefined);
     this.config = readConfig(this.stateDir);
     this.loadRecords();
+    this.backfillContext();
     this.sweeper = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
     this.sweeper.unref();
     process.once("exit", this.exitHandler);
@@ -769,6 +776,9 @@ export class HostedSessionManager {
     if (type === "result") {
       live.busy = false;
       live.pending = null;
+      // 走代理的模型在 assistant 事件里可能报 0 用量；回合结束时按 CLI 转录里的真实用量兜底。
+      const context = contextFromTranscript(record);
+      if (context) record.context = context;
       const isError = event["is_error"] === true;
       const text = typeof event["result"] === "string" ? event["result"].trim() : "";
       if (isError && text) {
@@ -1081,6 +1091,19 @@ export class HostedSessionManager {
     }
   }
 
+  /** 上下文用量的记录晚于会话本身：老记录缺这个字段，启动时从 CLI 转录里补一次。 */
+  private backfillContext(): void {
+    let changed = false;
+    for (const record of this.records.values()) {
+      if (record.context) continue;
+      const context = contextFromTranscript(record);
+      if (!context) continue;
+      record.context = context;
+      changed = true;
+    }
+    if (changed) this.persistRecords();
+  }
+
   private persistRecords(): void {
     try {
       mkdirSync(this.hostedDir(), { recursive: true, mode: 0o700 });
@@ -1115,6 +1138,64 @@ export class HostedSessionManager {
       this.log(`hosted: registry write failed: ${String(error)}`);
     }
   }
+}
+
+/** CLI 把每个会话的转录写在 ~/.claude/projects/<cwd>/<id>.jsonl，末尾那条 assistant 带着用量。 */
+function contextFromTranscript(record: HostedRecord): ContextUsage | undefined {
+  const root = join(homedir(), ".claude", "projects");
+  let dirs: string[];
+  try {
+    dirs = readdirSync(root);
+  } catch {
+    return undefined;
+  }
+  const file = dirs.map((dir) => join(root, dir, `${record.id}.jsonl`)).find((path) => existsSync(path));
+  if (!file) return undefined;
+  let text: string;
+  let truncated = false;
+  try {
+    truncated = statSync(file).size > TRANSCRIPT_TAIL_BYTES;
+    text = readTail(file, TRANSCRIPT_TAIL_BYTES);
+  } catch {
+    return undefined;
+  }
+  const lines = text.split("\n");
+  // 从中间截断的第一行不完整，丢掉。
+  if (truncated) lines.shift();
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]?.trim();
+    if (!line || !line.includes('"assistant"')) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!isRecord(entry) || entry["type"] !== "assistant") continue;
+    const message = isRecord(entry["message"]) ? entry["message"] : {};
+    const reported = typeof message["model"] === "string" ? message["model"] : "";
+    // 转录里的模型名会丢掉 [1m] 这类后缀，窗口上限以会话记录的模型为准。
+    const context = contextUsageFromUsage(
+      message["usage"],
+      record.observedModel || reported || record.model || "",
+    );
+    if (context) return context;
+  }
+  return undefined;
+}
+
+/** 只读文件末尾这么多个字节：转录可能几十 MB，整份读进内存不值当。 */
+function readTail(file: string, bytes: number): string {
+  const size = statSync(file).size;
+  const length = Math.min(size, bytes);
+  const buffer = Buffer.alloc(length);
+  const fd = openSync(file, "r");
+  try {
+    readSync(fd, buffer, 0, length, size - length);
+  } finally {
+    closeSync(fd);
+  }
+  return buffer.toString("utf8");
 }
 
 export function sessionKeyFor(id: string): string {

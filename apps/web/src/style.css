@@ -1062,6 +1062,44 @@ details[open] > .dock-project-head::before {
   overflow-wrap: anywhere;
 }
 
+/* 桌面端头部只占两行：标题 + 说明，右侧按钮横排；聊天记录拿回这部分高度。 */
+@media (min-width: 721px) {
+  .chat-head {
+    align-items: center;
+    gap: 10px;
+    padding-bottom: 2px;
+  }
+
+  .chat-head .view-head-main {
+    gap: 2px;
+  }
+
+  .chat-head .chat-title {
+    font-size: 19px;
+    line-height: 1.3;
+  }
+
+  /* 面包屑已经写着应用与工程，头部不再重复一行。 */
+  .chat-head .eyebrow {
+    display: none;
+  }
+
+  .chat-head .meta {
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .chat-head-side {
+    flex-direction: row;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 0;
+  }
+}
+
 /* 手机上头部空间不够时只显示短文案；见 720px 媒体查询。 */
 .create-label-short {
   display: none;
