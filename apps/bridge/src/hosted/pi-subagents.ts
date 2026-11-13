@@ -85,6 +85,21 @@ export function piSubagentTasks(
     .slice(0, max);
 }
 
+/** 这个 pi 会话派生的某次 run 的目录；runId 不合法、或 run 属于别的会话时返回 null。 */
+export function piRunDir(piSessionId: string, runId: string, root = piSubagentRoot()): string | null {
+  // runId 会拼进路径：只收 UUID 这类普通标识符，挡掉 `../`。
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(runId)) return null;
+  const dir = join(root, RUNS_DIR_NAME, runId);
+  try {
+    const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8")) as PiRunStatus;
+    // run 目录按用户共享，别的会话的 run 不给看。
+    if (status.sessionId !== piSessionId) return null;
+  } catch {
+    return null;
+  }
+  return dir;
+}
+
 function taskOf(runId: string, status: PiRunStatus, dirMtimeMs: number): RailTask | null {
   const steps = Array.isArray(status.steps) ? status.steps : [];
   const stepIndex =

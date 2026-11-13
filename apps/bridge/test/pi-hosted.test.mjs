@@ -318,6 +318,62 @@ test("subagent model is refused for claude sessions and while a turn is running"
   assert.deepEqual(child.signals, []);
 });
 
+test("pi background run artifacts become task messages", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const piId = session.sessionId.replace("hosted:", "");
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+  const runs = join(root, "async-subagent-runs");
+  writeRun(runs, "run-msgs", { sessionId: piId, state: "complete", steps: [{ agent: "scout" }] });
+  const events = [
+    { type: "message_end", message: { role: "system", content: "几千字的启动提示词" } },
+    { type: "message_end", message: { role: "user", content: [{ type: "text", text: "数一下文件" }], timestamp: 1000 } },
+    {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先 ls" },
+          { type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } },
+        ],
+        timestamp: 2000,
+      },
+    },
+    { type: "message_end", message: { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "a.txt" }], timestamp: 3000 } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "共 1 个文件" }], timestamp: 4000 } },
+    // 写到一半的最后一行要跳过。
+    '{"type":"message_end","message":{"role":"assistant","cont',
+  ];
+  writeFileSync(join(runs, "run-msgs", "events.jsonl"), `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  const page = h.manager.taskMessages(session.sessionId, "run-msgs", { limit: 50 });
+  assert.deepEqual(
+    page.messages.map((message) => [message.role, message.blocks.map((block) => block.type)]),
+    [
+      ["user", ["text"]],
+      ["assistant", ["tool"]],
+      ["assistant", ["text"]],
+      ["assistant", ["text"]],
+    ],
+  );
+  assert.equal(page.messages[1].blocks[0].text, '调用 bash {"command":"ls"}');
+  assert.equal(page.messages.at(-1).blocks[0].text, "共 1 个文件");
+  assert.equal(page.completeness, "partial");
+
+  // 分页游标与路径拼接都要挡住。
+  const older = h.manager.taskMessages(session.sessionId, "run-msgs", { limit: 2, before: page.messages[3].messageId });
+  assert.equal(older.messages.length, 2);
+  assert.equal(older.nextBefore, page.messages[1].messageId);
+  assert.throws(() => h.manager.taskMessages(session.sessionId, "../run-msgs", { limit: 10 }), /未知后台任务/);
+});
+
 function writeRun(runs, runId, status) {
   const dir = join(runs, runId);
   mkdirSync(dir, { recursive: true });

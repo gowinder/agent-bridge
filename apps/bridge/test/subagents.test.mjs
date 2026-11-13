@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { subagentDirsFor, subagentTasks } from "../dist/subagents.js";
+import { claudeTaskMessages } from "../dist/hosted/task-messages.js";
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), "subagents-test-"));
@@ -53,6 +54,48 @@ test("subagent meta files under the CLI session become rail tasks", () => {
   assert.equal(stale.status, "done");
   assert.equal(stale.name, "只给了描述");
   assert.equal(stale.detail, undefined);
+});
+
+test("claude subagent transcript becomes task messages", () => {
+  const f = fixture();
+  addTask(f.subagents, "agent-d", { name: "reviewer" });
+  const at = "2026-11-13T00:00:00.000Z";
+  const lines = [
+    { type: "user", message: { role: "user", content: [{ type: "text", text: "看下这个文件" }] }, timestamp: at },
+    {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "好" },
+          { type: "tool_use", id: "t1", name: "Read", input: { file_path: "a.ts" } },
+        ],
+      },
+      timestamp: at,
+    },
+    {
+      type: "user",
+      message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: [{ type: "text", text: "文件内容" }] }] },
+      timestamp: at,
+    },
+    "{ 半行",
+  ];
+  writeFileSync(join(f.subagents, "agent-d.jsonl"), `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+  const messages = claudeTaskMessages("cli-1", "agent-d", f.root);
+  assert.deepEqual(
+    messages.map((message) => [message.role, message.blocks.map((block) => block.type)]),
+    [
+      ["user", ["text"]],
+      ["assistant", ["text", "tool"]],
+      ["user", ["tool"]],
+    ],
+  );
+  assert.equal(messages[1].blocks[1].text, '调用 Read {"file_path":"a.ts"}');
+  assert.equal(messages[2].blocks[0].text, "文件内容");
+  // taskId 只收 CLI 的子代理 id，路径拼接挡在外面。
+  assert.equal(claudeTaskMessages("cli-1", "../../etc/passwd", f.root), null);
+  assert.equal(claudeTaskMessages("cli-1", "agent-missing", f.root), null);
 });
 
 test("a finished subagent is done even when its files are fresh", () => {

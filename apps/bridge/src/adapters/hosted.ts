@@ -63,6 +63,10 @@ export class HostedAdapter implements SessionAdapter {
     return this.manager.messageText(sessionId, messageId);
   }
 
+  taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
+    return this.manager.taskMessages(sessionId, taskId, page);
+  }
+
   rail(sessionId: string): SessionRailResult {
     return this.manager.rail(sessionId);
   }

@@ -50,6 +50,7 @@ import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
 import { PiSession, type PiPending } from "./pi-session.js";
 import { piSubagentTasks } from "./pi-subagents.js";
+import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
 
@@ -526,6 +527,29 @@ export class HostedSessionManager {
       .trim();
     if (!text) return null;
     return { messageId: message.messageId, role: message.role, createdAt: message.createdAt, text };
+  }
+
+  /** 侧栏点开的后台任务记录：pi 读 run 的 events.jsonl，Claude Code 读子代理转录。 */
+  taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    const all =
+      record.agent === "pi" ? piTaskMessages(record.id, taskId) : claudeTaskMessages(record.id, taskId);
+    if (!all) throw new RpcError("not_found", "未知后台任务");
+    let end = all.length;
+    if (page.before) {
+      const index = all.findIndex((message) => message.messageId === page.before);
+      if (index === -1) throw new RpcError("invalid_params", "未知的分页游标");
+      end = index;
+    }
+    const start = Math.max(0, end - page.limit);
+    const result: MessageListResult = {
+      messages: all.slice(start, end),
+      completeness: "partial",
+      note: record.agent === "pi" ? "子代理记录：来自 pi-subagents 的 run 产物，仅文本与工具摘要" : "子任务记录：仅文本与工具调用摘要",
+    };
+    if (start > 0) result.nextBefore = result.messages[0]?.messageId;
+    return result;
   }
 
   rail(sessionId: string): SessionRailResult {
