@@ -14,6 +14,8 @@ import type {
   FsRoot,
   FsRootsResult,
   HostedDirsResult,
+  HostedInterruptResult,
+  HostedOptionsResult,
   HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
@@ -23,6 +25,7 @@ import type {
   MessageRecord,
   MessageSendResult,
   Method,
+  ModelOption,
   NextStepAction,
   ProjectInfo,
   ProjectListResult,
@@ -225,7 +228,7 @@ let pollTimer: number | null = null;
 let renderToken = 0;
 let deferredListRender = false;
 /** 新建托管会话表单的草稿：中途重连重绘时把已填内容还回去，不打断输入。 */
-let hostedDraft: { projectId: string; title: string; model: string; mode: string } | null = null;
+let hostedDraft: { projectId: string; title: string; model: string; effort: string; mode: string } | null = null;
 /** Lets a soft reconnect refresh the open chat in place instead of re-rendering it. */
 let chatResumeKey: string | null = null;
 let chatResume: (() => void) | null = null;
@@ -1447,7 +1450,202 @@ function crumbsFor(route: Route): Crumb[] {
 }
 
 function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
-  app.replaceChildren(renderTopbar(crumbs), content);
+  app.replaceChildren(
+    renderTopbar(crumbs),
+    el("div", { className: "shell" }, [
+      dockSidebar(parseRoute()),
+      el("div", { className: "shell-main" }, [content]),
+    ]),
+  );
+}
+
+const DOCK_TAB_KEY = "ab.dockTab";
+const DOCK_SESSIONS_PER_PROJECT = 8;
+const DOCK_HISTORY_LIMIT = 30;
+type DockTab = "tree" | "history";
+
+function readDockTab(): DockTab {
+  try {
+    return localStorage.getItem(DOCK_TAB_KEY) === "history" ? "history" : "tree";
+  } catch {
+    return "tree";
+  }
+}
+
+function writeDockTab(tab: DockTab): void {
+  try {
+    localStorage.setItem(DOCK_TAB_KEY, tab);
+  } catch {
+    // storage unavailable; the chosen tab just won't be remembered
+  }
+}
+
+function agentLabel(kind: string): string {
+  if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "ChatGPT";
+  if (kind === "antigravity" || kind === "antigravity-desktop") return "Antigravity";
+  if (kind === "dsh") return "DeepSeek";
+  if (kind === "hosted") return "托管";
+  return "Claude";
+}
+
+/** 当前路由落在 dock 的哪一层，用来展开并高亮对应条目。 */
+function dockActive(route: Route): { appId?: string; projectId?: string; sessionId?: string } {
+  if (route.level === "clients" || route.level === "devices") return {};
+  return {
+    appId: route.appId,
+    ...("projectId" in route ? { projectId: route.projectId } : {}),
+    ...(route.level === "chat" ? { sessionId: route.sessionId } : {}),
+  };
+}
+
+function dockSessionButton(session: SessionSummary, active: boolean): HTMLButtonElement {
+  const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
+    el("span", {
+      className: `mark ${session.busy ? "busy" : session.live ? "live" : ""}`,
+      text: agentMark(session.kind),
+    }),
+    el("span", { className: "dock-session-title", text: session.title }),
+  ]);
+  node.title = session.title;
+  if (active) node.setAttribute("aria-current", "page");
+  node.addEventListener("click", () => {
+    navigate({
+      level: "chat",
+      appId: session.appId,
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+    });
+  });
+  return node;
+}
+
+/** 第一个 tab：agent → project → session 的树，当前路径默认展开。 */
+function dockTree(route: Route): HTMLElement {
+  const wrap = el("div", { className: "dock-list" });
+  const data = snapshot;
+  if (!data) {
+    wrap.append(el("p", { className: "hint", text: "正在读取会话…" }));
+    return wrap;
+  }
+  const active = dockActive(route);
+  let rendered = 0;
+  for (const appInfo of data.apps) {
+    const projects = data.projects.filter((item) => item.appId === appInfo.appId);
+    const sessionsOf = (projectId: string): SessionSummary[] =>
+      data.sessions
+        .filter((item) => item.projectId === projectId)
+        .sort((a, b) => b.updatedAt - a.updatedAt);
+    const rows = projects.map((project) => ({ project, sessions: sessionsOf(project.projectId) }));
+    const visible = rows.filter((row) => row.sessions.length > 0);
+    if (visible.length === 0) continue;
+    const total = visible.reduce((sum, row) => sum + row.project.sessionCount, 0);
+
+    const appNode = el("details", { className: "dock-app" });
+    appNode.open = rendered === 0 || active.appId === appInfo.appId;
+    appNode.append(
+      el("summary", { className: "dock-app-head" }, [
+        el("span", { className: "dock-app-name", text: shortAgentName(appInfo) }),
+        el("span", { className: "dock-count", text: String(total) }),
+      ]),
+    );
+    for (const { project, sessions } of visible) {
+      const projectNode = el("details", { className: "dock-project" });
+      projectNode.open = active.projectId === project.projectId;
+      const head = el("summary", { className: "dock-project-head" }, [
+        el("span", { className: "dock-project-name", text: project.name }),
+        el("span", { className: "dock-count", text: String(project.sessionCount) }),
+      ]);
+      if (active.projectId === project.projectId) head.classList.add("is-active");
+      projectNode.append(head);
+      for (const session of sessions.slice(0, DOCK_SESSIONS_PER_PROJECT)) {
+        projectNode.append(dockSessionButton(session, active.sessionId === session.sessionId));
+      }
+      const rest = sessions.length - DOCK_SESSIONS_PER_PROJECT;
+      if (rest > 0) {
+        projectNode.append(
+          button(`还有 ${rest} 条…`, () => {
+            navigate({ level: "sessions", appId: project.appId, projectId: project.projectId });
+          }, "dock-more"),
+        );
+      }
+      appNode.append(projectNode);
+    }
+    wrap.append(appNode);
+    rendered += 1;
+  }
+  if (rendered === 0) wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
+  return wrap;
+}
+
+/** 第二个 tab：所有会话按最近更新排序。 */
+function dockHistory(): HTMLElement {
+  const wrap = el("div", { className: "dock-list" });
+  const data = snapshot;
+  if (!data) {
+    wrap.append(el("p", { className: "hint", text: "正在读取会话…" }));
+    return wrap;
+  }
+  const active = dockActive(parseRoute());
+  const sessions = [...data.sessions]
+    .sort((a, b) => b.updatedAt - a.updatedAt)
+    .slice(0, DOCK_HISTORY_LIMIT);
+  if (sessions.length === 0) {
+    wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
+    return wrap;
+  }
+  for (const session of sessions) {
+    const current = active.sessionId === session.sessionId;
+    const node = el("button", { className: `dock-history-row${current ? " is-active" : ""}`, attrs: { type: "button" } }, [
+      el("span", { className: "dock-history-title", text: session.title }),
+      el("span", {
+        className: "dock-history-meta",
+        text: `${agentLabel(session.kind)} · ${recentTime(session.updatedAt)}`,
+      }),
+    ]);
+    node.title = `${session.title}\n${session.projectId}`;
+    if (current) node.setAttribute("aria-current", "page");
+    node.addEventListener("click", () => {
+      navigate({
+        level: "chat",
+        appId: session.appId,
+        projectId: session.projectId,
+        sessionId: session.sessionId,
+      });
+    });
+    wrap.append(node);
+  }
+  return wrap;
+}
+
+/** 桌面宽屏左侧的 dock：结构树与历史两个 tab，选中的 tab 记在 localStorage。 */
+function dockSidebar(route: Route): HTMLElement {
+  let tab = readDockTab();
+  const nav = el("nav", { className: "dock", attrs: { "aria-label": "会话导航" } });
+  const tabs = el("div", { className: "dock-tabs", attrs: { role: "tablist" } });
+  const body = el("div", { className: "dock-body" });
+  const makeTab = (id: DockTab, label: string): HTMLButtonElement => {
+    const node = el("button", { className: "dock-tab", text: label, attrs: { type: "button", role: "tab" } });
+    node.addEventListener("click", () => {
+      if (tab === id) return;
+      tab = id;
+      writeDockTab(id);
+      paint();
+    });
+    return node;
+  };
+  const treeTab = makeTab("tree", "结构");
+  const historyTab = makeTab("history", "历史");
+  tabs.append(treeTab, historyTab);
+  const paint = (): void => {
+    for (const [id, node] of [["tree", treeTab], ["history", historyTab]] as const) {
+      node.classList.toggle("is-active", tab === id);
+      node.setAttribute("aria-selected", String(tab === id));
+    }
+    body.replaceChildren(tab === "tree" ? dockTree(route) : dockHistory());
+  };
+  paint();
+  nav.append(tabs, body);
+  return nav;
 }
 
 function shortAgentName(app: AppInfo): string {
@@ -2177,7 +2375,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   if (panelHost && project && draft) panelHost.append(hostedCreatePanel(project, draft));
   const openCreate = (): void => {
     if (!panelHost || !project) return;
-    hostedDraft = { projectId: project.projectId, title: "", model: "", mode: "manual" };
+    hostedDraft = { projectId: project.projectId, title: "", model: "", effort: "", mode: "manual" };
     panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     panelHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
@@ -2333,30 +2531,34 @@ function hostedModelLabel(model: string | undefined): string {
   return model ? model : "CLI 默认";
 }
 
+function effortLabel(level: string): string {
+  const known: Record<string, string> = { low: "低", medium: "中", high: "高", xhigh: "更高", max: "最高" };
+  return known[level] ? `${known[level]}（${level}）` : level;
+}
+
 function hostedCreatePanel(
   project: ProjectInfo,
-  draft: { title: string; model: string; mode: string },
+  draft: { title: string; model: string; effort: string; mode: string },
 ): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
   const mode = el("select", { className: "input" });
   const modeHint = el("p", { className: "hint" });
-  const model = el("input", {
-    className: "input",
-    attrs: {
-      type: "text",
-      placeholder: "留空用 CLI 默认（可填 opus / sonnet / haiku 或完整模型 ID）",
-      spellcheck: "false",
-      autocapitalize: "off",
-    },
-  });
+  const model = el("select", { className: "input", attrs: { "aria-label": "模型" } });
+  model.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
+  const effort = el("select", { className: "input", attrs: { "aria-label": "思考程度" } });
+  effort.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
+  const optionsHint = el("p", { className: "hint", text: "正在读取本机 CLI 支持的模型与思考程度…" });
+  const effortHint = el("p", { className: "hint", text: "思考程度越高，回答更细致，但更慢也更费额度。" });
   const title = el("input", {
     className: "input",
     attrs: { type: "text", placeholder: "标题（可选）", maxlength: "60" },
   });
-  model.value = draft.model;
-  model.addEventListener("input", () => {
+  model.addEventListener("change", () => {
     draft.model = model.value;
+  });
+  effort.addEventListener("change", () => {
+    draft.effort = effort.value;
   });
   title.value = draft.title;
   title.addEventListener("input", () => {
@@ -2373,6 +2575,7 @@ function hostedCreatePanel(
       path: cwd,
       permissionMode,
       ...(model.value.trim() ? { model: model.value.trim() } : {}),
+      ...(effort.value.trim() ? { effort: effort.value.trim() } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
       .then((result) => {
@@ -2413,10 +2616,48 @@ function hostedCreatePanel(
     el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]),
     modeHint,
     el("label", { className: "field" }, [el("span", { text: "模型" }), model]),
+    el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]),
+    effortHint,
+    optionsHint,
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
     status,
     el("div", { className: "row-actions" }, [submit]),
   );
+  void call<HostedOptionsResult>("hosted.options")
+    .then((info) => {
+      const groups: Array<[string, ModelOption[]]> = [
+        ["常用", info.models.filter((item) => (item.section ?? "main") === "main")],
+        ["更多", info.models.filter((item) => item.section === "overflow")],
+      ];
+      const modelNodes: Array<Node | string> = [el("option", { text: "CLI 默认", attrs: { value: "" } })];
+      // 之前选过、这次清单里没有的模型（换了 CLI 版本）也留着，别把草稿静默改掉。
+      if (draft.model && !info.models.some((item) => item.id === draft.model)) {
+        modelNodes.push(el("option", { text: `${draft.model}（清单里没有）`, attrs: { value: draft.model } }));
+      }
+      for (const [label, group] of groups) {
+        if (group.length === 0) continue;
+        modelNodes.push(
+          el("optgroup", { attrs: { label } }, group.map((item) => el("option", { text: item.name, attrs: { value: item.id } }))),
+        );
+      }
+      model.replaceChildren(...modelNodes);
+      model.value = draft.model;
+
+      const effortNodes: Array<Node | string> = [el("option", { text: "CLI 默认", attrs: { value: "" } })];
+      if (draft.effort && !info.efforts.includes(draft.effort)) {
+        effortNodes.push(el("option", { text: `${draft.effort}（当前 CLI 不认）`, attrs: { value: draft.effort } }));
+      }
+      effortNodes.push(...info.efforts.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })));
+      effort.replaceChildren(...effortNodes);
+      effort.value = draft.effort;
+
+      optionsHint.textContent = info.note ?? "";
+      optionsHint.hidden = !info.note;
+    })
+    .catch((error) => {
+      optionsHint.classList.add("error");
+      optionsHint.textContent = `读不到模型与思考程度：${messageOf(error)}`;
+    });
   void call<HostedDirsResult>("hosted.dirs")
     .then((config) => {
       mode.replaceChildren(
@@ -2625,6 +2866,8 @@ interface ChatState {
   context?: ContextUsage;
   /** 客户端报告的斜杠命令与技能（名字不带斜杠），输入「/」时提示。 */
   slashCommands?: string[];
+  /** 「停止」按钮：只在 Bridge 托管的会话且回合还在跑时出现。 */
+  stopButton?: HTMLButtonElement;
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
@@ -2795,6 +3038,39 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const sendButton = button("发送", submit, "btn primary");
   sendButton.disabled = !canSend;
 
+  // 托管会话的回合可以从网页直接停：进程留着，CLI 收到 interrupt 后回到可输入状态。
+  const stopButton = button("停止", () => void stopTurn(), "btn secondary stop-turn");
+  stopButton.title = "停止当前回合（会话和进程保留）";
+  stopButton.hidden = true;
+  stopButton.disabled = true;
+  state.stopButton = stopButton;
+  let stopping = false;
+  async function stopTurn(): Promise<void> {
+    if (stopping || !state.busy) return;
+    stopping = true;
+    stopButton.disabled = true;
+    state.status.textContent = "正在停止当前回合…";
+    try {
+      const result = await call<HostedInterruptResult>("hosted.interrupt", {
+        sessionId: state.session.sessionId,
+      });
+      if (result.session) state.session = result.session;
+      if (result.interrupted) {
+        state.busy = false;
+        state.interrupted = true;
+        state.status.textContent = "已停止当前回合";
+      } else {
+        state.status.textContent = "当前没有在跑的回合";
+      }
+      renderMessages(state);
+    } catch (error) {
+      state.status.textContent = messageOf(error);
+    } finally {
+      stopping = false;
+      paintStopButton(state);
+    }
+  }
+
   const attachList = el("div", { className: "attach-list" });
   const fileInput = el("input", { className: "file-input", attrs: { type: "file", multiple: "" } });
   const attachButton = el("button", {
@@ -2857,6 +3133,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       loadOlder,
       refreshButton,
       contextButton,
+      stopButton,
       sendButton,
       collapseButton,
     ]),
@@ -4287,6 +4564,7 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
     state.interrupted = result.interrupted === true;
+    if (busyChanged) paintStopButton(state);
     if (added || busyChanged || interruptedChanged || state.messages.length === 0) {
       renderMessages(state);
     }
@@ -4691,6 +4969,7 @@ async function submitAskAnswers(
     });
     state.busy = true;
     state.interrupted = false;
+    paintStopButton(state);
     renderMessages(state);
     state.status.textContent = result.delivered
       ? "已发送选择"
@@ -4761,6 +5040,7 @@ async function sendNextStep(
     });
     state.busy = true;
     state.interrupted = false;
+    paintStopButton(state);
     renderMessages(state);
     state.status.textContent = state.session.hosted
       ? result.delivered
@@ -5099,6 +5379,14 @@ function spinner(): HTMLElement {
   return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
 }
 
+/** 只有 Bridge 托管的会话能从网页停回合，别的来源由桌面应用自己控制。 */
+function paintStopButton(state: ChatState): void {
+  const node = state.stopButton;
+  if (!node) return;
+  node.hidden = state.session.hosted !== true || !state.busy;
+  node.disabled = !state.busy;
+}
+
 /** Marks the last assistant turn with its state: running, stopped, or finished. */
 function markTurnState(list: HTMLElement, state: ChatState): void {
   const bubbles = list.querySelectorAll<HTMLElement>("article.message.assistant");
@@ -5227,6 +5515,7 @@ async function sendMessage(
       });
       state.busy = true;
       state.interrupted = false;
+      paintStopButton(state);
       renderMessages(state);
     }
     status.textContent = state.session.hosted

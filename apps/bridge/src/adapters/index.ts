@@ -5,6 +5,8 @@ import type {
   AppListResult,
   HostedCreateParams,
   HostedDirsResult,
+  HostedInterruptResult,
+  HostedOptionsResult,
   HostedPermissionMode,
   HostedResumeResult,
   HostedStopResult,
@@ -73,6 +75,14 @@ export class SessionAdapters {
 
   hostedModes(): HostedPermissionMode[] {
     return this.hostedManager.remotePermissionModes();
+  }
+
+  hostedOptions(): HostedOptionsResult {
+    return this.hostedManager.options();
+  }
+
+  hostedInterrupt(sessionId: string): HostedInterruptResult {
+    return this.hostedManager.interrupt(sessionId);
   }
 
   hostedCreate(params: HostedCreateParams): SessionGetResult {

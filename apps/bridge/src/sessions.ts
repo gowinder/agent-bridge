@@ -105,6 +105,7 @@ const ACTIVITY_METHODS = new Set([
   "hosted.create",
   "hosted.stop",
   "hosted.resume",
+  "hosted.interrupt",
   "session.compact",
   "session.rename",
   "transfer.commit",
@@ -438,12 +439,21 @@ export class DeviceSession implements ChannelSession {
         }
         const title = stringParam(params, "title");
         const model = stringParam(params, "model");
+        const effort = stringParam(params, "effort");
         return this.options.adapters.hostedCreate({
           path,
           ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
           ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
           ...(title ? { title } : {}),
         });
+      }
+      case "hosted.options":
+        return this.options.adapters.hostedOptions();
+      case "hosted.interrupt": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.hostedInterrupt(sessionId);
       }
       case "hosted.stop": {
         const sessionId = stringParam(params, "sessionId");
