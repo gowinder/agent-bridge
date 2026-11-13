@@ -2440,10 +2440,26 @@ h6.md-h {
 }
 
 .file-preview-name {
+  flex: 1;
+  min-width: 0;
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.file-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* 预览头部的复制键一直可见，不像消息里的悬停才亮。 */
+.file-preview-actions .share-btn {
+  margin-left: 0;
+  opacity: 1;
+  border-color: var(--line);
 }
 
 .file-preview-body {
