@@ -14,6 +14,8 @@ import type {
   MessageSendResult,
   ProjectInfo,
   ProjectListResult,
+  SessionCreateParams,
+  SessionCreateResult,
   SessionGetResult,
   SessionListParams,
   SessionListResult,
@@ -67,6 +69,18 @@ export class SessionAdapters {
       new DshAdapter(),
       new HostedAdapter(this.hostedManager),
     ];
+  }
+
+  /** 桌面应用的新建会话：由 Bridge 代它起一次无界面运行，第一条消息随创建发出。 */
+  async createSession(params: SessionCreateParams): Promise<SessionCreateResult> {
+    const adapter = this.adapters.find((item) => item.key === params.appId);
+    if (!adapter) throw new RpcError("invalid_params", `未知客户端：${params.appId}`);
+    if (!adapter.create || !adapter.app().capabilities.create) {
+      throw new RpcError("unsupported", "这个客户端还不支持从网页新建会话");
+    }
+    const text = params.text.trim();
+    if (!text) throw new RpcError("invalid_params", "第一条消息不能为空");
+    return { session: await adapter.create({ projectId: params.projectId, text }) };
   }
 
   hostedDirs(): HostedDirsResult {

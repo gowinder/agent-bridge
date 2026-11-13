@@ -105,6 +105,7 @@ export const METHODS = [
   "session.models",
   "session.compact",
   "session.rename",
+  "session.create",
   "hosted.dirs",
   "hosted.addDir",
   "hosted.removeDir",
@@ -531,6 +532,17 @@ export interface SessionRenameParams {
 }
 
 export interface SessionRenameResult {
+  session: SessionSummary;
+}
+
+/** 由 Bridge 代桌面应用起一个会话；第一条消息随创建一起发给该应用。 */
+export interface SessionCreateParams {
+  appId: string;
+  projectId: string;
+  text: string;
+}
+
+export interface SessionCreateResult {
   session: SessionSummary;
 }
 

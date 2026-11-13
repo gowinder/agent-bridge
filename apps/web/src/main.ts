@@ -34,6 +34,7 @@ import type {
   RailRow,
   RailTask,
   SessionCompactResult,
+  SessionCreateResult,
   SessionGetResult,
   SessionListResult,
   SessionModelsResult,
@@ -229,6 +230,8 @@ let renderToken = 0;
 let deferredListRender = false;
 /** 新建托管会话表单的草稿：中途重连重绘时把已填内容还回去，不打断输入。 */
 let hostedDraft: { projectId: string; title: string; model: string; effort: string; mode: string } | null = null;
+/** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
+let desktopDraft: { projectId: string; text: string } | null = null;
 /** Lets a soft reconnect refresh the open chat in place instead of re-rendering it. */
 let chatResumeKey: string | null = null;
 let chatResume: (() => void) | null = null;
@@ -2153,6 +2156,9 @@ async function renderRoute(soft = false): Promise<void> {
   if (hostedDraft && (route.level !== "sessions" || route.projectId !== hostedDraft.projectId)) {
     hostedDraft = null;
   }
+  if (desktopDraft && (route.level !== "sessions" || route.projectId !== desktopDraft.projectId)) {
+    desktopDraft = null;
+  }
   if (soft && chatResume && chatResumeKey === hashFor(route)) {
     chatResume();
     // 重连会清空快照；这里补拉一次，分享等依赖全局数据的操作才不会静默失效。
@@ -2428,13 +2434,24 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
   const isHosted = appInfo?.appId === "hosted";
   const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
-  const panelHost = isHosted ? el("div", { className: "hosted-create-host" }) : null;
+  // 桌面客户端（例如 dsh）也能从网页新建：Bridge 代它起一次无界面运行，第一条消息随创建发出。
+  const canCreateDesktop = !isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
+  const panelHost = canCreateHosted || canCreateDesktop ? el("div", { className: "hosted-create-host" }) : null;
   const draft = project && hostedDraft?.projectId === project.projectId ? hostedDraft : null;
   if (panelHost && project && draft) panelHost.append(hostedCreatePanel(project, draft));
+  const desktopPanelDraft = project && desktopDraft?.projectId === project.projectId ? desktopDraft : null;
+  if (panelHost && project && appInfo && desktopPanelDraft) {
+    panelHost.append(desktopCreatePanel(project, appInfo, desktopPanelDraft));
+  }
   const openCreate = (): void => {
-    if (!panelHost || !project) return;
-    hostedDraft = { projectId: project.projectId, title: "", model: "", effort: "", mode: "manual" };
-    panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
+    if (!panelHost || !project || !appInfo) return;
+    if (canCreateDesktop) {
+      desktopDraft = { projectId: project.projectId, text: "" };
+      panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
+    } else {
+      hostedDraft = { projectId: project.projectId, title: "", model: "", effort: "", mode: "manual" };
+      panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
+    }
     panelHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
   };
 
@@ -2444,7 +2461,9 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       el("li", {}, [
         isHosted
           ? emptyState("还没有托管会话", "点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 进程。")
-          : emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。"),
+          : canCreateDesktop
+            ? emptyState("这个工程还没有会话", `点「新对话」，由这台 Mac 上的 Bridge 启动一次 ${appInfo?.name ?? "桌面客户端"}。`)
+            : emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。"),
       ]),
     );
   }
@@ -2501,10 +2520,13 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(el("li", {}, [row]));
   }
 
-  const createHosted = canCreateHosted ? button("", openCreate, "btn small create-btn") : null;
+  const createHosted = canCreateHosted || canCreateDesktop ? button("", openCreate, "btn small create-btn") : null;
   if (createHosted) {
     createHosted.append(
-      el("span", { className: "create-label-full", text: "新建托管会话" }),
+      el("span", {
+        className: "create-label-full",
+        text: canCreateHosted ? "新建托管会话" : "新对话",
+      }),
       el("span", { className: "create-label-short", text: "新建" }),
     );
   }
@@ -2524,7 +2546,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           }),
         ]),
         ...(createHosted ? [createHosted] : []),
-        ...(createDetail && !isHosted
+        ...(createDetail && !isHosted && !canCreateDesktop
           ? [
               el("button", {
                 className: "btn ghost small create-btn",
@@ -2744,6 +2766,66 @@ function hostedCreatePanel(
       status.textContent = messageOf(error);
       submit.disabled = true;
     });
+  return form;
+}
+
+/** 桌面客户端的新建会话：起点是一条消息，会话由该客户端的无界面模式在工程目录里创建。 */
+function desktopCreatePanel(project: ProjectInfo, appInfo: AppInfo, draft: { text: string }): HTMLElement {
+  const form = el("form", { className: "panel hosted-create" });
+  const status = el("p", { className: "hint", text: appInfo.capabilities.createDetail ?? "" });
+  const text = el("textarea", {
+    className: "input",
+    attrs: { rows: "4", placeholder: "第一条消息", "aria-label": "第一条消息" },
+  });
+  text.value = draft.text;
+  text.addEventListener("input", () => {
+    draft.text = text.value;
+  });
+  const submit = button("创建", () => {
+    const message = text.value.trim();
+    if (!message) {
+      status.classList.add("error");
+      status.textContent = "先写下第一条消息";
+      return;
+    }
+    submit.disabled = true;
+    status.classList.remove("error");
+    status.textContent = `正在启动 ${appInfo.name}…`;
+    void call<SessionCreateResult>(
+      "session.create",
+      { appId: appInfo.appId, projectId: project.projectId, text: message },
+      45_000,
+    )
+      .then((result) => {
+        desktopDraft = null;
+        // 聊天页读的是缓存快照，新会话要先放进去，否则会被当成「找不到这个会话」。
+        if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
+          snapshot = { ...snapshot, sessions: [result.session, ...snapshot.sessions] };
+        }
+        navigate({
+          level: "chat",
+          appId: appInfo.appId,
+          projectId: result.session.projectId,
+          sessionId: result.session.sessionId,
+        });
+      })
+      .catch((error) => {
+        submit.disabled = false;
+        status.classList.add("error");
+        status.textContent = messageOf(error);
+      });
+  }, "btn small");
+  form.addEventListener("submit", (event) => event.preventDefault());
+  form.append(
+    el("p", { className: "panel-title", text: `新建 ${appInfo.name} 会话` }),
+    el("label", { className: "field" }, [
+      el("span", { text: "工作目录" }),
+      el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
+    ]),
+    el("label", { className: "field" }, [el("span", { text: "第一条消息" }), text]),
+    status,
+    el("div", { className: "row-actions" }, [submit]),
+  );
   return form;
 }
 
