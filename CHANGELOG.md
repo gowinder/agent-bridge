@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-11-13
+
+### Fixed
+
+- 聊天记录里点击文件链接（文件应用/产物）弹出的预览报「sessionId required」：预览请求补上当前会话的 `sessionId`，Bridge 才能按会话所属项目放行 `fs.read`。
+
 ## [0.3.1] - 2026-11-13
 
 ### Changed

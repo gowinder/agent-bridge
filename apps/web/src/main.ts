@@ -3511,6 +3511,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   // 工作树会话的项目是原仓库，但远程工具要落在它真正工作的目录。
   const cwd = summary.cwd ?? project?.cwd;
   previewRoot = cwd;
+  previewSessionId = summary.sessionId;
   const rail = createRail(summary.sessionId, summary.appId, cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
@@ -3596,6 +3597,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   document.title = `后台任务 · ${summary.title} · Agent Bridge`;
   markRead(summary.sessionId);
   previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
+  previewSessionId = summary.sessionId;
 
   const note = el("p", { className: "hint", text: "正在读取子任务记录…" });
   const list = el("div", { className: "transcript-body" });
@@ -5123,6 +5125,8 @@ async function sendNextStep(
 
 /** Project directory of the chat on screen; file previews are scoped to it. */
 let previewRoot: string | undefined;
+/** fs.read 要 sessionId 才会放行：文件预览落在哪个会话的项目里就带哪个。 */
+let previewSessionId: string | undefined;
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
 
@@ -5157,9 +5161,10 @@ function fileName(path: string): string {
 
 async function readLocalFile(path: string): Promise<FsReadResult> {
   const root = previewRoot;
-  if (!root) throw new Error("这个会话没有项目目录，无法预览文件");
+  const sessionId = previewSessionId;
+  if (!root || !sessionId) throw new Error("这个会话没有项目目录，无法预览文件");
   const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
-  return call<FsReadResult>("fs.read", { root, path: full });
+  return call<FsReadResult>("fs.read", { sessionId, root, path: full });
 }
 
 /**
