@@ -112,8 +112,11 @@ const ACTIVITY_METHODS = new Set([
   "hosted.resume",
   "hosted.interrupt",
   "hosted.setModel",
+  "hosted.archive",
+  "hosted.delete",
   "session.compact",
   "session.rename",
+  "session.pin",
   "session.create",
   "transfer.commit",
   "device.revoke",
@@ -150,6 +153,15 @@ function describeActivity(request: RequestMessage): string | null {
     const text = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
     const head = text.length > 24 ? `${text.slice(0, 24)}…` : text;
     return `在 ${appId} 新建会话${head ? `「${head}」` : ""}`;
+  }
+  if (request.method === "session.pin") {
+    return `${params["pinned"] === true ? "置顶" : "取消置顶"}会话${suffix}`;
+  }
+  if (request.method === "hosted.archive") {
+    return `${params["archived"] === true ? "归档" : "取消归档"}托管会话${suffix}`;
+  }
+  if (request.method === "hosted.delete") {
+    return `删除托管会话${suffix}`;
   }
   if (request.method === "session.rename") {
     const title = (stringParam(params, "title") ?? "").trim();
@@ -550,6 +562,21 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.hostedResume(sessionId);
+      }
+      case "session.pin": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.pin(sessionId, params["pinned"] !== false);
+      }
+      case "hosted.archive": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.archive(sessionId, params["archived"] !== false);
+      }
+      case "hosted.delete": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.deleteSession(sessionId);
       }
       case "hosted.setModel": {
         const sessionId = stringParam(params, "sessionId");

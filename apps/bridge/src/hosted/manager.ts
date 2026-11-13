@@ -11,6 +11,7 @@ import {
   readSync,
   realpathSync,
   renameSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -148,6 +149,8 @@ interface HostedRecord {
   context?: ContextUsage;
   /** CLI init 事件报告的斜杠命令与技能，网页输入「/」时用来提示。 */
   slashCommands?: string[];
+  /** 网页上归档的会话：记录留着，只是不在列表里显示。 */
+  archived?: boolean;
   /** 最近一轮被「停止」中断：下一次发送用户消息前一直成立，网页重开也能显示「已中断」。 */
   interrupted?: boolean;
   /** 已写进 CLI 但还没等到 result 的用户消息；Bridge 重启后据此自动续跑。 */
@@ -540,6 +543,36 @@ export class HostedSessionManager {
     this.persistRecords();
     this.log(`hosted: created ${id} in ${cwd} (${permissionMode})`);
     return this.summary(record);
+  }
+
+  /** 归档/取消归档：只改标记，进程与记录都不动。 */
+  archive(sessionId: string, archived: boolean): SessionSummary {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    if (archived) record.archived = true;
+    else delete record.archived;
+    this.persistRecords();
+    return this.summary(record);
+  }
+
+  /**
+   * 删除托管会话：停掉进程、删掉记录与聊天记录文件。
+   * CLI 自己的转录（~/.claude/projects 里那份）不动，删除的只是 Bridge 这边的东西。
+   */
+  async remove(sessionId: string): Promise<void> {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    this.kill(record.id);
+    await this.stopInSessiond(record.id);
+    this.messages.delete(record.id);
+    try {
+      rmSync(this.transcriptPath(record.id), { force: true });
+    } catch (error) {
+      this.log(`hosted: remove transcript failed: ${String(error)}`);
+    }
+    this.records.delete(record.id);
+    this.persistRecords();
+    this.log(`hosted: removed ${record.id}`);
   }
 
   /** 改托管会话的标题；空标题视为错误，清除覆盖只针对非托管会话。 */
@@ -1248,7 +1281,7 @@ export class HostedSessionManager {
       title: record.title,
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
-      archived: false,
+      archived: record.archived === true,
       live: Boolean(live),
       busy: live?.busy ?? false,
       needsDecision: Boolean(live?.pending),

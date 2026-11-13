@@ -191,9 +191,13 @@ export class SessionAdapters {
       if (app.capabilities.enumerate !== "complete") {
         completeness = demote(completeness, app.capabilities.enumerate === "unknown" ? "unknown" : "partial");
       }
-      collected.push(...sessions.map((session) => this.applyTitle(session, adapter.key)));
+      collected.push(...sessions.map((session) => this.decorate(session, adapter.key)));
     }
-    collected.sort((a, b) => b.updatedAt - a.updatedAt);
+    // 置顶的排最前，其余按更新时间；两组内部都是新的在前。
+    collected.sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+      return b.updatedAt - a.updatedAt;
+    });
     const result: SessionListResult = {
       sessions: collected.slice(0, limit),
       completeness,
@@ -210,7 +214,7 @@ export class SessionAdapters {
     const adapter = this.adapterFor(sessionId);
     const session = await adapter.session(sessionId);
     if (!session) throw new RpcError("not_found", "未知会话");
-    return { session: this.applyTitle(session, adapter.key) };
+    return { session: this.decorate(session, adapter.key) };
   }
 
   /**
@@ -228,7 +232,36 @@ export class SessionAdapters {
     }
     if (!title) this.store.clearSessionTitle(adapter.key, sessionId);
     else this.store.setSessionTitle(adapter.key, sessionId, title);
-    return { session: this.applyTitle(session, adapter.key) };
+    return { session: this.decorate(session, adapter.key) };
+  }
+
+  /** 置顶只是 Bridge 侧的书签：任何来源的会话都能置顶，不动源应用。 */
+  async pin(sessionId: string, pinned: boolean): Promise<SessionGetResult> {
+    const adapter = this.adapterFor(sessionId);
+    const session = await adapter.session(sessionId);
+    if (!session) throw new RpcError("not_found", "未知会话");
+    this.store.setSessionPin(adapter.key, sessionId, pinned);
+    return { session: this.decorate(session, adapter.key) };
+  }
+
+  /** 归档：只有 Bridge 托管的会话归 Bridge 管，桌面会话请在原应用里归档。 */
+  archive(sessionId: string, archived: boolean): SessionGetResult {
+    const adapter = this.adapterFor(sessionId);
+    if (adapter.key !== "hosted") {
+      throw new RpcError("unsupported", "只有 Bridge 托管会话能在这里归档；桌面会话请在原应用里归档");
+    }
+    return { session: this.hostedManager.archive(sessionId, archived) };
+  }
+
+  /** 删除托管会话：停进程、删记录与 Bridge 这边的聊天记录，不动 CLI 自己的转录。 */
+  async deleteSession(sessionId: string): Promise<{ deleted: boolean }> {
+    const adapter = this.adapterFor(sessionId);
+    if (adapter.key !== "hosted") {
+      throw new RpcError("unsupported", "只有 Bridge 托管会话能在这里删除；桌面会话请在原应用里删除");
+    }
+    await this.hostedManager.remove(sessionId);
+    this.store.setSessionPin(adapter.key, sessionId, false);
+    return { deleted: true };
   }
 
   async messages(sessionId: string, params: { limit?: number; before?: string }): Promise<MessageListResult> {
@@ -400,13 +433,15 @@ export class SessionAdapters {
   }
 
   /**
-   * 有 Bridge 侧覆盖名时替换 title 并保留原名，否则原样返回。
-   * 覆盖名按 adapter key 存（rename 写入时用的也是它），读也必须用同一把 key。
+   * 叠上 Bridge 侧的覆盖名与置顶标记。
+   * 两者都按 adapter key 存（写入时用的也是它），读也必须用同一把 key。
    */
-  private applyTitle(session: SessionSummary, adapterKey: string): SessionSummary {
+  private decorate(session: SessionSummary, adapterKey: string): SessionSummary {
     const override = this.store.sessionTitle(adapterKey, session.sessionId);
-    if (override === null) return session;
-    return { ...session, title: override, originalTitle: session.title };
+    const pinned = this.store.sessionPinned(adapterKey, session.sessionId);
+    const next = pinned ? { ...session, pinned: true } : session;
+    if (override === null) return next;
+    return { ...next, title: override, originalTitle: session.title };
   }
 }
 

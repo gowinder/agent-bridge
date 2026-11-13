@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -643,4 +643,32 @@ test("an invalid model name is rejected instead of reaching the CLI", async (t) 
     h.manager.setModel(session.sessionId, "--dangerously-skip-permissions"),
     /模型名不合法/,
   );
+});
+
+test("归档只打标记，记录和聊天记录都还在", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  await h.manager.send(session.sessionId, "你好");
+
+  const archived = h.manager.archive(session.sessionId, true);
+  assert.equal(archived.archived, true);
+  assert.equal(h.manager.session(session.sessionId).archived, true);
+  assert.ok(h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.length > 0);
+  assert.equal(h.manager.archive(session.sessionId, false).archived, false);
+});
+
+test("删除托管会话：先停进程，再删记录与聊天记录文件", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  await h.manager.send(session.sessionId, "你好");
+  const transcript = join(h.stateDir, "hosted", `${session.sessionId.replace(/^hosted:/, "")}.jsonl`);
+  assert.equal(existsSync(transcript), true);
+
+  await h.manager.remove(session.sessionId);
+  assert.equal(h.manager.session(session.sessionId), null);
+  assert.equal(existsSync(transcript), false);
+  assert.equal(h.spawns[0].child.signals.length, 1);
+  assert.throws(() => h.manager.archive(session.sessionId, true), /未知托管会话/);
 });

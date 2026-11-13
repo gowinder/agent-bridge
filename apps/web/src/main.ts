@@ -151,6 +151,16 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
   more:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.4" cy="8" r="1.25"/></svg>',
+  pin:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.6 2.2 13.8 6.4l-1.7.5-2.4 2.4-.3 2.4-1.6-1.6-3.6 3.6"/><path d="m7.8 3.9 4.3 4.3-1.2 1.2a2 2 0 0 1-1.4.6H6.6l-2.3 2.3"/></svg>',
+  pinOff:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.6 2.2 13.8 6.4l-1.7.5-2.4 2.4-.3 2.4-1.6-1.6-3.6 3.6"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+  archive:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3" width="11.2" height="3" rx="1"/><path d="M3.6 6v6.4c0 .6.4 1 1 1h6.8c.6 0 1-.4 1-1V6"/><path d="M6.4 8.6h3.2"/></svg>',
+  unarchive:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3" width="11.2" height="3" rx="1"/><path d="M3.6 6v6.4c0 .6.4 1 1 1h6.8c.6 0 1-.4 1-1V6"/><path d="M8 12.4V8.4"/><path d="m6.4 9.8 1.6-1.6 1.6 1.6"/></svg>',
+  trash:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.6h10"/><path d="M6.2 4.6V3.2c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.4"/><path d="M4.4 4.6l.6 8.2c0 .6.5 1 1 1h4c.5 0 1-.4 1-1l.6-8.2"/><path d="M6.8 7v4M9.2 7v4"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -230,6 +240,8 @@ let renderToken = 0;
 let deferredListRender = false;
 /** 新建托管会话表单的草稿：中途重连重绘时把已填内容还回去，不打断输入。 */
 let hostedDraft: { projectId: string; title: string; model: string; effort: string; mode: string } | null = null;
+/** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
+let showArchived = false;
 /** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
 let desktopDraft: { projectId: string; text: string } | null = null;
 /** Lets a soft reconnect refresh the open chat in place instead of re-rendering it. */
@@ -530,7 +542,9 @@ async function watchSessions(): Promise<void> {
   const apps = snapshot.apps;
   try {
     const pages = await Promise.all(
-      apps.map((app) => call<SessionListResult>("session.list", { appId: app.appId, limit: 500 })),
+      apps.map((app) =>
+        call<SessionListResult>("session.list", { appId: app.appId, includeArchived: true, limit: 500 }),
+      ),
     );
     const sessions = pages.flatMap((page) => page.sessions);
     if (!snapshot) return;
@@ -1089,6 +1103,91 @@ function passwordDialog(options: {
   });
 }
 
+/** 列表行上的小操作按钮（置顶、归档、删除）。 */
+function rowAction(content: HTMLElement, label: string, onClick: () => void, extra = ""): HTMLButtonElement {
+  const node = button("", onClick, `row-action ${extra}`.trim());
+  node.append(content);
+  node.title = label;
+  node.setAttribute("aria-label", label);
+  return node;
+}
+
+/** 列表排序口径：置顶的在前，其余按更新时间；两段内部都是新的在前。 */
+function sortSessions(sessions: SessionSummary[]): SessionSummary[] {
+  return [...sessions].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
+/** 已归档的会话默认不出现，除非列表页打开了「显示已归档」。 */
+function visibleSessions(sessions: SessionSummary[], includeArchived = false): SessionSummary[] {
+  return sortSessions(includeArchived ? sessions : sessions.filter((item) => !item.archived));
+}
+
+/** 会话状态变了就地更新快照，不用重拉整份列表。 */
+function patchSession(session: SessionSummary): void {
+  if (!snapshot) return;
+  snapshot = {
+    ...snapshot,
+    sessions: snapshot.sessions.map((item) => (item.sessionId === session.sessionId ? session : item)),
+  };
+}
+
+function dropSession(sessionId: string): void {
+  if (!snapshot) return;
+  snapshot = { ...snapshot, sessions: snapshot.sessions.filter((item) => item.sessionId !== sessionId) };
+}
+
+async function setSessionPinned(session: SessionSummary, pinned: boolean): Promise<void> {
+  try {
+    const result = await call<SessionGetResult>("session.pin", { sessionId: session.sessionId, pinned });
+    patchSession(result.session);
+    await renderRoute();
+    flashNotice(pinned ? "已置顶，排在列表最前面" : "已取消置顶");
+  } catch (error) {
+    flashNotice(`置顶失败：${messageOf(error)}`);
+  }
+}
+
+async function setSessionArchived(session: SessionSummary, archived: boolean): Promise<void> {
+  try {
+    const result = await call<SessionGetResult>("hosted.archive", {
+      sessionId: session.sessionId,
+      archived,
+    });
+    patchSession(result.session);
+    const route = parseRoute();
+    if (archived && route.level === "chat" && route.sessionId === session.sessionId) {
+      navigate({ level: "sessions", appId: session.appId, projectId: session.projectId });
+      flashNotice("已归档，可在「显示已归档」里找回");
+      return;
+    }
+    await renderRoute();
+    flashNotice(archived ? "已归档，可在「显示已归档」里找回" : "已取消归档");
+  } catch (error) {
+    flashNotice(`归档失败：${messageOf(error)}`);
+  }
+}
+
+async function deleteHostedSession(session: SessionSummary): Promise<void> {
+  if (!window.confirm(`删除「${session.title}」？进程会停掉，Bridge 这边的聊天记录也会删掉，无法恢复。`)) return;
+  try {
+    await call("hosted.delete", { sessionId: session.sessionId });
+    dropSession(session.sessionId);
+    const route = parseRoute();
+    if (route.level === "chat" && route.sessionId === session.sessionId) {
+      navigate({ level: "sessions", appId: session.appId, projectId: session.projectId });
+      flashNotice("已删除");
+      return;
+    }
+    await renderRoute();
+    flashNotice("已删除");
+  } catch (error) {
+    flashNotice(`删除失败：${messageOf(error)}`);
+  }
+}
+
 /**
  * 重命名会话：Bridge 托管的会话直接改标题，其它来源只保存 Bridge 侧覆盖名，
  * 因此弹层会同时展示源应用里的原名。
@@ -1402,7 +1501,7 @@ async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot 
   const [projects, ...sessionPages] = await Promise.all([
     call<ProjectListResult>("project.list"),
     ...apps.apps.map((app) =>
-      call<SessionListResult>("session.list", { appId: app.appId, limit: 500 }),
+      call<SessionListResult>("session.list", { appId: app.appId, includeArchived: true, limit: 500 }),
     ),
   ]);
   const notes = sessionPages.flatMap((page) => (page.note ? [page.note] : []));
@@ -1556,9 +1655,7 @@ function dockTree(route: Route): HTMLElement {
   for (const appInfo of data.apps) {
     const projects = data.projects.filter((item) => item.appId === appInfo.appId);
     const sessionsOf = (projectId: string): SessionSummary[] =>
-      data.sessions
-        .filter((item) => item.projectId === projectId)
-        .sort((a, b) => b.updatedAt - a.updatedAt);
+      visibleSessions(data.sessions.filter((item) => item.projectId === projectId));
     const rows = projects.map((project) => ({ project, sessions: sessionsOf(project.projectId) }));
     const visible = rows.filter((row) => row.sessions.length > 0);
     if (visible.length === 0) continue;
@@ -1610,9 +1707,7 @@ function dockHistory(): HTMLElement {
     return wrap;
   }
   const active = dockActive(parseRoute());
-  const sessions = [...data.sessions]
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .slice(0, DOCK_HISTORY_LIMIT);
+  const sessions = visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
   if (sessions.length === 0) {
     wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
     return wrap;
@@ -2452,9 +2547,9 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const project = data.projects.find((item) => item.projectId === route.projectId);
   const appInfo = data.apps.find((item) => item.appId === route.appId);
   document.title = `${project?.name ?? "工程"} · Agent Bridge`;
-  const sessions = data.sessions
-    .filter((session) => session.projectId === route.projectId)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const projectSessions = data.sessions.filter((session) => session.projectId === route.projectId);
+  const archivedCount = projectSessions.filter((session) => session.archived).length;
+  const sessions = visibleSessions(projectSessions, showArchived);
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
   const isHosted = appInfo?.appId === "hosted";
   const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
@@ -2536,12 +2631,31 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           ])
         : el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
       ...(unread ? [el("span", { className: "pill unread", text: "未读" })] : []),
+      ...(session.archived ? [el("span", { className: "pill", text: "已归档" })] : []),
       icon("chevron", "icon chev"),
     ]);
     row.addEventListener("click", () =>
       navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
     );
-    list.append(el("li", {}, [row]));
+    // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
+    const actions = el("div", { className: "row-actions" }, [
+      rowAction(
+        session.pinned ? icon("pinOff") : icon("pin"),
+        session.pinned ? "取消置顶" : "置顶",
+        () => void setSessionPinned(session, !session.pinned),
+      ),
+      ...(session.hosted
+        ? [
+            rowAction(
+              session.archived ? icon("unarchive") : icon("archive"),
+              session.archived ? "取消归档" : "归档",
+              () => void setSessionArchived(session, !session.archived),
+            ),
+            rowAction(icon("trash"), "删除", () => void deleteHostedSession(session), "danger"),
+          ]
+        : []),
+    ]);
+    list.append(el("li", { className: session.archived ? "row-item is-archived" : "row-item" }, [row, actions]));
   }
 
   const createHosted = canCreateHosted || canCreateDesktop ? button("", openCreate, "btn small create-btn") : null;
@@ -2566,9 +2680,21 @@ function renderSessions(route: Route & { level: "sessions" }): void {
             className: "meta",
             text: isHosted
               ? `${sessions.length} 个会话 · 由这台 Mac 上的 Bridge 托管，不出现在桌面应用`
-              : `${sessions.length} 个会话 · 最近更新在前${createDetail ? " · 无法新建对话" : ""}`,
+              : `${sessions.length} 个会话 · 置顶在前，其余按最近更新${createDetail ? " · 无法新建对话" : ""}`,
           }),
         ]),
+        ...(archivedCount > 0
+          ? [
+              button(
+                showArchived ? `隐藏已归档（${archivedCount}）` : `显示已归档（${archivedCount}）`,
+                () => {
+                  showArchived = !showArchived;
+                  void renderRoute();
+                },
+                `btn ghost small${showArchived ? " is-on" : ""}`,
+              ),
+            ]
+          : []),
         ...(createHosted ? [createHosted] : []),
         ...(createDetail && !isHosted && !canCreateDesktop
           ? [
@@ -3739,6 +3865,28 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   rename.setAttribute("aria-label", "重命名会话");
   rename.title = "重命名会话";
 
+  const pinButton = button("", () => void setSessionPinned(summary, !summary.pinned), "icon-btn pin-btn");
+  pinButton.append(icon(summary.pinned ? "pinOff" : "pin"));
+  pinButton.setAttribute("aria-label", summary.pinned ? "取消置顶" : "置顶会话");
+  pinButton.setAttribute("aria-pressed", String(summary.pinned === true));
+  pinButton.title = summary.pinned ? "取消置顶" : "置顶会话";
+  const archiveButton = summary.hosted
+    ? button("", () => void setSessionArchived(summary, !summary.archived), "icon-btn archive-btn")
+    : null;
+  if (archiveButton) {
+    archiveButton.append(icon(summary.archived ? "unarchive" : "archive"));
+    archiveButton.setAttribute("aria-label", summary.archived ? "取消归档" : "归档会话");
+    archiveButton.title = summary.archived ? "取消归档" : "归档会话";
+  }
+  const deleteButton = summary.hosted
+    ? button("", () => void deleteHostedSession(summary), "icon-btn danger delete-btn")
+    : null;
+  if (deleteButton) {
+    deleteButton.append(icon("trash"));
+    deleteButton.setAttribute("aria-label", "删除会话");
+    deleteButton.title = "删除会话（停进程、删聊天记录）";
+  }
+
   head.append(
     back,
     el("div", { className: "view-head-main" }, [
@@ -3753,6 +3901,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
       rename,
+      pinButton,
+      ...(archiveButton ? [archiveButton] : []),
+      ...(deleteButton ? [deleteButton] : []),
       ...(summary.hosted ? [hostedControlButton(summary)] : []),
       railToggle,
       headToggle,

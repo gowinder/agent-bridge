@@ -111,6 +111,14 @@ export class Store {
          PRIMARY KEY(app_id, session_id)
        )`,
     );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS session_pins (
+         app_id TEXT NOT NULL,
+         session_id TEXT NOT NULL,
+         pinned_at INTEGER NOT NULL,
+         PRIMARY KEY(app_id, session_id)
+       )`,
+    );
     migrateRelayUrls(this);
   }
 
@@ -296,6 +304,28 @@ export class Store {
     this.db
       .prepare("DELETE FROM session_titles WHERE app_id = ? AND session_id = ?")
       .run(appId, sessionId);
+  }
+
+  sessionPinned(appId: string, sessionId: string): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT 1 FROM session_pins WHERE app_id = ? AND session_id = ?")
+        .get(appId, sessionId),
+    );
+  }
+
+  setSessionPin(appId: string, sessionId: string, pinned: boolean): void {
+    if (!pinned) {
+      this.db.prepare("DELETE FROM session_pins WHERE app_id = ? AND session_id = ?").run(appId, sessionId);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO session_pins (app_id, session_id, pinned_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(app_id, session_id) DO UPDATE SET pinned_at = excluded.pinned_at`,
+      )
+      .run(appId, sessionId, Date.now());
   }
 
   hostName(): string {

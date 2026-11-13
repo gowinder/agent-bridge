@@ -105,6 +105,7 @@ export const METHODS = [
   "session.models",
   "session.compact",
   "session.rename",
+  "session.pin",
   "session.create",
   "hosted.dirs",
   "hosted.addDir",
@@ -115,6 +116,8 @@ export const METHODS = [
   "hosted.interrupt",
   "hosted.resume",
   "hosted.setModel",
+  "hosted.archive",
+  "hosted.delete",
   "push.info",
   "push.subscribe",
   "push.unsubscribe",
@@ -429,6 +432,8 @@ export interface SessionSummary {
   createdAt: number;
   updatedAt: number;
   archived: boolean;
+  /** 用户在网页置顶的会话：列表里排在前面。 */
+  pinned?: boolean;
   /** Desktop currently holds a live process / open view for this session. */
   live: boolean;
   /** The session process is actively running a turn right now. */
