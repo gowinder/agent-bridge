@@ -106,6 +106,10 @@ interface HostedRecord {
   slashCommands?: string[];
   /** 最近一轮被「停止」中断：下一次发送用户消息前一直成立，网页重开也能显示「已中断」。 */
   interrupted?: boolean;
+  /** 已写进 CLI 但还没等到 result 的用户消息；Bridge 重启后据此自动续跑。 */
+  pendingText?: string;
+  /** 已经自动续跑过几次：反复中断的会话不能无限重启。 */
+  resumeAttempts?: number;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -184,6 +188,8 @@ export class HostedSessionManager {
     this.config = readConfig(this.stateDir);
     this.loadRecords();
     this.backfillContext();
+    // 上次 Bridge 退出时正在跑的那一轮已经随子进程一起断了，启动后接着跑。
+    this.resumeInterrupted();
     this.sweeper = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
     this.sweeper.unref();
     process.once("exit", this.exitHandler);
@@ -467,6 +473,9 @@ export class HostedSessionManager {
   stop(sessionId: string): HostedStopResult {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
+    // 用户主动关掉的会话不该在 Bridge 重启后被自动续跑；kill 本身不写注册表。
+    record.pendingText = undefined;
+    this.persistRecords();
     const stopped = this.kill(record.id);
     return { stopped, session: this.summary(record) };
   }
@@ -508,6 +517,8 @@ export class HostedSessionManager {
     );
     live.busy = false;
     record.interrupted = true;
+    // 用户主动停的一轮不该在重启后又被自动续跑。
+    record.pendingText = undefined;
     this.appendRecord(record, {
       messageId: randomUUID(),
       sessionId: record.id,
@@ -551,10 +562,61 @@ export class HostedSessionManager {
     }
     this.writeUserTurn(live, text);
     this.recordUser(record, text);
+    // 这一轮要等 result 事件才算结束；中途 Bridge 退出就靠它续跑。
+    record.pendingText = text;
     record.interrupted = false;
     live.busy = true;
     this.touch(record);
     return { accepted: true, delivered: true };
+  }
+
+  /** Bridge 重启时子进程会被一起杀掉，已写入但没等到 result 的那一轮只能靠 --resume 重放。 */
+  private resumeInterrupted(): void {
+    for (const record of this.records.values()) {
+      const text = record.pendingText;
+      if (!text) continue;
+      const attempts = record.resumeAttempts ?? 0;
+      if (attempts >= 3) {
+        // 每次都续跑又每次被打断：停手，别让一个坏会话无限重启 Bridge。
+        record.pendingText = undefined;
+        record.interrupted = true;
+        this.appendRecord(record, {
+          messageId: randomUUID(),
+          sessionId: record.id,
+          role: "system",
+          createdAt: Date.now(),
+          blocks: [{ type: "text", text: "上次一轮被反复中断，需要手动继续" }],
+        });
+        this.persistRecords();
+        this.log(`hosted: auto-resume gave up for ${record.id} after ${attempts} attempts`);
+        continue;
+      }
+      record.resumeAttempts = attempts + 1;
+      this.persistRecords();
+      try {
+        this.start(record, true);
+        const live = this.live.get(record.id);
+        if (live) {
+          this.writeUserTurn(live, text);
+          live.busy = true;
+          record.interrupted = false;
+          this.touch(record);
+        }
+      } catch (error) {
+        // 一条会话起不来（目录没了、模式被关掉）不能拖垮整个 Bridge。
+        this.log(`hosted: auto-resume failed for ${record.id}: ${String(error)}`);
+        continue;
+      }
+      this.appendRecord(record, {
+        messageId: randomUUID(),
+        sessionId: record.id,
+        role: "system",
+        createdAt: Date.now(),
+        blocks: [{ type: "text", text: "Bridge 重启，已自动续跑上次未结束的一轮" }],
+      });
+      this.persistRecords();
+      this.log(`hosted: auto-resumed ${record.id} (attempt ${record.resumeAttempts})`);
+    }
   }
 
   dispose(): void {
@@ -776,6 +838,9 @@ export class HostedSessionManager {
     if (type === "result") {
       live.busy = false;
       live.pending = null;
+      // 这一轮正常收尾：不再需要续跑，配额也清零给下一轮用。
+      record.pendingText = undefined;
+      record.resumeAttempts = 0;
       // 走代理的模型在 assistant 事件里可能报 0 用量；回合结束时按 CLI 转录里的真实用量兜底。
       const context = contextFromTranscript(record);
       if (context) record.context = context;
@@ -1079,6 +1144,12 @@ export class HostedSessionManager {
             ? { observedModel: item["observedModel"] }
             : {}),
           ...(item["interrupted"] === true ? { interrupted: true } : {}),
+          ...(typeof item["pendingText"] === "string" && item["pendingText"]
+            ? { pendingText: item["pendingText"] }
+            : {}),
+          ...(typeof item["resumeAttempts"] === "number" && item["resumeAttempts"] > 0
+            ? { resumeAttempts: Math.floor(item["resumeAttempts"]) }
+            : {}),
           ...(context ? { context } : {}),
           ...(slashCommands ? { slashCommands } : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
@@ -1121,6 +1192,8 @@ export class HostedSessionManager {
               ...(record.effort ? { effort: record.effort } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),
+              ...(record.pendingText ? { pendingText: record.pendingText } : {}),
+              ...(record.resumeAttempts ? { resumeAttempts: record.resumeAttempts } : {}),
               ...(record.context ? { context: record.context } : {}),
               ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
               createdAt: record.createdAt,
