@@ -3493,10 +3493,11 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     el("div", { className: "view-head-main" }, [
       el("p", { className: "eyebrow", text: `${data.apps.find((item) => item.appId === route.appId)?.name ?? "客户端"} · ${project?.name ?? "工程"}` }),
       el("h1", { className: "display chat-title", text: summary.title }),
-      el("p", {
-        className: "meta",
-        text: `${chatMeta}${summary.originalTitle ? ` · 原名：${summary.originalTitle}` : ""}`,
-      }),
+      (() => {
+        const metaText = `${chatMeta}${summary.originalTitle ? ` · 原名：${summary.originalTitle}` : ""}`;
+        // 桌面端头部只留一行，说明会被省略号截断，完整内容挂在 title 上。
+        return el("p", { className: "meta", text: metaText, attrs: { title: metaText } });
+      })(),
     ]),
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
