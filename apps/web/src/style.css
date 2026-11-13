@@ -702,9 +702,28 @@ details[open] > .dock-project-head::before {
 }
 
 .dock-session-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 运行中 / 待回答 / 未读：挤在行尾，标题让位给它们。 */
+.dock-session-pills,
+.dock-history-facts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex: none;
+}
+
+.dock-session-pills .pill,
+.dock-history-facts .pill {
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 15px;
 }
 
 .dock .mark {
