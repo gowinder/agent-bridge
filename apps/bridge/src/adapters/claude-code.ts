@@ -109,6 +109,8 @@ interface CachedMessages {
   interrupted?: boolean;
   /** 还有 AskUserQuestion 没有对应的 tool_result：客户端正等着用户选。 */
   pendingAsk?: boolean;
+  /** 那个待答提问的问题与选项，供终端面板按键代答时换算。 */
+  pendingAskQuestions?: MessageQuestion[];
 }
 
 function asString(value: unknown): string {
@@ -263,14 +265,14 @@ function trackBusy(busy: BusyState, entry: RawEntry): void {
  * the turn is still open and the desktop shows a question box. Answers land as a tool_result,
  * so the set empties as soon as either side replies.
  */
-function trackAsks(pending: Set<string>, content: unknown): void {
+function trackAsks(pending: Map<string, unknown>, content: unknown): void {
   if (!Array.isArray(content)) return;
   for (const raw of content) {
     if (typeof raw !== "object" || raw === null) continue;
     const block = raw as Record<string, unknown>;
     if (block["type"] === "tool_use" && block["name"] === ASK_TOOL) {
       const id = asString(block["id"]);
-      if (id) pending.add(id);
+      if (id) pending.set(id, block["input"]);
     } else if (block["type"] === "tool_result") {
       const id = asString(block["tool_use_id"]);
       if (id) pending.delete(id);
@@ -545,6 +547,18 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       return this.readTranscript(path, `${this.key}:${record.localId}`).context?.model;
     } catch {
       return undefined;
+    }
+  }
+
+  /** 待答提问的问题与选项；没有待答提问或读不到 transcript 时返回 null。 */
+  protected pendingAskQuestions(record: DesktopSession): MessageQuestion[] | null {
+    if (!record.cliSessionId) return null;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return null;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).askQuestions ?? null;
+    } catch {
+      return null;
     }
   }
 
@@ -1092,6 +1106,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     busy: boolean;
     interrupted: boolean;
     needsDecision: boolean;
+    askQuestions?: MessageQuestion[];
   } {
     let mtimeMs = 0;
     let size = 0;
@@ -1112,6 +1127,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         busy: running,
         interrupted,
         needsDecision: running && cached.pendingAsk === true,
+        ...(cached.pendingAskQuestions ? { askQuestions: cached.pendingAskQuestions } : {}),
       };
     }
 
@@ -1119,7 +1135,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     let context: ContextUsage | undefined;
     const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, lastActivityAt: 0 };
     /** 已发出、还没有结果的提问工具调用；有剩的就是客户端正等着用户选。 */
-    const pendingAsks = new Set<string>();
+    const pendingAsks = new Map<string, unknown>();
     let lastContentOrder = -1;
     let lastInterruptOrder = -1;
     let order = 0;
@@ -1155,6 +1171,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const interrupted = lastInterruptOrder > lastContentOrder;
     const running = isBusy(busy) && !interrupted;
     const pendingAsk = pendingAsks.size > 0;
+    const askQuestions = pendingAsk
+      ? askBlock([...pendingAsks.values()].pop(), MAX_BLOCK_CHARS)?.questions
+      : undefined;
     this.messageCache.set(path, {
       mtimeMs,
       size,
@@ -1163,6 +1182,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       busy,
       interrupted,
       pendingAsk,
+      ...(askQuestions ? { pendingAskQuestions: askQuestions } : {}),
     });
     return {
       messages,
@@ -1170,6 +1190,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       busy: running,
       interrupted,
       needsDecision: running && pendingAsk,
+      ...(askQuestions ? { askQuestions } : {}),
     };
   }
 

@@ -2,9 +2,16 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import type { AppInfo, MessageSendResult, SessionModelsResult, SessionSummary } from "@craftstead/protocol";
+import type {
+  AppInfo,
+  MessageQuestion,
+  MessageSendResult,
+  SessionModelsResult,
+  SessionSummary,
+} from "@craftstead/protocol";
 import { defaultStateDir } from "../store.js";
 import { ClaudeCodeAdapter, type DesktopSession } from "./claude-code.js";
+import { herdrPaneText, herdrPanes, herdrSendKeys, highlightedOption, keyPlan, refreshHerdrPanes } from "./herdr.js";
 import { RpcError } from "./types.js";
 
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
@@ -15,6 +22,14 @@ const MAX_TITLE_CHARS = 120;
 const EXCLUDE_CACHE_MS = 10_000;
 /** 远程续写不沿用的高权限模式：没有交互界面可确认。 */
 const RESUME_UNSAFE_MODES = new Set(["bypassPermissions", "dontAsk", "auto", "acceptEdits"]);
+/**
+ * 终端会话正在等 AskUserQuestion 的答案时，Bridge 没有任何通道能代答：
+ * peer socket 只接受 user 帧与 rename/peer_message_status/notify_when_idle 三种 control，
+ * 写 tty 从设备只进输出队列（实测），TIOCSTI 在非 root 下被拒。
+ */
+/** herdr 里找不到这个会话的面板时，网页只能提示去终端答。 */
+const WAITING_WITHOUT_PANE =
+  "该会话正在终端里等待选择，但没找到对应的 herdr 面板，请在终端里回答";
 
 interface TranscriptHead {
   cwd: string;
@@ -86,8 +101,11 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
         scan.busy.has(session.localId) ||
         (session.cliSessionId !== "" && scan.busy.has(session.cliSessionId));
       const socket = live ? this.socketFor(pid) : null;
-      const canSend = scan.error === null && (!live || socket !== null);
       const needsDecision = busy ? this.pendingAsk(session) : false;
+      // 等选择期间注入的消息进不了这个进程：既不代答，还会在终端答完后变成一条游离回合。
+      const canSend = !needsDecision && scan.error === null && (!live || socket !== null);
+      // 但会话跑在 herdr 面板里时，能往那个 pty 按键替你在终端里选中。
+      const paneId = needsDecision ? this.paneFor(session.cliSessionId) : null;
       const summary: SessionSummary = {
         sessionId,
         appId: this.key,
@@ -100,12 +118,17 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
         live,
         ...(busy ? { busy: true } : {}),
         ...(needsDecision ? { needsDecision: true } : {}),
+        ...(paneId ? { askChannel: "herdr" as const } : {}),
         canSend,
         ...(session.cwd ? { cwd: session.cwd } : {}),
         sendBlockedReason: canSend
           ? undefined
-          : scan.error ??
-            (live ? "该会话进程没有可用的本地消息通道" : "无法通过 claude --resume 恢复该会话"),
+          : needsDecision
+            ? paneId
+              ? "该会话正在终端里等待选择；选项可在网页点选，自由输入请在终端里填"
+              : WAITING_WITHOUT_PANE
+            : scan.error ??
+              (live ? "该会话进程没有可用的本地消息通道" : "无法通过 claude --resume 恢复该会话"),
       };
       out.push(summary);
     }
@@ -143,6 +166,8 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
 
     const match = this.liveMatch(record, scan.bySession);
     if (match) {
+      const questions = this.pendingAskQuestions(record);
+      if (questions) return await this.answerInTerminal(record, questions, text);
       const target = this.socketFor(match.pid);
       if (!target) throw new RpcError("adapter_unavailable", "该会话进程没有可用的消息通道");
       // 与桌面适配器一致：目标声明 bypassPermissions 时，信封也必须声明同一模式。
@@ -165,6 +190,42 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
         downgraded ? "默认" : record.permissionMode || "默认"
       }${downgraded ? `；安全降级：远程续写不沿用 ${record.permissionMode}` : ""}）`,
     };
+  }
+
+  private paneFor(cliSessionId: string): string | null {
+    if (!cliSessionId) return null;
+    return herdrPanes().find((pane) => pane.agentSessionId === cliSessionId)?.paneId ?? null;
+  }
+
+  /**
+   * 终端会话卡在 AskUserQuestion 上时，用 herdr 往它的 pty 按 ↓/Enter 选中。
+   * 只处理单题单选；面板里看不到这个提问就不按，免得把按键打进用户的提示符。
+   */
+  private async answerInTerminal(
+    record: DesktopSession,
+    questions: MessageQuestion[],
+    text: string,
+  ): Promise<MessageSendResult> {
+    const question = questions.length === 1 ? questions[0] : undefined;
+    if (!question) throw new RpcError("conflict", "这个提问有多道题，请在终端里回答");
+    if (question.multiSelect) throw new RpcError("conflict", "这个提问是多选，请在终端里回答");
+    const labels = question.options.map((option) => option.label);
+    const index = labels.indexOf(text.trim());
+    if (index < 0) throw new RpcError("conflict", "只支持点选选项，自由输入请在终端里填");
+    const paneId =
+      this.paneFor(record.cliSessionId) ??
+      (await refreshHerdrPanes()).find((pane) => pane.agentSessionId === record.cliSessionId)
+        ?.paneId ??
+      null;
+    if (!paneId) throw new RpcError("conflict", WAITING_WITHOUT_PANE);
+    const paneText = await herdrPaneText(paneId);
+    // 只有确认面板正停在这个提问上（❯ 指着其中某个选项）才按键，否则可能打进用户的提示符。
+    const current = highlightedOption(paneText, labels);
+    if (current === null) {
+      throw new RpcError("conflict", "终端面板里没看到这个提问，可能已经在终端答过了");
+    }
+    await herdrSendKeys(paneId, keyPlan(current, index));
+    return { accepted: true, delivered: true, detail: "已在终端面板里选中这个选项" };
   }
 
   /** 会话没有运行中的进程时，用一个 -p 进程接续同一 session id。 */
