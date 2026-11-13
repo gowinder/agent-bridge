@@ -77,6 +77,14 @@ export class SessionAdapters {
     return this.hostedManager.remotePermissionModes();
   }
 
+  hostedAddDir(path: string): HostedDirsResult {
+    return this.hostedManager.addDir(path);
+  }
+
+  hostedRemoveDir(path: string): HostedDirsResult {
+    return this.hostedManager.removeDir(path);
+  }
+
   hostedOptions(): HostedOptionsResult {
     return this.hostedManager.options();
   }
