@@ -482,10 +482,17 @@ a.crumb:hover {
   font-size: 12px;
   color: var(--muted);
   padding-right: 6px;
-  max-width: 22ch;
+  max-width: 30ch;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* Bridge 版本号：跟着连接徽标走，不额外占宽度。 */
+.conn-version {
+  color: var(--muted);
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
 }
 
 .dot {
