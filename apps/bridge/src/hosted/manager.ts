@@ -50,6 +50,40 @@ const KILL_GRACE_MS = 2_000;
 const TRANSCRIPT_TAIL_BYTES = 262_144;
 /** CLI 模型名允许的字符集：普通标识符 + 完整 ID 里的括号/点/冒号，且不能以 `-` 开头。 */
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,79}$/;
+/** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
+const MAX_EXTRA_ARGS = 24;
+const MAX_EXTRA_ARG_CHARS = 200;
+/**
+ * 决定会话身份、输出协议与权限的旗标不接受：它们由 Bridge 按会话记录设置，
+ * 网页再传一遍会顶掉会话跟踪，或绕过 hosted.json 的 allowBypassPermissions 开关。
+ */
+const BLOCKED_EXTRA_ARGS = new Set([
+  "-p",
+  "--print",
+  "-c",
+  "--continue",
+  "--resume",
+  "--session-id",
+  "--input-format",
+  "--output-format",
+  "--permission-mode",
+  "--permission-prompts",
+  "--permission-prompt-tool",
+  "--dangerously-skip-permissions",
+]);
+
+/** 读注册表时用：手改过的记录也不能塞进上面那些旗标，坏数据丢掉而不是整表读失败。 */
+function sanitizeExtraArgs(values: unknown[]): string[] {
+  const tokens: string[] = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const token = value.trim();
+    if (!token || token.length > MAX_EXTRA_ARG_CHARS) continue;
+    if (BLOCKED_EXTRA_ARGS.has(token.split("=")[0] ?? token)) continue;
+    tokens.push(token);
+  }
+  return tokens.slice(0, MAX_EXTRA_ARGS);
+}
 
 export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
   "manual",
@@ -99,6 +133,8 @@ interface HostedRecord {
   model?: string;
   /** CLI `--effort` level; undefined keeps the CLI default. */
   effort?: string;
+  /** 额外的 CLI 启动参数（已拆成 argv token），resume 时原样带上。 */
+  args?: string[];
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
@@ -434,6 +470,7 @@ export class HostedSessionManager {
     this.assertModeAllowed(permissionMode);
     const model = this.model(params.model);
     const effort = this.effort(params.effort);
+    const extraArgs = this.extraArgs(params.args);
     const now = Date.now();
     const id = randomUUID();
     const record: HostedRecord = {
@@ -443,6 +480,7 @@ export class HostedSessionManager {
       permissionMode,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
+      ...(extraArgs ? { args: extraArgs } : {}),
       createdAt: now,
       updatedAt: now,
       lastActiveAt: now,
@@ -735,6 +773,8 @@ export class HostedSessionManager {
     // 恢复也要带上同一个模型与思考程度，否则续写会悄悄换回 CLI 默认值。
     if (record.model) args.push("--model", record.model);
     if (record.effort) args.push("--effort", record.effort);
+    // 网页加的启动参数放在最后，允许覆盖上面的默认值（例如 --agent 这种 Bridge 不认识的旗标）。
+    if (record.args?.length) args.push(...record.args);
     const child = this.spawnProcess(cli, args, record.cwd, record.id);
     this.track(record, child, resume, cli);
   }
@@ -1182,6 +1222,26 @@ export class HostedSessionManager {
     return model;
   }
 
+  /** 网页加的启动参数：每项按空格拆成 argv，挡掉 Bridge 自己那套会话与权限旗标。 */
+  private extraArgs(values: string[] | undefined): string[] | undefined {
+    const tokens: string[] = [];
+    for (const value of values ?? []) {
+      if (typeof value !== "string") continue;
+      if (value.length > MAX_EXTRA_ARG_CHARS) {
+        throw new RpcError("invalid_params", `启动参数过长（上限 ${MAX_EXTRA_ARG_CHARS} 字）：${value.slice(0, 40)}…`);
+      }
+      for (const token of value.trim().split(/\s+/)) {
+        if (!token) continue;
+        const flag = token.split("=")[0] ?? token;
+        if (BLOCKED_EXTRA_ARGS.has(flag)) {
+          throw new RpcError("invalid_params", `启动参数不接受 ${flag}：会话身份与权限由 Bridge 按会话记录设置`);
+        }
+        tokens.push(token);
+      }
+    }
+    return tokens.length > 0 ? tokens.slice(0, MAX_EXTRA_ARGS) : undefined;
+  }
+
   /** 思考程度会原样进 argv：只接受 CLI 自己列出的档位。 */
   private effort(value: string | undefined): string | undefined {
     const effort = value?.trim().toLowerCase();
@@ -1283,6 +1343,7 @@ export class HostedSessionManager {
           ...(typeof item["effort"] === "string" && /^[a-z][a-z-]{0,15}$/.test(item["effort"])
             ? { effort: item["effort"] }
             : {}),
+          ...(Array.isArray(item["args"]) ? { args: sanitizeExtraArgs(item["args"]) } : {}),
           ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
             ? { observedModel: item["observedModel"] }
             : {}),
@@ -1339,6 +1400,7 @@ export class HostedSessionManager {
               permissionMode: record.permissionMode,
               ...(record.model ? { model: record.model } : {}),
               ...(record.effort ? { effort: record.effort } : {}),
+              ...(record.args?.length ? { args: record.args } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),
               ...(record.pendingText ? { pendingText: record.pendingText } : {}),

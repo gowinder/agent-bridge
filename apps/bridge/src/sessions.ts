@@ -470,11 +470,16 @@ export class DeviceSession implements ChannelSession {
         const title = stringParam(params, "title");
         const model = stringParam(params, "model");
         const effort = stringParam(params, "effort");
+        const rawArgs = params["args"];
+        const args = Array.isArray(rawArgs)
+          ? rawArgs.filter((item): item is string => typeof item === "string")
+          : [];
         return this.options.adapters.hostedCreate({
           path,
           ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
+          ...(args.length > 0 ? { args } : {}),
           ...(title ? { title } : {}),
         });
       }

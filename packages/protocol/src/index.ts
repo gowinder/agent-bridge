@@ -589,6 +589,11 @@ export interface HostedCreateParams {
   model?: string;
   /** Claude Code `--effort` level; omitted uses the CLI default. */
   effort?: string;
+  /**
+   * 额外的 CLI 启动参数，每项按空格拆成 argv（例如 `--agent mix-agent`）。
+   * 决定会话身份、协议与权限的旗标不接受：那些由 Bridge 按会话记录设置。
+   */
+  args?: string[];
   title?: string;
 }
 
