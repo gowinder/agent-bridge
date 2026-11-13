@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.11.0-rc.2] - 2026-11-13
+
+### Changed
+
+- Release / prerelease 的说明里加上「本版改动」：内容取自 `CHANGELOG.md` 里该版本的小节，由工作流自动拼进说明；缺这一节时构建失败。规则写进 `CLAUDE.md` 的「发版」一节。
+
 ## [0.11.0-rc.1] - 2026-11-13
 
 ### Added
