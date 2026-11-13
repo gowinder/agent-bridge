@@ -2946,7 +2946,13 @@ function hostedCreatePanel(
   model.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
   const effort = el("select", { className: "input", attrs: { "aria-label": "思考程度" } });
   effort.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
-  // pi 的模型清单要跑过一次才拿得到，新建时只能手填 `厂商/模型`。
+  // 子代理模型只认 pi 认识的模型名：已有 pi 会话报过清单就给选择框，没有才手填。
+  const subagentSelect = el("select", { className: "input", attrs: { "aria-label": "子代理模型" } });
+  subagentSelect.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  subagentSelect.hidden = true;
+  subagentSelect.addEventListener("change", () => {
+    draft.subagentModel = subagentSelect.value;
+  });
   const subagentModel = el("input", {
     className: "input mono",
     attrs: {
@@ -2961,6 +2967,7 @@ function hostedCreatePanel(
   subagentModel.addEventListener("input", () => {
     draft.subagentModel = subagentModel.value;
   });
+  let piModelList: ModelOption[] = [];
   const optionsHint = el("p", { className: "hint", text: "正在读取本机 CLI 支持的模型与思考程度…" });
   const effortHint = el("p", { className: "hint", text: "思考程度越高，回答更细致，但更慢也更费额度。" });
   const title = el("input", {
@@ -3048,7 +3055,7 @@ function hostedCreatePanel(
       permissionMode,
       ...(!piSelected && model.value.trim() ? { model: model.value.trim() } : {}),
       ...(!piSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
-      ...(piSelected && subagentModel.value.trim() ? { subagentModel: subagentModel.value.trim() } : {}),
+      ...(piSelected && draft.subagentModel.trim() ? { subagentModel: draft.subagentModel.trim() } : {}),
       ...(extraArgs.length > 0 ? { args: extraArgs } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
@@ -3084,7 +3091,12 @@ function hostedCreatePanel(
   const modeField = el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]);
   const modelField = el("label", { className: "field" }, [el("span", { text: "模型" }), model]);
   const effortField = el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]);
-  const subagentField = el("label", { className: "field" }, [el("span", { text: "子代理模型（可选）" }), subagentModel]);
+  const subagentField = el("label", { className: "field" }, [
+    el("span", { text: "子代理模型（可选）" }),
+    subagentSelect,
+    subagentModel,
+  ]);
+  const subagentHint = el("p", { className: "hint" });
   const argsHint = el("p", { className: "hint" });
   const agentHint = el("p", { className: "hint" });
   const syncAgent = (): void => {
@@ -3092,6 +3104,10 @@ function hostedCreatePanel(
     // pi 没有权限模式与思考程度；模型清单也要等它跑过一次才拿得到，选 pi 时一并收起。
     for (const node of [modeField, modeHint, modelField, effortField, effortHint, optionsHint]) node.hidden = pi;
     subagentField.hidden = !pi;
+    subagentHint.hidden = !pi;
+    const useSelect = piModelList.length > 0;
+    subagentSelect.hidden = !useSelect;
+    subagentModel.hidden = useSelect;
     argsHint.textContent = pi
       ? "打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。"
       : "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。";
@@ -3119,6 +3135,7 @@ function hostedCreatePanel(
     effortHint,
     optionsHint,
     subagentField,
+    subagentHint,
     el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
     argsHint,
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
@@ -3157,6 +3174,27 @@ function hostedCreatePanel(
 
       optionsHint.textContent = info.note ?? "";
       optionsHint.hidden = !info.note;
+
+      piModelList = info.piModels ?? [];
+      const subagentNodes: Array<Node | string> = [el("option", { text: "跟随 pi 设置", attrs: { value: "" } })];
+      // 之前填过、这次清单里没有的模型（换了 pi 配置）也留着，别把草稿静默改掉。
+      if (draft.subagentModel && !piModelList.some((item) => item.id === draft.subagentModel)) {
+        subagentNodes.push(el("option", { text: `${draft.subagentModel}（清单里没有）`, attrs: { value: draft.subagentModel } }));
+      }
+      subagentNodes.push(
+        ...piModelList.map((item) =>
+          el("option", {
+            text: item.name === item.id ? item.id : `${item.name} · ${item.id}`,
+            attrs: { value: item.id },
+          }),
+        ),
+      );
+      subagentSelect.replaceChildren(...subagentNodes);
+      subagentSelect.value = draft.subagentModel;
+      subagentHint.textContent =
+        piModelList.length > 0
+          ? "只影响之后新派生的子代理，主模型不动。"
+          : "还没有 pi 会话跑过，拿不到 pi 的模型清单，先手填 `厂商/模型`；留空跟随 pi 设置。";
 
       const agentOptions = info.agents ?? [{ id: "claude" as const, label: "Claude Code", available: true }];
       agent.replaceChildren(

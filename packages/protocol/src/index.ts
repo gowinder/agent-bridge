@@ -632,6 +632,11 @@ export interface HostedOptionsResult {
   efforts: string[];
   /** 可选的托管引擎，第一个是默认项。 */
   agents?: HostedAgentOption[];
+  /**
+   * pi 认得的模型（`厂商/模型`），来自跑过的 pi 会话上报的清单，用来填「子代理模型」选择框。
+   * 一条 pi 会话都没跑过时没有这个字段，网页退回手填。
+   */
+  piModels?: ModelOption[];
   note?: string;
 }
 

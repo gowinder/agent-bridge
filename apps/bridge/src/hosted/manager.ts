@@ -842,6 +842,18 @@ export class HostedSessionManager {
     if (models.length === 0) {
       result.note = "读不到模型目录（桌面端与 CLI 都没有缓存），只能使用 CLI 默认模型。";
     }
+    // 子代理模型只认 pi 自己报过的模型名：把已有 pi 会话的清单合并起来当选项。
+    const piModels: ModelOption[] = [];
+    const seen = new Set<string>();
+    for (const record of this.records.values()) {
+      if (record.agent !== "pi") continue;
+      for (const item of record.piModels ?? []) {
+        if (seen.has(item.id)) continue;
+        seen.add(item.id);
+        piModels.push(item);
+      }
+    }
+    if (piModels.length > 0) result.piModels = piModels;
     return result;
   }
 
