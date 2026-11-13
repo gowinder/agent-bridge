@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -437,6 +437,98 @@ test("sending to a stopped session resumes the process", async (t) => {
   const args = h.spawns[1].args;
   assert.equal(args[args.indexOf("--resume") + 1], session.sessionId.replace("hosted:", ""));
   assert.equal(h.manager.session(session.sessionId).live, true);
+});
+
+test("a bridge restart replays the unfinished turn in a new process", async (t) => {
+  const h = harness();
+  const session = h.manager.create({ path: h.repo });
+  await h.manager.send(session.sessionId, "跑完整条迁移");
+  h.manager.dispose();
+
+  const spawns = [];
+  const next = new HostedSessionManager({
+    stateDir: h.stateDir,
+    spawn: (command, args, options) => {
+      const child = new FakeChild();
+      spawns.push({ args, options, child });
+      return child;
+    },
+  });
+  t.after(() => next.dispose());
+  assert.equal(spawns.length, 1);
+  assert.equal(spawns[0].args[spawns[0].args.indexOf("--resume") + 1], session.sessionId.replace("hosted:", ""));
+  const restored = next.session(session.sessionId);
+  assert.equal(restored.live, true);
+  assert.equal(restored.busy, true);
+  const replay = spawns[0].child.writes()[0];
+  assert.equal(replay.type, "user");
+  assert.equal(replay.message.content[0].text, "跑完整条迁移");
+  const texts = next
+    .messagesFor(session.sessionId, { limit: 50 })
+    .messages.flatMap((message) => message.blocks.map((block) => block.text));
+  assert.ok(texts.includes("Bridge 重启，已自动续跑上次未结束的一轮"));
+});
+
+test("stopping a session keeps a bridge restart from replaying the turn", async (t) => {
+  const h = harness();
+  const session = h.manager.create({ path: h.repo });
+  await h.manager.send(session.sessionId, "不要续跑这一轮");
+  h.manager.stop(session.sessionId);
+  h.manager.dispose();
+
+  const spawns = [];
+  const next = new HostedSessionManager({
+    stateDir: h.stateDir,
+    spawn: (...args) => {
+      spawns.push(args);
+      return new FakeChild();
+    },
+  });
+  t.after(() => next.dispose());
+  assert.equal(spawns.length, 0);
+  assert.equal(next.session(session.sessionId).live, false);
+  const texts = next
+    .messagesFor(session.sessionId, { limit: 50 })
+    .messages.flatMap((message) => message.blocks.map((block) => block.text));
+  assert.ok(!texts.includes("Bridge 重启，已自动续跑上次未结束的一轮"));
+});
+
+test("auto-resume gives up after three attempts and asks for a manual continue", async (t) => {
+  const h = harness();
+  const session = h.manager.create({ path: h.repo });
+  await h.manager.send(session.sessionId, "反复中断");
+  h.manager.dispose();
+  const registryPath = join(h.stateDir, "hosted", "sessions.json");
+  const registry = JSON.parse(readFileSync(registryPath, "utf8"));
+  registry.sessions[0].resumeAttempts = 3;
+  writeFileSync(registryPath, JSON.stringify(registry));
+
+  const spawns = [];
+  const next = new HostedSessionManager({
+    stateDir: h.stateDir,
+    spawn: (...args) => {
+      spawns.push(args);
+      return new FakeChild();
+    },
+  });
+  t.after(() => next.dispose());
+  assert.equal(spawns.length, 0);
+  assert.equal(next.session(session.sessionId).live, false);
+  const page = next.messagesFor(session.sessionId, { limit: 50 });
+  assert.equal(page.interrupted, true);
+  const texts = page.messages.flatMap((message) => message.blocks.map((block) => block.text));
+  assert.ok(texts.includes("上次一轮被反复中断，需要手动继续"));
+
+  // 放弃时清掉了 pendingText，之后再重启不会再试。
+  const again = new HostedSessionManager({
+    stateDir: h.stateDir,
+    spawn: (...args) => {
+      spawns.push(args);
+      return new FakeChild();
+    },
+  });
+  t.after(() => again.dispose());
+  assert.equal(spawns.length, 0);
 });
 
 test("a late exit from the stopped process keeps the resumed one tracked", async (t) => {
