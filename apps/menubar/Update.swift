@@ -80,8 +80,13 @@ final class Updater {
     }
 
     static let repo = "gowinder/agent-bridge"
-    static let currentVersion =
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0.0"
+    /// 优先读 build.sh 写进去的完整版本（含 `-rc.1`）。CFBundleShortVersionString 被 Apple
+    /// 限制成 x.y.z，用它比较会让装过 rc.1 的 preview 用户收不到 rc.2，也收不到随后转正的同一个版本。
+    static let currentVersion: String = {
+        let full = Bundle.main.object(forInfoDictionaryKey: "AgentBridgeVersion") as? String
+        let short = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        return (full?.isEmpty == false ? full : short) ?? "0.0.0"
+    }()
 
     private(set) var phase: Phase = .idle
     private(set) var available: GitHubRelease?
@@ -254,6 +259,10 @@ final class Updater {
         bridge_pid="$2"
         source="$3"
         target="$4"
+        # 替换到一半失败时至少把当前装着的那份重新拉起来，别停在「App 已退出」。
+        opened=0
+        reopen() { [ "$opened" = "1" ] || open "$target" 2>/dev/null || true; }
+        trap reopen EXIT
         while kill -0 "$app_pid" 2>/dev/null; do sleep 0.3; done
         if [ "$bridge_pid" != "0" ]; then
           kill "$bridge_pid" 2>/dev/null || true
@@ -266,6 +275,7 @@ final class Updater {
         mv "$target.new" "$target"
         xattr -dr com.apple.quarantine "$target" 2>/dev/null || true
         rm -rf "$old"
+        opened=1
         open "$target"
         """
         try body.write(to: script, atomically: true, encoding: .utf8)
