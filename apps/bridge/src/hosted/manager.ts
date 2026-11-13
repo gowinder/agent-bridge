@@ -48,6 +48,7 @@ import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
 import { PiSession, type PiPending } from "./pi-session.js";
+import { killProcess, markProcessGroup } from "./process-group.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -115,6 +116,17 @@ function sanitizeExtraArgs(values: unknown[]): string[] {
     tokens.push(token);
   }
   return tokens.slice(0, MAX_EXTRA_ARGS);
+}
+
+/** 没有守护进程时在本机直接起子进程：自成一组，停的时候连孙进程一起收。 */
+function spawnLocal(
+  command: string,
+  args: string[],
+  options: { cwd: string; env: NodeJS.ProcessEnv },
+): HostedChild {
+  return markProcessGroup(
+    nodeSpawn(command, args, { cwd: options.cwd, env: options.env, detached: true }),
+  ) as unknown as HostedChild;
 }
 
 export const HOSTED_PERMISSION_MODES: HostedPermissionMode[] = [
@@ -230,6 +242,8 @@ export interface HostedChild {
   on(event: "error", listener: (error: NodeJS.ErrnoException) => void): void;
   kill(signal?: NodeJS.Signals): boolean;
   pid?: number;
+  /** 由 spawnInOwnGroup 标记：这个进程自成一个进程组，kill 要杀整组。 */
+  ownsProcessGroup?: boolean;
 }
 
 export type HostedSpawn = (
@@ -282,11 +296,7 @@ export class HostedSessionManager {
           log: this.log,
           // 守护进程起不来时退回原来的本机 spawn，托管不能整体不可用。
           fallback: (command, args, spawnOptions) =>
-            (nodeSpawn as unknown as HostedSpawn)(command, args, {
-              cwd: spawnOptions.cwd,
-              env: process.env,
-              sessionId: spawnOptions.sessionId,
-            }),
+            spawnLocal(command, args, { cwd: spawnOptions.cwd, env: process.env }),
         });
     this.config = readConfig(this.stateDir);
     this.loadRecords();
@@ -698,10 +708,21 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
+    const model = this.model(value?.trim() || undefined);
+    // pi 的 RPC 有原生 set_model：进程不用停，正在跑的回合结束后就按新模型继续。
+    if (record.agent === "pi" && model && live?.pi) {
+      const switched = await live.pi.setModel(model);
+      if (switched.error) {
+        throw new RpcError("invalid_params", `pi 换模型失败：${switched.error}`);
+      }
+      record.model = switched.model ?? model;
+      record.observedModel = record.model;
+      this.touch(record);
+      return this.summary(record);
+    }
     if (live?.busy || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
     }
-    const model = this.model(value?.trim() || undefined);
     // 先停进程再改记录：停不掉就报错，别让界面显示新模型而进程还跑着旧的。
     if (live) this.kill(record.id);
     // 换模型必须让旧进程真的退出，否则下一条消息会接回还在跑的那一个，模型没换。
@@ -1050,7 +1071,7 @@ export class HostedSessionManager {
   ): HostedChild {
     if (this.spawnFn) return this.spawnFn(command, args, { cwd, env: process.env, sessionId });
     if (this.sessiond) return this.sessiond.spawnChild(command, args, { cwd, sessionId, ack });
-    return nodeSpawn(command, args, { cwd, env: process.env }) as unknown as HostedChild;
+    return spawnLocal(command, args, { cwd, env: process.env });
   }
 
   /** 把子进程挂进 live 表并接好事件；新建与重连共用同一套退出/错误处理。 */
@@ -1704,18 +1725,11 @@ export class HostedSessionManager {
       // ignore
     }
     const timer = setTimeout(() => {
-      try {
-        live.child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
+      killProcess(live.child, "SIGKILL");
     }, KILL_GRACE_MS);
     timer.unref();
-    try {
-      live.child.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
+    // 自成进程组的（本机 spawn）杀整组，pi 的 workflow 起的孙进程也一起收掉。
+    killProcess(live.child, "SIGTERM");
     return true;
   }
 

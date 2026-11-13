@@ -4,6 +4,7 @@ import { closeSync, lstatSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { HostedChild } from "../manager.js";
+import { killProcess } from "../process-group.js";
 import { SESSIOND_VERSION_ERROR, SessiondClient } from "./client.js";
 import {
   SESSIOND_SOCKET,
@@ -323,7 +324,8 @@ export class RemoteChild extends EventEmitter implements HostedChild {
 
   private sendKill(): void {
     if (this.local) {
-      this.local.kill(this.killSignal);
+      // 本机回退起的子进程自成一组，杀整组才能连孙进程一起收掉。
+      killProcess(this.local, this.killSignal);
       return;
     }
     this.client?.send({ op: "kill", sessionId: this.sessionId });

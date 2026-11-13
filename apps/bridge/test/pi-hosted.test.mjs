@@ -1,0 +1,236 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { HostedSessionManager } from "../dist/hosted/manager.js";
+import { PiSession } from "../dist/hosted/pi-session.js";
+import { killProcess, markProcessGroup } from "../dist/hosted/process-group.js";
+
+class FakeChild extends EventEmitter {
+  constructor() {
+    super();
+    this.pid = 5150;
+    this.chunks = [];
+    this.signals = [];
+    this.stdin = {
+      write: (chunk) => {
+        this.chunks.push(chunk);
+        return true;
+      },
+      end: () => undefined,
+    };
+    this.stdout = new EventEmitter();
+    this.stderr = new EventEmitter();
+  }
+
+  kill(signal = "SIGTERM") {
+    this.signals.push(signal);
+    this.emit("exit", 0, null);
+    return true;
+  }
+
+  emitJson(payload) {
+    this.stdout.emit("data", `${JSON.stringify(payload)}\n`);
+  }
+
+  /** 回一条命令响应：按类型找到最近一条没回过的命令，带上它的 id。 */
+  reply(command, data, extra = {}) {
+    const sent = this.writes().filter((item) => item.type === command);
+    const last = sent[sent.length - 1];
+    assert.ok(last, `没有发出 ${command} 命令`);
+    this.emitJson({ id: last.id, type: "response", command, success: true, data, ...extra });
+  }
+
+  writes() {
+    return this.chunks.map((chunk) => JSON.parse(chunk.trim()));
+  }
+}
+
+function piHarness() {
+  const root = mkdtempSync(join(tmpdir(), "pi-hosted-test-"));
+  const repo = join(root, "repo");
+  const stateDir = join(root, "state");
+  mkdirSync(repo);
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "hosted.json"), JSON.stringify({ dirs: [repo], idleTimeoutMs: 60_000 }));
+  const spawns = [];
+  const spawnFn = (command, args, options) => {
+    const child = new FakeChild();
+    spawns.push({ command, args, options, child });
+    return child;
+  };
+  process.env.AGENT_BRIDGE_PI_PATH = process.execPath;
+  const manager = new HostedSessionManager({ stateDir, spawn: spawnFn });
+  return { repo, stateDir, spawns, manager };
+}
+
+function piHandlers() {
+  const calls = [];
+  const handler = (name) => (...args) => calls.push({ name, args });
+  return {
+    calls,
+    handlers: {
+      assistant: handler("assistant"),
+      system: handler("system"),
+      context: handler("context"),
+      pending: handler("pending"),
+      busy: handler("busy"),
+      settled: handler("settled"),
+      title: handler("title"),
+      commands: handler("commands"),
+      models: handler("models"),
+      model: handler("model"),
+      log: handler("log"),
+    },
+  };
+}
+
+test("creating a pi session starts rpc mode with the bridge session id", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  assert.equal(h.spawns.length, 1);
+  const { args } = h.spawns[0];
+  assert.equal(args[0], "--mode");
+  assert.equal(args[1], "rpc");
+  assert.equal(args[args.indexOf("--session-id") + 1], session.sessionId.replace("hosted:", ""));
+  assert.ok(args.includes("--approve"));
+  assert.ok(!args.includes("--permission-mode"));
+});
+
+test("pi set_model switches in place without restarting the process", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi", model: "ncncapi/claude-opus-5-5" });
+  const child = h.spawns[0].child;
+  child.reply("get_state", { model: { provider: "ncncapi", id: "claude-opus-5-5" } });
+
+  // 回合进行中也能换：pi 的 set_model 不等回合结束。
+  child.emitJson({ type: "agent_start" });
+  const pending = h.manager.setModel(session.sessionId, "group/dsgroup");
+  const sent = child.writes().filter((item) => item.type === "set_model");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].provider, "group");
+  assert.equal(sent[0].modelId, "dsgroup");
+  child.emitJson({
+    id: sent[0].id,
+    type: "response",
+    command: "set_model",
+    success: true,
+    data: { provider: "group", id: "dsgroup" },
+  });
+  const switched = await pending;
+  assert.equal(switched.model, "group/dsgroup");
+  assert.equal(h.spawns.length, 1);
+  assert.deepEqual(child.signals, []);
+});
+
+test("pi refusing a model surfaces the error and keeps the record", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi", model: "ncncapi/claude-opus-5-5" });
+  const child = h.spawns[0].child;
+  child.reply("get_state", { model: { provider: "ncncapi", id: "claude-opus-5-5" } });
+
+  const pending = h.manager.setModel(session.sessionId, "group/dsgroup");
+  const sent = child.writes().filter((item) => item.type === "set_model").at(-1);
+  child.emitJson({
+    id: sent.id,
+    type: "response",
+    command: "set_model",
+    success: false,
+    error: "Model not found: dsgroup",
+  });
+  await assert.rejects(pending, /pi 换模型失败：Model not found/);
+  const kept = h.manager.sessions().find((item) => item.sessionId === session.sessionId);
+  assert.equal(kept.model, "ncncapi/claude-opus-5-5");
+  assert.deepEqual(child.signals, []);
+});
+
+test("pi session without a live process records the model for the next start", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  child.kill("SIGTERM");
+
+  const switched = await h.manager.setModel(session.sessionId, "group/dsgroup");
+  assert.equal(switched.model, "group/dsgroup");
+  // 下一条消息按新模型重启，--provider 与 --model 都带上。
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const args = h.spawns.at(-1).args;
+  assert.equal(args[args.indexOf("--provider") + 1], "group");
+  assert.equal(args[args.indexOf("--model") + 1], "dsgroup");
+});
+
+test("PiSession answers extension dialogs and parses assistant turns", () => {
+  const written = [];
+  const { calls, handlers } = piHandlers();
+  const pi = new PiSession((line) => written.push(JSON.parse(line)), handlers);
+
+  pi.feed(`${JSON.stringify({ type: "extension_ui_request", id: "ui-1", method: "select", title: "选一个", options: ["a", "b"] })}\n`);
+  const pending = calls.find((call) => call.name === "pending");
+  assert.equal(pending.args[0].id, "ui-1");
+
+  pi.answer(pending.args[0], "b");
+  assert.deepEqual(written.at(-1), { type: "extension_ui_response", id: "ui-1", value: "b" });
+
+  pi.feed(
+    `${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", model: { provider: "group", id: "dsgroup" }, content: [{ type: "text", text: "好了" }] },
+    })}\n`,
+  );
+  const assistant = calls.find((call) => call.name === "assistant");
+  assert.deepEqual(assistant.args[0], [{ type: "text", text: "好了" }]);
+});
+
+test("stopping a hosted process takes its grandchildren with it", async (t) => {
+  const script = `
+    const { spawn } = require("node:child_process");
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    process.stdout.write(String(child.pid) + "\\n");
+    setInterval(() => {}, 1000);
+  `;
+  const parent = markProcessGroup(
+    spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "ignore"], detached: true }),
+  );
+  t.after(() => {
+    try {
+      killProcess(parent, "SIGKILL");
+    } catch {
+      // 已经退出。
+    }
+  });
+  const grandchildPid = await new Promise((resolve, reject) => {
+    let buffer = "";
+    parent.stdout.on("data", (chunk) => {
+      buffer += String(chunk);
+      const index = buffer.indexOf("\n");
+      if (index >= 0) resolve(Number(buffer.slice(0, index)));
+    });
+    parent.once("error", reject);
+  });
+  assert.ok(grandchildPid > 0);
+
+  killProcess(parent, "SIGTERM");
+  await once(parent, "exit");
+  await waitForExit(grandchildPid);
+  assert.throws(() => process.kill(grandchildPid, 0), /ESRCH/);
+});
+
+async function waitForExit(pid) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}

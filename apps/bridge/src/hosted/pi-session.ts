@@ -2,6 +2,8 @@ import type { ContextUsage, MessageBlock, ModelOption } from "@craftstead/protoc
 
 const MAX_BLOCK_CHARS = 4_000;
 const MAX_TOOL_CHARS = 300;
+/** 换模型等回执的上限：进程刚好退出时不能把网页一直挂着。 */
+const MODEL_SWITCH_TIMEOUT_MS = 15_000;
 
 /** pi 的扩展 UI 请求里需要网页作答的那几种。 */
 export type PiDialogMethod = "select" | "confirm" | "input" | "editor";
@@ -87,6 +89,41 @@ export class PiSession {
 
   abort(): void {
     this.command("abort", () => undefined);
+  }
+
+  /**
+   * 换模型：pi 的 RPC 原生支持 set_model，进程不用停，跑着的回合结束后就按新模型继续。
+   * 模型名按 `provider/modelId` 拆回两个字段；没带 provider 的只发 modelId。
+   */
+  setModel(model: string): Promise<{ model?: string; error?: string }> {
+    const slash = model.indexOf("/");
+    const provider = slash > 0 ? model.slice(0, slash) : "";
+    const modelId = slash > 0 ? model.slice(slash + 1) : model;
+    return new Promise((resolve) => {
+      let settled = false;
+      // 进程刚好退出时不会再有回执，别让网页一直等。
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve({ error: "pi 没有回执" });
+      }, MODEL_SWITCH_TIMEOUT_MS);
+      timer.unref();
+      this.command(
+        "set_model",
+        (record) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (record["success"] !== true) {
+            const reason = typeof record["error"] === "string" ? record["error"] : "未知原因";
+            resolve({ error: reason });
+            return;
+          }
+          resolve({ model: modelIdOf(record["data"]) || model });
+        },
+        provider ? { provider, modelId } : { modelId },
+      );
+    });
   }
 
   /** 回答一条扩展提问；confirm 用 confirmed，其余用 value。 */

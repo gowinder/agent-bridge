@@ -4,6 +4,7 @@ import { createServer, createConnection, type Server, type Socket } from "node:n
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
+import { killProcess, markProcessGroup } from "../process-group.js";
 import {
   SESSIOND_BUFFER_BYTES,
   SESSIOND_IDLE_MS,
@@ -23,6 +24,8 @@ export const SESSIOND_ALREADY_RUNNING = "sessiond already running";
 /** 子进程只需要这几个能力，测试里可以换成假对象。 */
 export interface ChildProcessLike {
   readonly pid?: number;
+  /** 由 defaultSpawn 标记：这个子进程自成一个进程组，kill 要杀整组。 */
+  readonly ownsProcessGroup?: boolean;
   readonly stdin: Writable | null;
   readonly stdout: Readable | null;
   readonly stderr: Readable | null;
@@ -75,7 +78,10 @@ function defaultSpawn(
   args: string[],
   options: { cwd: string; env: NodeJS.ProcessEnv },
 ): ChildProcessLike {
-  return nodeSpawn(command, args, { ...options, stdio: "pipe" }) as unknown as ChildProcessLike;
+  // detached：托管进程自成一个进程组，停止时能连它再 spawn 出来的孙进程一起收掉。
+  return markProcessGroup(
+    nodeSpawn(command, args, { ...options, stdio: "pipe", detached: true }),
+  ) as unknown as ChildProcessLike;
 }
 
 /** 用一次连接判断 socket 后面是否还有活着的实例，避免误删正在用的文件。 */
@@ -248,20 +254,13 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
     const session = sessions.get(message.sessionId);
     if (!session) return { id: message.id, ok: false, error: "not found" };
     if (session.running) {
-      try {
-        session.child.kill("SIGTERM");
-      } catch {
-        // 进程可能已经退出了，继续走强杀兜底。
-      }
+      // 杀整组：pi 的 workflow 会再 spawn 子进程，只杀直接子进程会留下孙进程。
+      killProcess(session.child, "SIGTERM");
       if (!session.killTimer) {
         // 2 秒内没退出就 SIGKILL，定时器不阻塞进程退出。
         session.killTimer = setTimeout(() => {
           session.killTimer = null;
-          try {
-            session.child.kill("SIGKILL");
-          } catch {
-            // 已经退出。
-          }
+          killProcess(session.child, "SIGKILL");
         }, KILL_GRACE_MS);
         session.killTimer.unref();
       }
@@ -408,11 +407,7 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
       // 退出前先让子进程收到 SIGTERM；仍在跑的两秒后强杀由各自的定时器负责。
       for (const session of sessions.values()) {
         if (!session.running) continue;
-        try {
-          session.child.kill("SIGTERM");
-        } catch {
-          // 已经退出。
-        }
+        killProcess(session.child, "SIGTERM");
       }
       for (const socket of connections) socket.destroy();
       connections.clear();
