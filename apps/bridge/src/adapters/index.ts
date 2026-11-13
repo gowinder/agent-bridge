@@ -91,6 +91,25 @@ export class SessionAdapters {
     return this.hostedManager.remotePermissionModes();
   }
 
+  /** 设置界面看到的托管配置，对应状态目录里的 hosted.json。 */
+  hostedConfig(): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
+    const info = this.hostedManager.configForClient();
+    return {
+      allowBypassPermissions: info.allowBypassPermissions,
+      dirs: info.dirs.map((dir) => dir.path),
+      idleTimeoutMs: info.idleTimeoutMs,
+    };
+  }
+
+  setHostedAllowBypass(enabled: boolean): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
+    const info = this.hostedManager.setAllowBypassPermissions(enabled);
+    return {
+      allowBypassPermissions: info.allowBypassPermissions,
+      dirs: info.dirs.map((dir) => dir.path),
+      idleTimeoutMs: info.idleTimeoutMs,
+    };
+  }
+
   hostedAddDir(path: string): HostedDirsResult {
     return this.hostedManager.addDir(path);
   }

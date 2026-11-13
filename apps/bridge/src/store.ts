@@ -180,6 +180,12 @@ export class Store {
     this.db.prepare("UPDATE devices SET revoked_at = ? WHERE id = ?").run(Date.now(), id);
   }
 
+  /** 彻底删掉一条设备记录和它的操作日志；只对已作废的设备生效。 */
+  purgeDevice(id: string): void {
+    this.db.prepare("DELETE FROM device_events WHERE device_id = ?").run(id);
+    this.db.prepare("DELETE FROM devices WHERE id = ? AND revoked_at IS NOT NULL").run(id);
+  }
+
   /** 每台设备只保留最近 `keep` 条，插入时顺手删掉更早的，菜单栏不用翻全量历史。 */
   recordDeviceEvent(deviceId: string, line: string, keep = 200): void {
     this.db

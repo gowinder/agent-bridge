@@ -103,6 +103,29 @@ export interface AdminPairing {
   since: number;
 }
 
+/** 最近收到的用户输入，菜单栏的日志页和气泡用。 */
+export interface AdminMessage {
+  at: number;
+  deviceId: string;
+  deviceName: string;
+  sessionId: string;
+  /** 会话标题。 */
+  title?: string;
+  /** 工程目录。 */
+  project?: string;
+  /** 处理这条消息的 agent：claude-c、hosted、codex 等。 */
+  agent?: string;
+  /** 消息正文；超过上限时截断。 */
+  text: string;
+}
+
+/** 设置界面要看的托管配置，对应状态目录里的 hosted.json。 */
+export interface AdminHostedConfig {
+  allowBypassPermissions: boolean;
+  dirs: string[];
+  idleTimeoutMs: number;
+}
+
 export interface AdminSnapshot {
   version: string;
   hostName: string;
@@ -131,6 +154,12 @@ export interface AdminActions {
     enabled: boolean,
     ttlSeconds: number | null,
   ): Promise<DevtoolsStatus>;
+  /** 比 `since` 新的用户输入消息，最旧的在前；`since` 为 0 时给最近一批。 */
+  recentMessages(since: number): AdminMessage[];
+  /** 删除已作废设备的记录：中继那边也要删，否则菜单栏还会把它们列出来。 */
+  purgeRevokedDevices(): Promise<{ purged: number; failed: string[] }>;
+  hostedConfig(): AdminHostedConfig;
+  setHostedConfig(patch: { allowBypassPermissions?: boolean }): AdminHostedConfig;
 }
 
 export interface AdminServerOptions {
@@ -250,6 +279,28 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           const enabled = body["enabled"] === true;
           const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : null;
           send(response, 200, await actions.setDevtools(capability, enabled, ttl));
+          return;
+        }
+        if (path === "/messages" && request.method === "GET") {
+          const since = Number(url.searchParams.get("since") ?? "0");
+          send(response, 200, { messages: actions.recentMessages(Number.isFinite(since) ? since : 0) });
+          return;
+        }
+        if (path === "/hosted" && request.method === "GET") {
+          send(response, 200, actions.hostedConfig());
+          return;
+        }
+        if (path === "/hosted" && request.method === "POST") {
+          const body = await readBody(request);
+          const patch: { allowBypassPermissions?: boolean } = {};
+          if (typeof body["allowBypassPermissions"] === "boolean") {
+            patch.allowBypassPermissions = body["allowBypassPermissions"];
+          }
+          send(response, 200, actions.setHostedConfig(patch));
+          return;
+        }
+        if (path === "/devices/purge-revoked" && request.method === "POST") {
+          send(response, 200, await actions.purgeRevokedDevices());
           return;
         }
         if (path === "/devices/disconnect-all" && request.method === "POST") {

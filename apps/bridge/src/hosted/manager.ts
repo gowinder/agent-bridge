@@ -38,6 +38,7 @@ import { RpcError, truncate, type MessagePage, type MessageText } from "../adapt
 import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js";
 import { effortLevels } from "../effort.js";
 import { modelCatalog } from "../model-catalog.js";
+import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
 
@@ -73,6 +74,8 @@ const BLOCKED_EXTRA_ARGS = new Set([
   "--permission-prompts",
   "--permission-prompt-tool",
   "--dangerously-skip-permissions",
+  // settings 文件里能写 permissions.allow 和 hooks，等于绕过上面的模式门禁。
+  "--settings",
 ]);
 
 /** 读注册表时用：手改过的记录也不能塞进上面那些旗标，坏数据丢掉而不是整表读失败。 */
@@ -301,6 +304,37 @@ export class HostedSessionManager {
     return result;
   }
 
+  /** 设置界面改完 hosted.json 后重新读一次，不用重启 Bridge。 */
+  reloadConfig(): void {
+    this.config = readConfig(this.stateDir);
+  }
+
+  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
+  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+    const path = join(this.stateDir, "hosted.json");
+    let raw: Record<string, unknown> = {};
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (isRecord(parsed)) raw = parsed;
+    } catch {
+      // 没有文件或内容坏了：按只有这一项的新配置写。
+    }
+    raw["allowBypassPermissions"] = enabled;
+    try {
+      mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
+      renameSync(tmp, path);
+    } catch (error) {
+      throw new RpcError(
+        "internal",
+        `写入 hosted.json 失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    this.reloadConfig();
+    return this.configForClient();
+  }
+
   /** 把目录加进托管白名单：只收已存在的绝对路径，重复添加是幂等的。 */
   addDir(input: string): HostedDirsResult {
     const target = this.normalizeDir(input);
@@ -454,6 +488,7 @@ export class HostedSessionManager {
         { label: "权限模式", value: record.permissionMode },
         { label: "模型", value: modelLabel(record) },
         { label: "思考程度", value: record.effort ?? "CLI 默认" },
+        ...(record.args?.length ? [{ label: "启动参数", value: record.args.join(" ") }] : []),
         {
           label: "进程",
           value: live ? `运行中（pid ${live.child.pid ?? "?"}）` : "未运行（发送时 resume）",
@@ -461,7 +496,8 @@ export class HostedSessionManager {
         { label: "空闲超时", value: `${Math.round(this.config.idleTimeoutMs / 60_000)} 分钟` },
       ],
       servers: [],
-      tasks: [],
+      // 子代理记录和桌面会话同一份：CLI 按 --session-id 写在自己的 projects 目录下。
+      tasks: subagentTasks([record.id]),
       ...(record.context ? { context: record.context } : {}),
       note: "This session is hosted by Bridge, not by the Claude desktop app.",
     };

@@ -18,6 +18,7 @@ import {
   writeAdminPortFile,
   type AdminActions,
   type AdminDevice,
+  type AdminMessage,
 } from "./admin.js";
 import { Devtools, isDevtoolsCapability } from "./devtools.js";
 import {
@@ -497,6 +498,16 @@ async function commandServe(): Promise<void> {
     }
   };
 
+  /** 菜单栏的日志页与气泡：最近收到的用户输入，内存里留这么多条。 */
+  const recentMessages: AdminMessage[] = [];
+  const MAX_RECENT_MESSAGES = 200;
+  const recordMessage = (message: AdminMessage): void => {
+    recentMessages.push(message);
+    if (recentMessages.length > MAX_RECENT_MESSAGES) {
+      recentMessages.splice(0, recentMessages.length - MAX_RECENT_MESSAGES);
+    }
+  };
+
   const adminActions: AdminActions = {
     async snapshot() {
       const devtoolsStatus = devtools.status();
@@ -588,6 +599,60 @@ async function commandServe(): Promise<void> {
     },
     async setDevtools(capability: DevtoolsCapabilityName, enabled: boolean, ttlSeconds: number | null) {
       return devtools.setEnabled(capability, enabled, ttlSeconds);
+    },
+    recentMessages(since: number) {
+      // since=0 是初次加载：给最近一批，不要 200 条全倒给菜单栏。
+      return since > 0
+        ? recentMessages.filter((item) => item.at > since)
+        : recentMessages.slice(-50);
+    },
+    async purgeRevokedDevices() {
+      const failed: string[] = [];
+      // 菜单栏列的是中继那份设备清单，所以先以它为准，再补上本地还留着的作废记录。
+      const candidates = new Map<string, string>();
+      try {
+        for (const device of (await api.devices()).devices) {
+          if (device.revokedAt !== null) candidates.set(device.deviceId, device.name);
+        }
+      } catch (error) {
+        failed.push(`读取中继设备列表失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+      for (const device of store.devices()) {
+        if (device.revokedAt !== null) candidates.set(device.id, device.name);
+      }
+      const purged = new Set<string>();
+      for (const [deviceId, name] of candidates) {
+        try {
+          await api.purgeDevice(deviceId);
+          store.purgeDevice(deviceId);
+          purged.add(deviceId);
+        } catch (error) {
+          failed.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      // 中继还没升级到支持彻底删除时，DELETE 照样回 200，实际只是重新标记作废。
+      // 复查一遍清单，把还在的算失败，别在菜单里报一个假的成功数。
+      if (purged.size > 0) {
+        try {
+          const remaining = new Set((await api.devices()).devices.map((device) => device.deviceId));
+          for (const deviceId of [...purged]) {
+            if (!remaining.has(deviceId)) continue;
+            purged.delete(deviceId);
+            failed.push(`${candidates.get(deviceId) ?? deviceId}：中继上仍然存在（中继尚未支持彻底删除）`);
+          }
+        } catch (error) {
+          failed.push(`复查设备列表失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      return { purged: purged.size, failed };
+    },
+    hostedConfig() {
+      return adapters.hostedConfig();
+    },
+    setHostedConfig(patch) {
+      return typeof patch.allowBypassPermissions === "boolean"
+        ? adapters.setHostedAllowBypass(patch.allowBypassPermissions)
+        : adapters.hostedConfig();
     },
   };
 
@@ -694,6 +759,7 @@ async function commandServe(): Promise<void> {
           uploads,
           devtools,
           pusher,
+          onMessage: recordMessage,
         }),
         kind: "device",
         deviceId: device.id,

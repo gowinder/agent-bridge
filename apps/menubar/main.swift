@@ -41,6 +41,25 @@ struct DevtoolsInfo: Decodable {
     let terminal: DevtoolsCapabilityInfo?
 }
 
+/// 客户端发来的一条用户消息：谁发的、发到哪个会话、正文前 500 字。
+struct ReceivedMessage: Decodable {
+    let at: Double
+    let deviceId: String
+    let deviceName: String
+    let sessionId: String
+    let title: String?
+    let project: String?
+    let agent: String?
+    let text: String
+}
+
+/// 托管会话的设定，对应状态目录里的 hosted.json。
+struct HostedConfig: Decodable {
+    let allowBypassPermissions: Bool
+    let dirs: [String]
+    let idleTimeoutMs: Double
+}
+
 struct Snapshot: Decodable {
     let version: String
     let hostName: String
@@ -232,6 +251,30 @@ final class AdminClient {
         if let ttlSeconds { body["ttlSeconds"] = ttlSeconds }
         _ = try await request("POST", "/devtools", body: body)
     }
+
+    /// 最近从客户端发过来的用户消息；`since` 是毫秒时间戳，0 表示取最近一批。
+    func messages(since: Double) async throws -> [ReceivedMessage] {
+        let data = try await request("GET", "/messages?since=\(Int(since))")
+        struct Payload: Decodable { let messages: [ReceivedMessage] }
+        return try JSONDecoder().decode(Payload.self, from: data).messages
+    }
+
+    @discardableResult
+    func purgeRevoked() async throws -> (purged: Int, failed: [String]) {
+        let data = try await request("POST", "/devices/purge-revoked")
+        let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        return (object?["purged"] as? Int ?? 0, object?["failed"] as? [String] ?? [])
+    }
+
+    func hostedConfig() async throws -> HostedConfig {
+        let data = try await request("GET", "/hosted")
+        return try JSONDecoder().decode(HostedConfig.self, from: data)
+    }
+
+    func setHostedAllowBypass(_ enabled: Bool) async throws -> HostedConfig {
+        let data = try await request("POST", "/hosted", body: ["allowBypassPermissions": enabled])
+        return try JSONDecoder().decode(HostedConfig.self, from: data)
+    }
 }
 
 /// Runs the bridge CLI for the two things the admin API cannot answer: whether
@@ -401,6 +444,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var updateTimer: Timer?
     private var promptedUpdate: String?
 
+    // 设定窗口与消息气泡
+    private var settingsWindow: NSWindow?
+    private var settingsStatusDot: NSView?
+    private var settingsStatusLabel: NSTextField?
+    private var settingsRelayLabel: NSTextField?
+    private var settingsRoomLabel: NSTextField?
+    private var settingsStateDirLabel: NSTextField?
+    private var settingsPortLabel: NSTextField?
+    private var settingsBypassSwitch: NSSwitch?
+    private var settingsDirsLabel: NSTextField?
+    private var settingsIdleLabel: NSTextField?
+    private var settingsFilesSwitch: NSSwitch?
+    private var settingsTerminalSwitch: NSSwitch?
+    private var settingsTable: NSTableView?
+    private var settingsCountLabel: NSTextField?
+    private var settingsEmptyLabel: NSTextField?
+    private var settingsSearch: NSSearchField?
+    private var messageFilter = ""
+    private var hostedConfig: HostedConfig?
+    private var messageLog: [ReceivedMessage] = []
+    private var lastMessageAt: Double = 0
+    private var messageTimer: Timer?
+    private var bubbleWindow: NSWindow?
+    private var bubbleToken = 0
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -430,6 +498,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
             Task { await self?.checkForUpdates(automatic: true) }
+        }
+        // 只看这之后到达的消息：刚启动时不该把历史消息全弹一遍。
+        lastMessageAt = Date().timeIntervalSince1970 * 1000
+        messageTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { await self?.pollMessages() }
         }
     }
 
@@ -464,6 +537,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         paint()
+        if settingsWindow?.isVisible == true { renderSettings() }
     }
 
     // MARK: - Menu
@@ -492,6 +566,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } else {
                 menu.addItem(item("初始化 Bridge…", #selector(initBridge), ""))
             }
+            menu.addItem(item("设定…", #selector(showSettings), ","))
             menu.addItem(item("管理端口…（\(AdminClient.port)）", #selector(changePort), ""))
             addUpdateItems(to: menu)
             menu.addItem(.separator())
@@ -552,6 +627,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let revokeAllItem = item("作废全部证书…", #selector(revokeAllDevices), "")
             revokeAllItem.isEnabled = snapshot.devices.contains { $0.revokedAt == nil }
             menu.addItem(revokeAllItem)
+            let purgeItem = item("删除全部作废的设备…", #selector(purgeRevokedDevices), "")
+            purgeItem.isEnabled = snapshot.devices.contains { $0.revokedAt != nil }
+            menu.addItem(purgeItem)
         }
 
         if active.count > 0 {
@@ -576,6 +654,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         devItem.submenu = devSub
         menu.addItem(devItem)
 
+        menu.addItem(item("设定…", #selector(showSettings), ","))
         menu.addItem(item("管理端口：\(AdminClient.port)…", #selector(changePort), ""))
         menu.addItem(item("在浏览器中打开", #selector(openWeb), "o"))
         addUpdateItems(to: menu)
@@ -1026,6 +1105,511 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.terminate(nil)
     }
 
+    /// 彻底删掉已作废的设备：中继那份设备清单和本地记录都会消失，操作日志一并清掉。
+    @objc private func purgeRevokedDevices() {
+        let revoked = snapshot?.devices.filter { $0.revokedAt != nil } ?? []
+        guard !revoked.isEmpty else { return }
+        let confirm = NSAlert()
+        confirm.messageText = "删除全部 \(revoked.count) 个作废的设备？"
+        confirm.informativeText = "会把它们从本机和中继的设备清单里彻底删掉（连同操作日志），无法恢复。证书本来就已经作废，删除只是清理列表。"
+        confirm.alertStyle = .warning
+        confirm.addButton(withTitle: "删除")
+        confirm.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        Task {
+            do {
+                let result = try await client.purgeRevoked()
+                await refresh()
+                if !result.failed.isEmpty {
+                    alert("部分设备删除失败", result.failed.joined(separator: "\n"))
+                }
+            } catch {
+                alert("删除失败", error.localizedDescription)
+            }
+        }
+    }
+
+    // MARK: - 设定窗口
+
+    @objc private func showSettings() {
+        if let window = settingsWindow {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            Task {
+                await loadHostedConfig()
+                await loadMessageHistory()
+                renderSettings()
+                renderMessageLog()
+            }
+            return
+        }
+        let width: CGFloat = 620
+        let height: CGFloat = 620
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Agent Bridge 设定"
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        tabs.autoresizingMask = [.width, .height]
+        let general = NSTabViewItem(identifier: "general")
+        general.label = "常规"
+        general.view = buildGeneralTab(size: NSSize(width: width, height: height - 40))
+        let log = NSTabViewItem(identifier: "log")
+        log.label = "日志"
+        log.view = buildLogTab(size: NSSize(width: width, height: height - 40))
+        tabs.addTabViewItem(general)
+        tabs.addTabViewItem(log)
+        window.contentView = tabs
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow = window
+
+        Task {
+            await loadHostedConfig()
+            await loadMessageHistory()
+            renderSettings()
+            renderMessageLog()
+        }
+    }
+
+    private func valueLabel(_ text: String, mono: Bool = false) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = mono ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 12)
+        label.lineBreakMode = .byTruncatingMiddle
+        label.isSelectable = true
+        return label
+    }
+
+    private func buildGeneralTab(size: NSSize) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height))
+        view.autoresizingMask = [.width, .height]
+        let margin: CGFloat = 24
+        let labelWidth: CGFloat = 128
+        let valueX = margin + labelWidth + 12
+        let valueWidth = size.width - valueX - margin
+        var y = size.height - 16
+
+        func take(_ height: CGFloat, gap: CGFloat = 8) -> CGFloat {
+            y -= height
+            let origin = y
+            y -= gap
+            return origin
+        }
+        func section(_ title: String) {
+            let rule = NSBox(frame: NSRect(x: margin, y: y + 4, width: size.width - margin * 2, height: 1))
+            rule.boxType = .separator
+            view.addSubview(rule)
+            y -= 20
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 11, weight: .semibold)
+            label.textColor = .secondaryLabelColor
+            label.frame = NSRect(x: margin, y: take(14, gap: 4), width: size.width - margin * 2, height: 14)
+            view.addSubview(label)
+        }
+        func row(_ caption: String, _ field: NSTextField, height: CGFloat = 17) {
+            let top = take(height, gap: 10)
+            let label = NSTextField(labelWithString: caption)
+            label.font = .systemFont(ofSize: 12)
+            label.textColor = .secondaryLabelColor
+            label.alignment = .right
+            label.lineBreakMode = .byTruncatingTail
+            label.frame = NSRect(x: margin, y: top + 1, width: labelWidth, height: 16)
+            field.frame = NSRect(x: valueX, y: top, width: valueWidth, height: height)
+            view.addSubview(label)
+            view.addSubview(field)
+        }
+        func toggle(_ title: String, _ action: Selector) -> NSSwitch {
+            let top = take(22, gap: 10)
+            let label = NSTextField(labelWithString: title)
+            label.font = .systemFont(ofSize: 12)
+            label.lineBreakMode = .byTruncatingTail
+            label.frame = NSRect(x: margin, y: top + 3, width: size.width - margin * 2 - 60, height: 16)
+            view.addSubview(label)
+            let control = NSSwitch(frame: NSRect(x: size.width - margin - 38, y: top, width: 38, height: 22))
+            control.target = self
+            control.action = action
+            view.addSubview(control)
+            return control
+        }
+        func hint(_ text: String, height: CGFloat = 28) {
+            let label = NSTextField(wrappingLabelWithString: text)
+            label.font = .systemFont(ofSize: 11)
+            label.textColor = .tertiaryLabelColor
+            label.frame = NSRect(x: margin, y: take(height, gap: 10), width: size.width - margin * 2, height: height)
+            view.addSubview(label)
+        }
+
+        // 顶部状态条：一个圆点 + 一行摘要，比一行纯文字更容易一眼看出好坏。
+        let pill = NSView(frame: NSRect(x: margin, y: take(32, gap: 16), width: size.width - margin * 2, height: 32))
+        pill.wantsLayer = true
+        pill.layer?.cornerRadius = 9
+        pill.layer?.backgroundColor = NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
+        let dot = NSView(frame: NSRect(x: 12, y: 12, width: 8, height: 8))
+        dot.wantsLayer = true
+        dot.layer?.cornerRadius = 4
+        dot.layer?.backgroundColor = NSColor.systemGray.cgColor
+        pill.addSubview(dot)
+        let status = NSTextField(labelWithString: "…")
+        status.font = .systemFont(ofSize: 12, weight: .medium)
+        status.lineBreakMode = .byTruncatingTail
+        status.frame = NSRect(x: 26, y: 8, width: pill.frame.width - 36, height: 16)
+        pill.addSubview(status)
+        view.addSubview(pill)
+        settingsStatusDot = dot
+        settingsStatusLabel = status
+
+        section("连接")
+        settingsRelayLabel = valueLabel("…")
+        row("中继", settingsRelayLabel!)
+        settingsRoomLabel = valueLabel("…", mono: true)
+        row("房间号", settingsRoomLabel!)
+        settingsStateDirLabel = valueLabel("…", mono: true)
+        row("状态目录", settingsStateDirLabel!)
+
+        section("管理端口")
+        settingsPortLabel = valueLabel("…", mono: true)
+        row("本机接口", settingsPortLabel!)
+        let portButton = NSButton(title: "修改…", target: self, action: #selector(changePort))
+        portButton.bezelStyle = .rounded
+        portButton.controlSize = .small
+        portButton.font = .systemFont(ofSize: 11)
+        if let portLabel = settingsPortLabel {
+            portLabel.frame.size.width = max(60, valueWidth - 74)
+            portButton.frame = NSRect(x: size.width - margin - 64, y: portLabel.frame.origin.y - 2, width: 64, height: 20)
+        }
+        view.addSubview(portButton)
+
+        section("托管会话")
+        settingsBypassSwitch = toggle("允许 bypassPermissions（跳过权限确认）", #selector(toggleBypass(_:)))
+        hint("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。")
+        settingsDirsLabel = valueLabel("…")
+        row("托管目录", settingsDirsLabel!)
+        settingsIdleLabel = valueLabel("…")
+        row("空闲超时", settingsIdleLabel!)
+
+        section("远程工具")
+        settingsFilesSwitch = toggle("文件浏览（只读，仅当前项目目录）", #selector(toggleFiles(_:)))
+        settingsTerminalSwitch = toggle("命令执行（可写，可访问整台机器）", #selector(toggleTerminal(_:)))
+        hint("开关立即生效；菜单里的「开启 1 小时 / 8 小时」只是加个自动关闭的时限。", height: 16)
+
+        return view
+    }
+
+    private func buildLogTab(size: NSSize) -> NSView {
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height))
+        view.autoresizingMask = [.width, .height]
+        let margin: CGFloat = 24
+
+        let search = NSSearchField(frame: NSRect(x: margin, y: size.height - 44, width: size.width - margin * 2 - 92, height: 24))
+        search.autoresizingMask = [.width]
+        search.placeholderString = "按设备、工程、agent 或内容过滤"
+        search.sendsSearchStringImmediately = true
+        search.target = self
+        search.action = #selector(filterMessages(_:))
+        view.addSubview(search)
+        settingsSearch = search
+
+        let count = NSTextField(labelWithString: "")
+        count.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        count.textColor = .secondaryLabelColor
+        count.alignment = .right
+        count.frame = NSRect(x: size.width - margin - 80, y: size.height - 40, width: 80, height: 14)
+        count.autoresizingMask = [.minXMargin]
+        view.addSubview(count)
+        settingsCountLabel = count
+
+        let scroll = NSScrollView(frame: NSRect(x: margin, y: margin, width: size.width - margin * 2, height: size.height - 44 - margin))
+        scroll.autoresizingMask = [.width, .height]
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .noBorder
+        scroll.wantsLayer = true
+        scroll.layer?.cornerRadius = 8
+        scroll.layer?.borderWidth = 1
+        scroll.layer?.borderColor = NSColor.separatorColor.cgColor
+
+        let table = NSTableView()
+        table.style = .plain
+        table.rowHeight = 26
+        table.intercellSpacing = NSSize(width: 10, height: 2)
+        table.usesAlternatingRowBackgroundColors = true
+        table.allowsColumnResizing = true
+        table.allowsEmptySelection = true
+        table.dataSource = self
+        table.delegate = self
+        table.headerView = NSTableHeaderView()
+        let columns: [(String, String, CGFloat)] = [
+            ("time", "时间", 92),
+            ("device", "来自", 128),
+            ("project", "工程", 132),
+            ("agent", "agent", 84),
+            ("message", "标题与正文", 0),
+        ]
+        for (id, title, width) in columns {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+            column.title = title
+            column.width = width
+            column.minWidth = 56
+            if id == "message" { column.resizingMask = .autoresizingMask }
+            table.addTableColumn(column)
+        }
+        scroll.documentView = table
+        view.addSubview(scroll)
+        settingsTable = table
+
+        let empty = NSTextField(labelWithString: "还没有收到客户端发来的消息")
+        empty.font = .systemFont(ofSize: 12)
+        empty.textColor = .tertiaryLabelColor
+        empty.alignment = .center
+        empty.frame = NSRect(x: margin, y: scroll.frame.midY - 8, width: size.width - margin * 2, height: 16)
+        empty.autoresizingMask = [.width]
+        view.addSubview(empty)
+        settingsEmptyLabel = empty
+        return view
+    }
+
+    private func loadHostedConfig() async {
+        guard reachable else {
+            hostedConfig = nil
+            return
+        }
+        hostedConfig = try? await client.hostedConfig()
+    }
+
+    private func loadMessageHistory() async {
+        guard reachable else { return }
+        guard let history = try? await client.messages(since: 0) else { return }
+        messageLog = history
+        if let latest = history.map({ $0.at }).max() { lastMessageAt = max(lastMessageAt, latest) }
+    }
+
+    private func renderSettings() {
+        guard let window = settingsWindow, window.isVisible else { return }
+        let version = snapshot?.version ?? bridge?.version ?? Updater.currentVersion
+        let relayOnline = reachable && snapshot?.relayOnline == true
+        settingsStatusDot?.layer?.backgroundColor =
+            (reachable ? (relayOnline ? NSColor.systemGreen : NSColor.systemOrange) : NSColor.systemRed).cgColor
+        if reachable, let snapshot {
+            settingsStatusLabel?.stringValue =
+                "\(snapshot.hostName) · v\(version) · 中继\(snapshot.relayOnline ? "在线" : "离线")"
+            settingsRelayLabel?.stringValue = bridge?.relayUrl ?? snapshot.webUrl
+            settingsRoomLabel?.stringValue = snapshot.roomId
+            settingsStateDirLabel?.stringValue = bridge?.stateDir ?? AdminClient.stateDir.path
+            settingsFilesSwitch?.state = snapshot.devtools?.files?.enabled == true ? .on : .off
+            settingsTerminalSwitch?.state = snapshot.devtools?.terminal?.enabled == true ? .on : .off
+        } else {
+            settingsStatusLabel?.stringValue = bridge?.initialized == true ? "Bridge 未运行" : "Bridge 尚未初始化"
+            settingsRelayLabel?.stringValue = bridge?.relayUrl ?? "—"
+            settingsRoomLabel?.stringValue = bridge?.roomId ?? "—"
+            settingsStateDirLabel?.stringValue = bridge?.stateDir ?? AdminClient.stateDir.path
+            settingsFilesSwitch?.state = .off
+            settingsTerminalSwitch?.state = .off
+        }
+        settingsStateDirLabel?.toolTip = settingsStateDirLabel?.stringValue
+        settingsFilesSwitch?.isEnabled = reachable
+        settingsTerminalSwitch?.isEnabled = reachable
+
+        settingsPortLabel?.stringValue =
+            "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? "（环境变量指定）" : "")
+
+        if let hosted = hostedConfig {
+            settingsBypassSwitch?.state = hosted.allowBypassPermissions ? .on : .off
+            settingsDirsLabel?.stringValue = hosted.dirs.isEmpty
+                ? "（没有可用的托管目录）"
+                : hosted.dirs.joined(separator: "、")
+            settingsDirsLabel?.toolTip = hosted.dirs.joined(separator: "\n")
+            settingsIdleLabel?.stringValue = "\(Int((hosted.idleTimeoutMs / 60_000).rounded())) 分钟"
+        } else {
+            settingsBypassSwitch?.state = .off
+            settingsDirsLabel?.stringValue = reachable ? "读取中…" : "Bridge 未运行，无法读取"
+            settingsDirsLabel?.toolTip = nil
+            settingsIdleLabel?.stringValue = ""
+        }
+        settingsBypassSwitch?.isEnabled = reachable && hostedConfig != nil
+    }
+
+    /// 日志 tab 的行：先按搜索词过滤，再按时间倒序。
+    private func filteredMessages() -> [ReceivedMessage] {
+        let rows = Array(messageLog.reversed())
+        let needle = messageFilter.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !needle.isEmpty else { return rows }
+        return rows.filter { message in
+            [message.deviceName, message.project ?? "", message.agent ?? "", message.title ?? "", message.text]
+                .joined(separator: " ")
+                .lowercased()
+                .contains(needle)
+        }
+    }
+
+    private func renderMessageLog() {
+        let rows = filteredMessages()
+        settingsTable?.reloadData()
+        settingsCountLabel?.stringValue = rows.isEmpty ? "" : "\(rows.count) 条"
+        settingsEmptyLabel?.isHidden = !rows.isEmpty
+        settingsEmptyLabel?.stringValue = messageLog.isEmpty
+            ? "还没有收到客户端发来的消息"
+            : "没有匹配的消息"
+    }
+
+    @objc private func filterMessages(_ sender: NSSearchField) {
+        messageFilter = sender.stringValue
+        renderMessageLog()
+    }
+
+    @objc private func toggleBypass(_ sender: NSSwitch) {
+        let enabled = sender.state == .on
+        sender.isEnabled = false
+        Task {
+            do {
+                hostedConfig = try await client.setHostedAllowBypass(enabled)
+            } catch {
+                alert("保存失败", error.localizedDescription)
+            }
+            renderSettings()
+        }
+    }
+
+    @objc private func toggleFiles(_ sender: NSSwitch) {
+        setDevtools(capability: "files", enabled: sender.state == .on, ttlSeconds: nil)
+    }
+
+    @objc private func toggleTerminal(_ sender: NSSwitch) {
+        setDevtools(capability: "terminal", enabled: sender.state == .on, ttlSeconds: nil)
+    }
+
+    // MARK: - 新消息气泡
+
+    /// 每两秒问一次 Bridge 有没有新消息；有新消息就在状态图标下面弹一下。
+    private func pollMessages() async {
+        guard reachable else { return }
+        guard let fresh = try? await client.messages(since: lastMessageAt), !fresh.isEmpty else { return }
+        if let latest = fresh.map({ $0.at }).max() { lastMessageAt = max(lastMessageAt, latest) }
+        messageLog.append(contentsOf: fresh)
+        if messageLog.count > 200 { messageLog.removeFirst(messageLog.count - 200) }
+        renderMessageLog()
+        if let latest = fresh.last { showMessageBubble(latest) }
+    }
+
+    private func showMessageBubble(_ message: ReceivedMessage) {
+        dismissBubble()
+        let width: CGFloat = 340
+        let inset: CGFloat = 14
+        let textWidth = width - inset * 2
+        let titleFont = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        let bodyFont = NSFont.systemFont(ofSize: 12)
+
+        let title = message.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let hasTitle = !title.isEmpty
+        let titleHeight: CGFloat = hasTitle ? 17 : 0
+
+        let bounds = (message.text as NSString).boundingRect(
+            with: NSSize(width: textWidth, height: 10_000),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: bodyFont]
+        )
+        let bodyHeight = min(ceil(bounds.height), 96)
+        let metaHeight: CGFloat = 13
+        let height = inset + titleHeight + (hasTitle ? 3 : 0) + metaHeight + 6 + bodyHeight + inset
+
+        let content = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        content.material = .popover
+        content.blendingMode = .behindWindow
+        content.state = .active
+        content.wantsLayer = true
+        content.layer?.cornerRadius = 12
+        content.layer?.borderWidth = 1
+        content.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.6).cgColor
+        content.layer?.masksToBounds = true
+
+        var y = height - inset
+        if hasTitle {
+            y -= titleHeight
+            let titleLabel = NSTextField(labelWithString: title)
+            titleLabel.font = titleFont
+            titleLabel.textColor = .labelColor
+            titleLabel.lineBreakMode = .byTruncatingTail
+            titleLabel.frame = NSRect(x: inset, y: y, width: textWidth, height: titleHeight)
+            content.addSubview(titleLabel)
+            y -= 3
+        }
+
+        var parts = [message.deviceName]
+        if let project = message.project, !project.isEmpty { parts.append(project) }
+        if let agent = message.agent, !agent.isEmpty { parts.append(agent) }
+        y -= metaHeight
+        let caption = NSTextField(labelWithString: parts.joined(separator: " · "))
+        caption.font = .systemFont(ofSize: 10, weight: .medium)
+        caption.textColor = .secondaryLabelColor
+        caption.lineBreakMode = .byTruncatingTail
+        caption.frame = NSRect(x: inset, y: y, width: textWidth, height: metaHeight)
+        content.addSubview(caption)
+
+        y -= 6 + bodyHeight
+        let body = NSTextField(wrappingLabelWithString: message.text)
+        body.font = bodyFont
+        body.textColor = .secondaryLabelColor
+        body.frame = NSRect(x: inset, y: y, width: textWidth, height: bodyHeight)
+        content.addSubview(body)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = content
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.hasShadow = true
+        window.level = .statusBar
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.canJoinAllSpaces, .transient]
+
+        // 贴在状态图标正下方；拿不到图标位置就退到屏幕右上角。
+        if let host = statusItem.button?.window {
+            window.setFrameOrigin(NSPoint(x: host.frame.maxX - width - 6, y: host.frame.minY - height - 6))
+        } else if let screen = NSScreen.main {
+            window.setFrameOrigin(NSPoint(
+                x: screen.visibleFrame.maxX - width - 12,
+                y: screen.visibleFrame.maxY - height - 12
+            ))
+        }
+        window.alphaValue = 0
+        window.orderFrontRegardless()
+
+        bubbleWindow = window
+        bubbleToken += 1
+        let token = bubbleToken
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.18
+            window.animator().alphaValue = 1
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4.2) { [weak self] in
+            Task { @MainActor in
+                guard let self, self.bubbleToken == token else { return }
+                self.bubbleWindow = nil
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.6
+                    window.animator().alphaValue = 0
+                }, completionHandler: {
+                    window.orderOut(nil)
+                })
+            }
+        }
+    }
+
+    private func dismissBubble() {
+        bubbleToken += 1
+        bubbleWindow?.orderOut(nil)
+        bubbleWindow = nil
+    }
+
     // MARK: - Init / Bridge process
 
     @objc private func initBridge() {
@@ -1258,6 +1842,82 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.addButton(withTitle: "好")
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
+    }
+}
+
+// MARK: - 日志表格
+
+extension AppDelegate: NSTableViewDataSource, NSTableViewDelegate {
+    private static let logTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm:ss"
+        return formatter
+    }()
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        filteredMessages().count
+    }
+
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard let column = tableColumn else { return nil }
+        let rows = filteredMessages()
+        guard row >= 0, row < rows.count else { return nil }
+        let message = rows[row]
+
+        let identifier = NSUserInterfaceItemIdentifier("cell-\(column.identifier.rawValue)")
+        let cell: NSTableCellView
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView {
+            cell = reused
+        } else {
+            cell = NSTableCellView()
+            cell.identifier = identifier
+            let field = NSTextField(labelWithString: "")
+            field.lineBreakMode = .byTruncatingTail
+            field.autoresizingMask = [.width, .maxYMargin, .minYMargin]
+            cell.addSubview(field)
+            cell.textField = field
+        }
+        guard let field = cell.textField else { return cell }
+        field.frame = NSRect(x: 2, y: 5, width: max(column.width - 6, 20), height: 16)
+
+        switch column.identifier.rawValue {
+        case "time":
+            field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            field.textColor = .secondaryLabelColor
+            field.stringValue = Self.logTimeFormatter.string(from: Date(timeIntervalSince1970: message.at / 1000))
+        case "device":
+            field.font = .systemFont(ofSize: 12, weight: .medium)
+            field.textColor = .labelColor
+            field.stringValue = message.deviceName
+        case "project":
+            field.font = .systemFont(ofSize: 12)
+            field.textColor = .labelColor
+            field.stringValue = message.project ?? "—"
+        case "agent":
+            field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            field.textColor = .secondaryLabelColor
+            field.stringValue = message.agent ?? "—"
+        default:
+            field.attributedStringValue = Self.messageSummary(message)
+        }
+        return cell
+    }
+
+    /// 消息列：有标题时标题在前，正文跟在后面；没有标题就只显示正文。
+    private static func messageSummary(_ message: ReceivedMessage) -> NSAttributedString {
+        let summary = NSMutableAttributedString()
+        if let title = message.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            summary.append(NSAttributedString(string: title, attributes: [
+                .font: NSFont.systemFont(ofSize: 12, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+            ]))
+            summary.append(NSAttributedString(string: "  ", attributes: [.font: NSFont.systemFont(ofSize: 12)]))
+        }
+        summary.append(NSAttributedString(string: message.text, attributes: [
+            .font: NSFont.systemFont(ofSize: 12),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]))
+        return summary
     }
 }
 

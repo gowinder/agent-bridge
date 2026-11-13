@@ -341,7 +341,12 @@ export class Room {
         .exec("SELECT id FROM devices WHERE id = ?", deviceId)
         .toArray()[0];
       if (!existing) return errorResponse("not_found", "no such device", 404);
-      this.ctx.storage.sql.exec("UPDATE devices SET revoked_at = ? WHERE id = ?", Date.now(), deviceId);
+      // purge=1：菜单栏「删除全部作废的设备」用，只对已作废的设备硬删，免得误删还能用的设备。
+      if (url.searchParams.get("purge") === "1") {
+        this.ctx.storage.sql.exec("DELETE FROM devices WHERE id = ? AND revoked_at IS NOT NULL", deviceId);
+      } else {
+        this.ctx.storage.sql.exec("UPDATE devices SET revoked_at = ? WHERE id = ?", Date.now(), deviceId);
+      }
       for (const ws of this.ctx.getWebSockets()) {
         const attachment = ws.deserializeAttachment() as Attachment | null;
         if (attachment?.role === "browser" && attachment.deviceId === deviceId) {

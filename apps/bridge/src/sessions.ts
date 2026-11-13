@@ -28,6 +28,7 @@ import type {
   WireMessage,
 } from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
+import type { AdminMessage } from "./admin.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";
 import type { Pusher } from "./push.js";
@@ -299,7 +300,12 @@ export interface DeviceSessionOptions extends SessionOptions {
   uploads: UploadStore;
   devtools: Devtools;
   pusher: Pusher;
+  /** 收到用户输入时上报一条：菜单栏的日志页与气泡都从这里取。 */
+  onMessage?: (message: AdminMessage) => void;
 }
+
+/** 一条用户输入在日志里保留的最大长度。 */
+const MAX_LOGGED_MESSAGE_CHARS = 500;
 
 export class DeviceSession implements ChannelSession {
   private handshake: NoiseHandshake | null = null;
@@ -351,6 +357,7 @@ export class DeviceSession implements ChannelSession {
     let response: ResponseMessage;
     const activity = describeActivity(request);
     if (activity) this.options.activity?.(activity);
+    if (request.method === "message.send") this.reportMessage(request);
     try {
       response = { v: 1, kind: "response", id: request.id, ok: true, result: await this.dispatch(request) };
     } catch (error) {
@@ -367,6 +374,45 @@ export class DeviceSession implements ChannelSession {
       }
     }
     this.respond(response);
+  }
+
+  /**
+   * 把这条用户输入连同工程、agent、客户端一起报给菜单栏。会话信息读不到时
+   * 只记会话 id，不能因为日志把发送本身拖慢或弄失败。
+   */
+  private reportMessage(request: RequestMessage): void {
+    const report = this.options.onMessage;
+    if (!report) return;
+    const params = isObject(request.params) ? request.params : {};
+    const sessionId = stringParam(params, "sessionId") ?? "";
+    const raw = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
+    const text = raw || "（附件）";
+    void (async () => {
+      let title: string | undefined;
+      let project: string | undefined;
+      let agent: string | undefined;
+      if (sessionId) {
+        try {
+          const { session } = await this.options.adapters.session(sessionId);
+          title = session.title;
+          project = session.cwd ?? session.projectId;
+          agent = session.appId;
+        } catch {
+          // 会话已经不在：日志里只留 id。
+        }
+      }
+      report({
+        at: Date.now(),
+        deviceId: this.options.device.id,
+        deviceName: this.options.device.name,
+        sessionId,
+        ...(title ? { title } : {}),
+        ...(project ? { project } : {}),
+        ...(agent ? { agent } : {}),
+        text:
+          text.length > MAX_LOGGED_MESSAGE_CHARS ? `${text.slice(0, MAX_LOGGED_MESSAGE_CHARS)}…` : text,
+      });
+    })();
   }
 
   private async dispatch(request: RequestMessage): Promise<unknown> {

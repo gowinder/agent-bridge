@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type {
   AppInfo,
   ContextUsage,
@@ -34,6 +34,7 @@ import type {
 } from "@craftstead/protocol";
 import { contextUsageFromUsage } from "../context-usage.js";
 import { modelCatalog } from "../model-catalog.js";
+import { subagentDirsFor, subagentTasks as readSubagentTasks } from "../subagents.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
@@ -68,15 +69,6 @@ export interface DesktopSession {
   effort: string;
   /** Server names taken from the enabled MCP tool ids (`local:<server>:<tool>`). */
   mcpServers: string[];
-}
-
-interface SubagentMeta {
-  agentType?: string;
-  description?: string;
-  name?: string;
-  spawnDepth?: number;
-  finished?: boolean;
-  pickedEffortModel?: string;
 }
 
 interface RawEntry {
@@ -293,11 +285,6 @@ function isBusy(busy: BusyState | undefined): boolean {
   if (busy.lastUserAt <= busy.lastTurnEndAt) return false;
   return Date.now() - busy.lastActivityAt < BUSY_IDLE_MS;
 }
-
-/** A subagent whose meta still says "running" is only believed while its file is fresh. */
-const SUBAGENT_RUNNING_MAX_AGE_MS = 10 * 60_000;
-/** The rail lists the newest tasks only; a long session can spawn hundreds. */
-const MAX_RAIL_TASKS = 20;
 
 /** MCP tool ids look like `local:<server>:<tool>`; the rail lists the server. */
 function mcpServersOf(tools: unknown, remote: unknown): string[] {
@@ -675,17 +662,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
-  /** `~/.claude/projects/<project>/<cliSessionId>/subagents` for this session and its priors. */
+  /** 这个会话（含被它续接的前几个 CLI 会话）派生的子代理目录。 */
   private subagentDirs(record: DesktopSession): string[] {
-    const dirs: string[] = [];
-    for (const id of [record.cliSessionId, ...record.priorCliSessionIds]) {
-      if (!id) continue;
-      const path = this.transcriptPath(id);
-      if (!path) continue;
-      const dir = join(dirname(path), id, "subagents");
-      if (existsSync(dir) && !dirs.includes(dir)) dirs.push(dir);
-    }
-    return dirs;
+    return subagentDirsFor([record.cliSessionId, ...record.priorCliSessionIds]);
   }
 
   private subagentFile(record: DesktopSession, taskId: string): string | null {
@@ -698,60 +677,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   }
 
   private subagentTasks(record: DesktopSession): RailTask[] {
-    const tasks: RailTask[] = [];
-    const seen = new Set<string>();
-    for (const dir of this.subagentDirs(record)) {
-      let names: string[];
-      try {
-        names = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        if (!name.endsWith(".meta.json")) continue;
-        const taskId = name.slice(0, -".meta.json".length);
-        if (seen.has(taskId)) continue;
-        const jsonl = join(dir, `${taskId}.jsonl`);
-        if (!existsSync(jsonl)) continue;
-        let meta: SubagentMeta;
-        let metaMtimeMs = 0;
-        try {
-          meta = JSON.parse(readFileSync(join(dir, name), "utf8")) as SubagentMeta;
-          metaMtimeMs = statSync(join(dir, name)).mtimeMs;
-        } catch {
-          continue;
-        }
-        seen.add(taskId);
-        // meta 在子代理启动时写入、结束时才补 finished；运行期间只有 jsonl 在增长。
-        let jsonlMtimeMs = 0;
-        let startedAt: number | undefined;
-        try {
-          const info = statSync(jsonl);
-          jsonlMtimeMs = info.mtimeMs;
-          startedAt = info.birthtimeMs;
-        } catch {
-          // fall back to meta
-        }
-        const updatedAt = Math.max(metaMtimeMs, jsonlMtimeMs);
-        const running = meta.finished !== true && Date.now() - updatedAt < SUBAGENT_RUNNING_MAX_AGE_MS;
-        const task: RailTask = {
-          taskId,
-          name: meta.name || meta.description || taskId,
-          kind: "subagent",
-          status: running ? "running" : "done",
-          updatedAt,
-        };
-        if (meta.name && meta.description) task.detail = meta.description;
-        if (meta.agentType) task.agentType = meta.agentType;
-        if (meta.pickedEffortModel) task.model = meta.pickedEffortModel;
-        if (typeof meta.spawnDepth === "number") task.depth = meta.spawnDepth;
-        if (startedAt) task.startedAt = startedAt;
-        tasks.push(task);
-      }
-    }
-    return tasks
-      .sort((a, b) => (b.startedAt ?? b.updatedAt ?? 0) - (a.startedAt ?? a.updatedAt ?? 0))
-      .slice(0, MAX_RAIL_TASKS);
+    return readSubagentTasks([record.cliSessionId, ...record.priorCliSessionIds]);
   }
 
   messageText(sessionId: string, messageId: string): MessageText | null {

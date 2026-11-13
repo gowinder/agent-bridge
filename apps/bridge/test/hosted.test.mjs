@@ -103,6 +103,39 @@ test("model names that could inject argv are rejected", (t) => {
   assert.throws(() => h.manager.create({ path: h.repo, model: "a b" }), /模型名不合法/);
 });
 
+test("extra args reject the flags that decide identity and permissions", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  for (const flag of [
+    "--settings",
+    "--settings=/tmp/x.json",
+    "--dangerously-skip-permissions",
+    "--permission-mode=bypassPermissions",
+    "--resume",
+  ]) {
+    assert.throws(() => h.manager.create({ path: h.repo, args: [flag] }), /启动参数不接受/);
+  }
+  assert.equal(h.spawns.length, 0);
+  h.manager.create({ path: h.repo, args: ["--add-dir /tmp/extra"] });
+  const args = h.spawns[0].args;
+  assert.equal(args[args.indexOf("--add-dir") + 1], "/tmp/extra");
+});
+
+test("setAllowBypassPermissions rewrites hosted.json and takes effect at once", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  assert.equal(h.manager.configForClient().allowBypassPermissions, false);
+  const updated = h.manager.setAllowBypassPermissions(true);
+  assert.equal(updated.allowBypassPermissions, true);
+  assert.ok(updated.permissionModes.includes("bypassPermissions"));
+  assert.equal(JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8")).allowBypassPermissions, true);
+  assert.equal(h.manager.setAllowBypassPermissions(false).allowBypassPermissions, false);
+  assert.throws(
+    () => h.manager.create({ path: h.repo, permissionMode: "bypassPermissions" }),
+    (error) => error.code === "unsupported",
+  );
+});
+
 test("bypassPermissions is off by default and rejected at create", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
