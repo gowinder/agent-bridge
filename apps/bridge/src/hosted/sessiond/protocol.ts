@@ -66,6 +66,11 @@ export interface SessiondAck {
   seq: number;
 }
 
+/** Bridge 升级后协议不一致时，用它让旧守护进程收摊（会连同子进程一起结束）。 */
+export interface SessiondShutdown {
+  op: "shutdown";
+}
+
 export type SessiondRequest =
   | SessiondHello
   | SessiondStart
@@ -74,7 +79,8 @@ export type SessiondRequest =
   | SessiondKill
   | SessiondStdin
   | SessiondEnd
-  | SessiondAck;
+  | SessiondAck
+  | SessiondShutdown;
 
 export interface SessiondChunk {
   seq: number;

@@ -114,6 +114,8 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
   const connections = new Set<Socket>();
   let lastActivity = Date.now();
   let closing = false;
+  // close 定义在后面；shutdown 分支先占位，避免收尾逻辑被提前引用。
+  let shutdownNow: () => void = () => process.exit(0);
 
   const touch = (): void => {
     lastActivity = Date.now();
@@ -310,6 +312,11 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
         if (session) ackSession(session, message.seq);
         return null;
       }
+      case "shutdown": {
+        // Bridge 升级后要换掉协议不一致的实例：先让回执写完，再按 close() 收掉子进程并退出。
+        setTimeout(shutdownNow, 20);
+        return null;
+      }
       default:
         return null;
     }
@@ -414,6 +421,10 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
       }
     });
     return closingPromise;
+  };
+
+  shutdownNow = (): void => {
+    void close().finally(() => process.exit(0));
   };
 
   return { socketPath, close };
