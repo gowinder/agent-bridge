@@ -17,6 +17,8 @@ import type {
   HostedCreateParams,
   HostedDirInfo,
   HostedDirsResult,
+  HostedInterruptResult,
+  HostedOptionsResult,
   HostedPermissionMode,
   HostedStopResult,
   MessageBlock,
@@ -30,6 +32,8 @@ import type {
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText } from "../adapters/types.js";
 import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js";
+import { effortLevels } from "../effort.js";
+import { modelCatalog } from "../model-catalog.js";
 import { defaultStateDir } from "../store.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
@@ -86,12 +90,16 @@ interface HostedRecord {
   permissionMode: HostedPermissionMode;
   /** CLI `--model` value; undefined keeps the CLI default. */
   model?: string;
+  /** CLI `--effort` level; undefined keeps the CLI default. */
+  effort?: string;
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
   context?: ContextUsage;
   /** CLI init 事件报告的斜杠命令与技能，网页输入「/」时用来提示。 */
   slashCommands?: string[];
+  /** 最近一轮被「停止」中断：下一次发送用户消息前一直成立，网页重开也能显示「已中断」。 */
+  interrupted?: boolean;
   createdAt: number;
   updatedAt: number;
   lastActiveAt: number;
@@ -266,6 +274,7 @@ export class HostedSessionManager {
       messages: pageMessages,
       completeness: "complete",
       busy: live?.busy ?? false,
+      ...(record.interrupted ? { interrupted: true } : {}),
       ...(record.context ? { context: record.context } : {}),
       ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
     };
@@ -300,6 +309,7 @@ export class HostedSessionManager {
         { label: "工作目录", value: record.cwd },
         { label: "权限模式", value: record.permissionMode },
         { label: "模型", value: modelLabel(record) },
+        { label: "思考程度", value: record.effort ?? "CLI 默认" },
         {
           label: "进程",
           value: live ? `运行中（pid ${live.child.pid ?? "?"}）` : "未运行（发送时 resume）",
@@ -318,6 +328,7 @@ export class HostedSessionManager {
     const permissionMode = this.permissionMode(params.permissionMode);
     this.assertModeAllowed(permissionMode);
     const model = this.model(params.model);
+    const effort = this.effort(params.effort);
     const now = Date.now();
     const id = randomUUID();
     const record: HostedRecord = {
@@ -326,6 +337,7 @@ export class HostedSessionManager {
       title: params.title?.trim() || "托管会话",
       permissionMode,
       ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
       createdAt: now,
       updatedAt: now,
       lastActiveAt: now,
@@ -389,6 +401,55 @@ export class HostedSessionManager {
     return { stopped, session: this.summary(record) };
   }
 
+  /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
+  options(): HostedOptionsResult {
+    const models = modelCatalog();
+    const result: HostedOptionsResult = {
+      models,
+      efforts: effortLevels(this.cliBinary()),
+    };
+    if (models.length === 0) {
+      result.note = "读不到模型目录（桌面端与 CLI 都没有缓存），只能使用 CLI 默认模型。";
+    }
+    return result;
+  }
+
+  /**
+   * 只停当前回合，进程留着：往 stdin 发 control_request/interrupt，
+   * CLI 会中止正在跑的这一轮并照常回到可输入状态。
+   */
+  interrupt(sessionId: string): HostedInterruptResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    const live = this.live.get(record.id);
+    if (!live || (!live.busy && !live.pending)) {
+      return { interrupted: false, session: this.summary(record) };
+    }
+    // 停在没有回答的批准请求上时，先拒绝它，否则这一轮还在等输入。
+    if (live.pending) {
+      this.respondControl(live, live.pending.requestId, {
+        behavior: "deny",
+        message: "用户停止了当前回合",
+      });
+      live.pending = null;
+    }
+    live.child.stdin?.write(
+      `${JSON.stringify({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } })}\n`,
+    );
+    live.busy = false;
+    record.interrupted = true;
+    this.appendRecord(record, {
+      messageId: randomUUID(),
+      sessionId: record.id,
+      role: "system",
+      createdAt: Date.now(),
+      blocks: [{ type: "text", text: "已停止当前回合" }],
+    });
+    this.log(`hosted: interrupt ${record.id}`);
+    this.touch(record);
+    return { interrupted: true, session: this.summary(record) };
+  }
+
   async send(sessionId: string, text: string, origin?: string): Promise<MessageSendResult> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
@@ -420,6 +481,7 @@ export class HostedSessionManager {
     }
     this.writeUserTurn(live, text);
     this.recordUser(record, text);
+    record.interrupted = false;
     live.busy = true;
     this.touch(record);
     return { accepted: true, delivered: true };
@@ -452,8 +514,9 @@ export class HostedSessionManager {
     ];
     if (resume) args.push("--resume", record.id);
     else args.push("--session-id", record.id);
-    // 恢复也要带上同一个模型，否则续写会悄悄换回 CLI 默认模型。
+    // 恢复也要带上同一个模型与思考程度，否则续写会悄悄换回 CLI 默认值。
     if (record.model) args.push("--model", record.model);
+    if (record.effort) args.push("--effort", record.effort);
     const child = this.spawnFn(cli, args, { cwd: record.cwd, env: process.env });
     const live: LiveProcess = {
       child,
@@ -759,6 +822,7 @@ export class HostedSessionManager {
       hostedState: live ? "running" : "stopped",
       permissionMode: record.permissionMode,
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
+      ...(record.effort ? { effort: record.effort } : {}),
       cwd: record.cwd,
     };
     if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
@@ -826,6 +890,17 @@ export class HostedSessionManager {
       throw new RpcError("invalid_params", `模型名不合法：${value}`);
     }
     return model;
+  }
+
+  /** 思考程度会原样进 argv：只接受 CLI 自己列出的档位。 */
+  private effort(value: string | undefined): string | undefined {
+    const effort = value?.trim().toLowerCase();
+    if (!effort) return undefined;
+    const levels = effortLevels(this.cliBinary());
+    if (!levels.includes(effort)) {
+      throw new RpcError("invalid_params", `不支持的思考程度：${value}（可用：${levels.join("、")}）`);
+    }
+    return effort;
   }
 
   private touch(record: HostedRecord): void {
@@ -914,9 +989,13 @@ export class HostedSessionManager {
           ),
           // 记录里的模型名不可信：校验不过就当没写，别让一条坏记录拖垮整个注册表。
           ...(typeof item["model"] === "string" && MODEL_PATTERN.test(item["model"]) ? { model: item["model"] } : {}),
+          ...(typeof item["effort"] === "string" && /^[a-z][a-z-]{0,15}$/.test(item["effort"])
+            ? { effort: item["effort"] }
+            : {}),
           ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
             ? { observedModel: item["observedModel"] }
             : {}),
+          ...(item["interrupted"] === true ? { interrupted: true } : {}),
           ...(context ? { context } : {}),
           ...(slashCommands ? { slashCommands } : {}),
           createdAt: numberOr(item["createdAt"], Date.now()),
@@ -943,7 +1022,9 @@ export class HostedSessionManager {
               title: record.title,
               permissionMode: record.permissionMode,
               ...(record.model ? { model: record.model } : {}),
+              ...(record.effort ? { effort: record.effort } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
+              ...(record.interrupted ? { interrupted: record.interrupted } : {}),
               ...(record.context ? { context: record.context } : {}),
               ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
               createdAt: record.createdAt,

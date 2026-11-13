@@ -519,6 +519,237 @@ a.crumb:hover {
   gap: 26px;
 }
 
+/* ---------- dock sidebar（只在桌面宽屏显示） ---------- */
+
+.shell {
+  display: flex;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
+}
+
+.shell-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.dock {
+  display: none;
+  flex: none;
+  flex-direction: column;
+  gap: 10px;
+  width: 256px;
+  position: sticky;
+  top: 57px;
+  height: calc(100dvh - 57px);
+  padding: 14px 10px 28px 14px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 55%, transparent);
+}
+
+@media (min-width: 1120px) {
+  .dock {
+    display: flex;
+  }
+}
+
+.dock-tabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.dock-tab {
+  flex: 1;
+  border: 0;
+  border-radius: 7px;
+  padding: 5px 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dock-tab.is-active {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+}
+
+.dock-body {
+  min-width: 0;
+}
+
+.dock-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.dock-app,
+.dock-project {
+  min-width: 0;
+}
+
+.dock-app-head,
+.dock-project-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.dock-app-head::-webkit-details-marker,
+.dock-project-head::-webkit-details-marker {
+  display: none;
+}
+
+.dock-app-head::before,
+.dock-project-head::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+  transition: transform 0.12s ease;
+  flex: none;
+}
+
+details[open] > .dock-app-head::before,
+details[open] > .dock-project-head::before {
+  transform: rotate(90deg);
+}
+
+.dock-app-head:hover,
+.dock-project-head:hover {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.dock-app-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-project-head {
+  padding-left: 16px;
+  font-weight: 500;
+}
+
+.dock-project-head.is-active {
+  color: var(--text);
+}
+
+.dock-project-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock-count {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--muted);
+  flex: none;
+}
+
+.dock-session {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 6px 5px 26px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dock-session:hover,
+.dock-history-row:hover {
+  background: var(--surface-2);
+}
+
+.dock-session.is-active,
+.dock-history-row.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.dock-session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dock .mark {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  font-size: 8.5px;
+}
+
+.dock-more {
+  margin: 2px 0 4px 26px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  padding: 3px 6px;
+  border-radius: 6px;
+}
+
+.dock-more:hover {
+  color: var(--accent);
+  background: var(--surface-2);
+}
+
+.dock-history-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.dock-history-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+
+.dock-history-meta {
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .page.narrow {
   max-width: 620px;
 }
@@ -2563,6 +2794,18 @@ body.has-file-preview {
   align-items: center;
   height: 32px;
   padding: 0 14px;
+}
+
+/* 托管会话回合运行中的「停止」；hidden 时不能留空位。 */
+.composer-row .btn.stop-turn {
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+}
+
+.composer-row .btn.stop-turn[hidden] {
+  display: none;
 }
 
 .composer-input {

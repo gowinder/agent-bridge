@@ -106,8 +106,10 @@ export const METHODS = [
   "session.compact",
   "session.rename",
   "hosted.dirs",
+  "hosted.options",
   "hosted.create",
   "hosted.stop",
+  "hosted.interrupt",
   "hosted.resume",
   "push.info",
   "push.subscribe",
@@ -442,6 +444,8 @@ export interface SessionSummary {
   permissionMode?: string;
   /** `hosted` only: the --model Bridge passes to the CLI; absent means the CLI default. */
   model?: string;
+  /** `hosted` only: the --effort level Bridge passes to the CLI; absent means the CLI default. */
+  effort?: string;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
@@ -558,7 +562,18 @@ export interface HostedCreateParams {
   permissionMode?: HostedPermissionMode;
   /** Claude Code `--model` value; omitted uses the CLI default. */
   model?: string;
+  /** Claude Code `--effort` level; omitted uses the CLI default. */
+  effort?: string;
   title?: string;
+}
+
+/** 新建托管会话时可选的模型与思考程度，取自本机 CLI。 */
+export interface HostedOptionsResult {
+  /** 模型目录的常用与更多两组；空数组表示读不到目录，只能用 CLI 默认模型。 */
+  models: ModelOption[];
+  /** `--effort` 的可用档位，按从低到高排列。 */
+  efforts: string[];
+  note?: string;
 }
 
 export interface HostedSessionParams {
@@ -567,6 +582,12 @@ export interface HostedSessionParams {
 
 export interface HostedStopResult {
   stopped: boolean;
+  session?: SessionSummary;
+}
+
+export interface HostedInterruptResult {
+  /** false when no turn was running, so the web client can tell «已停止» from «没有在跑». */
+  interrupted: boolean;
   session?: SessionSummary;
 }
 
