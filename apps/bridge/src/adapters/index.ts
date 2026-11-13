@@ -134,6 +134,10 @@ export class SessionAdapters {
     return this.hostedManager.stop(sessionId);
   }
 
+  hostedSetModel(sessionId: string, model: string | null): SessionGetResult {
+    return { session: this.hostedManager.setModel(sessionId, model) };
+  }
+
   hostedResume(sessionId: string): HostedResumeResult {
     return { session: this.hostedManager.resume(sessionId) };
   }

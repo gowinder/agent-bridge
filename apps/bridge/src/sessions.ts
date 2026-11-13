@@ -111,6 +111,7 @@ const ACTIVITY_METHODS = new Set([
   "hosted.stop",
   "hosted.resume",
   "hosted.interrupt",
+  "hosted.setModel",
   "session.compact",
   "session.rename",
   "session.create",
@@ -134,6 +135,10 @@ function describeActivity(request: RequestMessage): string | null {
     const command = (stringParam(params, "command") ?? "").trim().split("\n")[0] ?? "";
     if (!command) return "执行命令";
     return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
+  }
+  if (request.method === "hosted.setModel") {
+    const model = (stringParam(params, "model") ?? "").trim();
+    return `${model ? `把托管会话模型换成「${model}」` : "把托管会话模型改回 CLI 默认"}${suffix}`;
   }
   if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
     const path = (stringParam(params, "path") ?? "").trim();
@@ -545,6 +550,15 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.hostedResume(sessionId);
+      }
+      case "hosted.setModel": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["model"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "model 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetModel(sessionId, typeof raw === "string" ? raw : null);
       }
       case "push.info": {
         const info: PushInfoResult = {

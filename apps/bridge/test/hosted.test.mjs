@@ -595,3 +595,49 @@ test("a late exit from the stopped process keeps the resumed one tracked", async
   assert.equal(h.manager.session(session.sessionId).live, true);
   assert.equal(h.spawns.length, 2);
 });
+
+test("a session without an explicit model pins the model the CLI reports", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  h.spawns[0].child.emitJson({ type: "system", subtype: "init", model: "group/dsgroup" });
+  // 第一次跑起来就把模型钉住：之后本机换 CLI 默认模型，这条会话不会被一起换掉。
+  assert.equal(h.manager.session(session.sessionId).model, "group/dsgroup");
+  h.manager.stop(session.sessionId);
+  h.manager.resume(session.sessionId);
+  const args = h.spawns[1].args;
+  assert.equal(args[args.indexOf("--model") + 1], "group/dsgroup");
+});
+
+test("the model can be switched from the web and the next run uses it", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, model: "group/dsgroup" });
+  const models = h.manager.models(session.sessionId);
+  assert.equal(models.canSwitch, true);
+  assert.equal(models.current, "group/dsgroup");
+
+  const switched = h.manager.setModel(session.sessionId, "ncncapi/claude-opus-5-5");
+  assert.equal(switched.model, "ncncapi/claude-opus-5-5");
+  assert.equal(h.spawns[0].child.signals[0], "SIGTERM");
+  h.manager.resume(session.sessionId);
+  const args = h.spawns[1].args;
+  assert.equal(args[args.indexOf("--model") + 1], "ncncapi/claude-opus-5-5");
+});
+
+test("switching back to the CLI default drops the pinned model", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, model: "group/dsgroup" });
+  h.manager.setModel(session.sessionId, null);
+  assert.equal(h.manager.session(session.sessionId).model, undefined);
+  h.manager.resume(session.sessionId);
+  assert.ok(!h.spawns[1].args.includes("--model"));
+});
+
+test("an invalid model name is rejected instead of reaching the CLI", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  assert.throws(() => h.manager.setModel(session.sessionId, "--dangerously-skip-permissions"), /模型名不合法/);
+});

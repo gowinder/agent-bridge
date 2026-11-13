@@ -3611,23 +3611,39 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     );
     modelButton.title = `当前模型：${label ?? "未知"}`;
     const rows: HTMLElement[] = [];
-    for (const section of ["main", "overflow"] as const) {
+    for (const section of ["main", "custom", "overflow"] as const) {
       const items = info.models.filter((item) => (item.section ?? "main") === section);
       if (items.length === 0) continue;
       rows.push(
-        el("p", { className: "model-pop-group", text: section === "main" ? "常用" : "更多" }),
+        el("p", {
+          className: "model-pop-group",
+          text: section === "main" ? "常用" : section === "custom" ? "自定义" : "更多",
+        }),
       );
       for (const item of items) {
         const current = item.id === info.current;
-        rows.push(
-          el("div", { className: `model-item${current ? " is-current" : ""}` }, [
-            el("div", { className: "model-item-main" }, [
-              el("span", { className: "model-item-name", text: item.name }),
-              el("span", { className: "model-item-id", text: item.id }),
-            ]),
-            ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+        const content = [
+          el("div", { className: "model-item-main" }, [
+            el("span", { className: "model-item-name", text: item.name }),
+            el("span", { className: "model-item-id", text: item.id }),
           ]),
-        );
+          ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+        ];
+        if (info.canSwitch && !current) {
+          // 托管会话可以从网页直接换模型：换完停掉进程，下一条消息按新模型 resume。
+          const row = el(
+            "button",
+            {
+              className: "model-item is-switchable",
+              attrs: { type: "button", title: `切换到 ${item.name}` },
+            },
+            content,
+          );
+          row.addEventListener("click", () => void applyModel(item.id));
+          rows.push(row);
+        } else {
+          rows.push(el("div", { className: `model-item${current ? " is-current" : ""}` }, content));
+        }
       }
     }
     if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
@@ -3648,6 +3664,18 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       // 拿不到模型信息就不显示这块，不影响聊天。
     }
   };
+
+  async function applyModel(model: string): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setModel", { sessionId: route.sessionId, model });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(`模型已换成 ${model}，下一条消息按新模型运行`);
+    } catch (error) {
+      flashNotice(`换模型失败：${messageOf(error)}`);
+    }
+  }
 
   modelButton.addEventListener("click", () => {
     if (!modelPop.hidden) {

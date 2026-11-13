@@ -114,6 +114,7 @@ export const METHODS = [
   "hosted.stop",
   "hosted.interrupt",
   "hosted.resume",
+  "hosted.setModel",
   "push.info",
   "push.subscribe",
   "push.unsubscribe",

@@ -31,6 +31,7 @@ import type {
   MessageRecord,
   MessageSendResult,
   ProjectInfo,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
@@ -586,6 +587,41 @@ export class HostedSessionManager {
     return { stopped, session: this.summary(record) };
   }
 
+  /** 网页上的模型选择：托管会话可以从网页换模型，换完下一条消息按新模型 resume。 */
+  models(sessionId: string): SessionModelsResult {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    const models = modelCatalog();
+    const current = record.model ?? record.observedModel;
+    const result: SessionModelsResult = { models, canSwitch: true };
+    if (current) {
+      result.current = current;
+      result.currentName = models.find((item) => item.id === current)?.name ?? current;
+    }
+    result.note = record.model
+      ? "换模型会停掉当前进程，下一条消息按新模型重新 resume。"
+      : "这条会话还没钉住模型，现在跑的是 CLI 默认模型；选一个就会钉住它。";
+    return result;
+  }
+
+  /** `model` 传 null 表示改回「跟 CLI 默认走」。 */
+  setModel(sessionId: string, value: string | null): SessionSummary {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    const live = this.live.get(record.id);
+    if (live?.busy || live?.pending) {
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
+    }
+    const model = this.model(value?.trim() || undefined);
+    if (model) record.model = model;
+    else delete record.model;
+    // 实际模型是上一轮 init 报的，换了模型旧值就作废，下次运行重新记录。
+    delete record.observedModel;
+    if (live) this.kill(record.id);
+    this.touch(record);
+    return this.summary(record);
+  }
+
   /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
   options(): HostedOptionsResult {
     const models = modelCatalog();
@@ -1012,9 +1048,17 @@ export class HostedSessionManager {
       if (event["subtype"] === "init") {
         let changed = false;
         const model = event["model"];
-        if (typeof model === "string" && model && model !== record.observedModel) {
-          record.observedModel = model;
-          changed = true;
+        if (typeof model === "string" && model && MODEL_PATTERN.test(model)) {
+          if (model !== record.observedModel) {
+            record.observedModel = model;
+            changed = true;
+          }
+          // 第一次跑起来时把 CLI 实际用的模型钉住：之后本机改了 CLI 默认模型，
+          // 这条会话 resume 仍按原模型启动，不会悄悄跟着换掉。
+          if (!record.model) {
+            record.model = model;
+            changed = true;
+          }
         }
         const commands = slashCommandsOf(event);
         if (commands && commands.join("\n") !== (record.slashCommands ?? []).join("\n")) {

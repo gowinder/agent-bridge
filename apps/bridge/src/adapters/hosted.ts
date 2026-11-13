@@ -3,6 +3,7 @@ import type {
   MessageListResult,
   MessageSendResult,
   ProjectInfo,
+  SessionModelsResult,
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
@@ -63,6 +64,10 @@ export class HostedAdapter implements SessionAdapter {
 
   rail(sessionId: string): SessionRailResult {
     return this.manager.rail(sessionId);
+  }
+
+  models(sessionId: string): SessionModelsResult {
+    return this.manager.models(sessionId);
   }
 
   async send(sessionId: string, text: string, origin?: string): Promise<MessageSendResult> {
