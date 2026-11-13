@@ -1117,6 +1117,32 @@ details[open] > .dock-project-head::before {
     gap: 6px;
     margin-top: 0;
   }
+
+  /* 桌面端默认收起：只留一行返回与状态，标题和说明按需展开。 */
+  .head-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    cursor: pointer;
+  }
+
+  .chat-head.is-collapsed .chat-title {
+    font-size: 15px;
+  }
+
+  .chat-head.is-collapsed .meta {
+    display: none;
+  }
+
+  .main.chat {
+    padding-top: 12px;
+  }
 }
 
 /* 手机上头部空间不够时只显示短文案；见 720px 媒体查询。 */
