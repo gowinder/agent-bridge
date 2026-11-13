@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -233,6 +233,89 @@ test("pi session rail lists its background subagent runs", (t) => {
     ],
   );
   assert.equal(tasks[0].detail, "2 步 · 第 2 步");
+});
+
+/** 假装用户的 pi agent 目录：真实目录里只有一个 settings.json 和一个 npm 包目录。 */
+function fakeAgentDir(stateDir) {
+  const source = join(stateDir, "pi-source");
+  mkdirSync(join(source, "npm", "pi-subagents"), { recursive: true });
+  writeFileSync(
+    join(source, "settings.json"),
+    JSON.stringify({ packages: ["npm:pi-subagents"], subagents: { defaultModel: "a/b" } }),
+  );
+  return source;
+}
+
+function withAgentDir(t, source) {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = source;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  });
+}
+
+function readSubagentModel(dir) {
+  return JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).subagents.defaultModel;
+}
+
+test("pi subagent model gets its own agent dir instead of touching the user's", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+
+  const session = h.manager.create({ path: h.repo, agent: "pi", subagentModel: "group/dsgroup" });
+  const dir = h.spawns[0].options.env.PI_CODING_AGENT_DIR;
+  assert.equal(dir, join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", "")));
+  assert.equal(readSubagentModel(dir), "group/dsgroup");
+  // 其余设置原样带过去，否则用户的 packages 等配置会丢。
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).packages, ["npm:pi-subagents"]);
+  // npm 必须是真目录（子项软链）：整目录软链过去 pi 会当成没装扩展。
+  assert.ok(lstatSync(join(dir, "npm")).isDirectory());
+  assert.equal(session.subagentModel, "group/dsgroup");
+  assert.equal(h.manager.models(session.sessionId).subagentModel, "group/dsgroup");
+  assert.equal(h.manager.models(session.sessionId).canSwitchSubagent, true);
+  const rail = h.manager.rail(session.sessionId).environment;
+  assert.equal(rail.find((row) => row.label === "子代理模型")?.value, "group/dsgroup");
+});
+
+test("changing the subagent model restarts the idle pi process with the new setting", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  // 没设子代理模型就跟着用户自己的 agent 目录走，不另建。
+  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+
+  const updated = await h.manager.setSubagentModel(session.sessionId, "group/dsgroup");
+  assert.equal(updated.subagentModel, "group/dsgroup");
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  assert.equal(readSubagentModel(dir), "group/dsgroup");
+
+  // 改回跟随 pi 设置：agent 目录清掉，下一次启动不再带这个环境变量。
+  h.spawns.at(-1).child.kill("SIGTERM");
+  await h.manager.setSubagentModel(session.sessionId, null);
+  assert.equal(existsSync(dir), false);
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId).subagentModel, undefined);
+});
+
+test("subagent model is refused for claude sessions and while a turn is running", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const claude = h.manager.create({ path: h.repo });
+  await assert.rejects(h.manager.setSubagentModel(claude.sessionId, "group/dsgroup"), /只有 pi/);
+
+  const pi = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns.at(-1).child;
+  child.emitJson({ type: "agent_start" });
+  await assert.rejects(h.manager.setSubagentModel(pi.sessionId, "group/dsgroup"), /还在跑/);
+  assert.deepEqual(child.signals, []);
 });
 
 function writeRun(runs, runId, status) {

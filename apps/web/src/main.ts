@@ -247,6 +247,7 @@ let hostedDraft: {
   effort: string;
   mode: string;
   agent: HostedAgent;
+  subagentModel: string;
 } | null = null;
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
@@ -2683,6 +2684,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         effort: "",
         mode: "manual",
         agent: "claude",
+        subagentModel: "",
       };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
@@ -2932,7 +2934,7 @@ function saveHostedArgPrefs(): void {
 
 function hostedCreatePanel(
   project: ProjectInfo,
-  draft: { title: string; model: string; effort: string; mode: string; agent: HostedAgent },
+  draft: { title: string; model: string; effort: string; mode: string; agent: HostedAgent; subagentModel: string },
 ): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
   const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
@@ -2944,6 +2946,21 @@ function hostedCreatePanel(
   model.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
   const effort = el("select", { className: "input", attrs: { "aria-label": "思考程度" } });
   effort.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
+  // pi 的模型清单要跑过一次才拿得到，新建时只能手填 `厂商/模型`。
+  const subagentModel = el("input", {
+    className: "input mono",
+    attrs: {
+      type: "text",
+      placeholder: "例如 group/dsgroup；留空跟随 pi 设置",
+      spellcheck: "false",
+      autocomplete: "off",
+      "aria-label": "子代理模型",
+    },
+  });
+  subagentModel.value = draft.subagentModel;
+  subagentModel.addEventListener("input", () => {
+    draft.subagentModel = subagentModel.value;
+  });
   const optionsHint = el("p", { className: "hint", text: "正在读取本机 CLI 支持的模型与思考程度…" });
   const effortHint = el("p", { className: "hint", text: "思考程度越高，回答更细致，但更慢也更费额度。" });
   const title = el("input", {
@@ -3031,6 +3048,7 @@ function hostedCreatePanel(
       permissionMode,
       ...(!piSelected && model.value.trim() ? { model: model.value.trim() } : {}),
       ...(!piSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(piSelected && subagentModel.value.trim() ? { subagentModel: subagentModel.value.trim() } : {}),
       ...(extraArgs.length > 0 ? { args: extraArgs } : {}),
       ...(title.value.trim() ? { title: title.value.trim() } : {}),
     }, 30_000)
@@ -3066,12 +3084,14 @@ function hostedCreatePanel(
   const modeField = el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]);
   const modelField = el("label", { className: "field" }, [el("span", { text: "模型" }), model]);
   const effortField = el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]);
+  const subagentField = el("label", { className: "field" }, [el("span", { text: "子代理模型（可选）" }), subagentModel]);
   const argsHint = el("p", { className: "hint" });
   const agentHint = el("p", { className: "hint" });
   const syncAgent = (): void => {
     const pi = draft.agent === "pi";
     // pi 没有权限模式与思考程度；模型清单也要等它跑过一次才拿得到，选 pi 时一并收起。
     for (const node of [modeField, modeHint, modelField, effortField, effortHint, optionsHint]) node.hidden = pi;
+    subagentField.hidden = !pi;
     argsHint.textContent = pi
       ? "打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。"
       : "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。";
@@ -3098,6 +3118,7 @@ function hostedCreatePanel(
     effortField,
     effortHint,
     optionsHint,
+    subagentField,
     el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
     argsHint,
     el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
@@ -3943,6 +3964,38 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     document.removeEventListener("keydown", onModelKey);
   }
 
+  /** 一条模型选项：当前项只标「当前」，可切换的其余项点一下就换。 */
+  const modelRow = (
+    item: ModelOption,
+    current: boolean,
+    canSwitch: boolean,
+    pick: (id: string) => void,
+    action: string,
+  ): HTMLElement => {
+    const content = [
+      el("div", { className: "model-item-main" }, [
+        el("span", { className: "model-item-name", text: item.name }),
+        ...(item.id ? [el("span", { className: "model-item-id", text: item.id })] : []),
+      ]),
+      ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+    ];
+    if (canSwitch && !current) {
+      // 托管会话可以从网页直接换模型：换完停掉进程，下一条消息按新模型 resume。
+      const row = el(
+        "button",
+        { className: "model-item is-switchable", attrs: { type: "button", title: `${action}：${item.name}` } },
+        content,
+      );
+      row.addEventListener("click", () => pick(item.id));
+      return row;
+    }
+    return el("div", { className: `model-item${current ? " is-current" : ""}` }, content);
+  };
+
+  /** 子代理模型一行；id 为空表示「跟随 pi 设置」，选它就把覆盖清掉。 */
+  const subagentRow = (item: ModelOption, current: boolean, pick: (id: string) => void): HTMLElement =>
+    modelRow(item, current, true, pick, "子代理用");
+
   const paintModels = (info: SessionModelsResult): void => {
     const label = info.currentName ?? info.current;
     if (!label && info.models.length === 0) {
@@ -3956,7 +4009,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("span", { className: "model-chip-value", text: label ?? "未知" }),
       icon("chevron", "icon model-chev"),
     );
-    modelButton.title = `当前模型：${label ?? "未知"}`;
+    modelButton.title = `当前模型：${label ?? "未知"}${
+      info.canSwitchSubagent ? ` · 子代理：${info.subagentModel ?? "跟随 pi 设置"}` : ""
+    }`;
     const rows: HTMLElement[] = [];
     for (const section of ["main", "custom", "overflow"] as const) {
       const items = info.models.filter((item) => (item.section ?? "main") === section);
@@ -3968,29 +4023,21 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
         }),
       );
       for (const item of items) {
-        const current = item.id === info.current;
-        const content = [
-          el("div", { className: "model-item-main" }, [
-            el("span", { className: "model-item-name", text: item.name }),
-            el("span", { className: "model-item-id", text: item.id }),
-          ]),
-          ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
-        ];
-        if (info.canSwitch && !current) {
-          // 托管会话可以从网页直接换模型：换完停掉进程，下一条消息按新模型 resume。
-          const row = el(
-            "button",
-            {
-              className: "model-item is-switchable",
-              attrs: { type: "button", title: `切换到 ${item.name}` },
-            },
-            content,
-          );
-          row.addEventListener("click", () => void applyModel(item.id));
-          rows.push(row);
-        } else {
-          rows.push(el("div", { className: `model-item${current ? " is-current" : ""}` }, content));
-        }
+        rows.push(modelRow(item, item.id === info.current, info.canSwitch, applyModel, "切换模型"));
+      }
+    }
+    // pi 的子代理模型是单独的设置：只影响之后新派生的子代理，主模型不动。
+    if (info.canSwitchSubagent) {
+      rows.push(el("p", { className: "model-pop-group", text: "子代理模型" }));
+      rows.push(
+        subagentRow(
+          { id: "", name: "跟随 pi 设置", section: undefined },
+          !info.subagentModel,
+          applySubagentModel,
+        ),
+      );
+      for (const item of info.models) {
+        rows.push(subagentRow(item, item.id === info.subagentModel, applySubagentModel));
       }
     }
     if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
@@ -4021,6 +4068,19 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       flashNotice(`模型已换成 ${model}，下一条消息按新模型运行`);
     } catch (error) {
       flashNotice(`换模型失败：${messageOf(error)}`);
+    }
+  }
+
+  /** 只换子代理模型：主模型不动，之后新派生的子代理按它跑。 */
+  async function applySubagentModel(model: string): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setSubagentModel", { sessionId: route.sessionId, model: model || null });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(model ? `子代理模型已换成 ${model}，新派生的子代理按它运行` : "子代理模型改回跟随 pi 设置");
+    } catch (error) {
+      flashNotice(`换子代理模型失败：${messageOf(error)}`);
     }
   }
 

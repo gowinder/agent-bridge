@@ -116,6 +116,7 @@ export const METHODS = [
   "hosted.interrupt",
   "hosted.resume",
   "hosted.setModel",
+  "hosted.setSubagentModel",
   "hosted.archive",
   "hosted.delete",
   "push.info",
@@ -463,6 +464,8 @@ export interface SessionSummary {
   model?: string;
   /** `hosted` only: the --effort level Bridge passes to the CLI; absent means the CLI default. */
   effort?: string;
+  /** `hosted` pi only: 新派生的子代理用哪个模型；缺省跟随 pi 自己的设置。 */
+  subagentModel?: string;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
@@ -609,6 +612,8 @@ export interface HostedCreateParams {
   permissionMode?: HostedPermissionMode;
   /** Claude Code `--model` value; omitted uses the CLI default. */
   model?: string;
+  /** pi only: 新派生的子代理用哪个模型；省略则跟随 pi 自己的设置。 */
+  subagentModel?: string;
   /** Claude Code `--effort` level; omitted uses the CLI default. */
   effort?: string;
   /**
@@ -754,6 +759,10 @@ export interface SessionModelsResult {
   models: ModelOption[];
   /** 能否从网页切换模型；false 时看 note。 */
   canSwitch: boolean;
+  /** pi 托管会话：新派生子代理用的模型；缺省表示跟随 pi 自己的设置。 */
+  subagentModel?: string;
+  /** 能否从网页换子代理模型（只有 pi 托管会话可以）。 */
+  canSwitchSubagent?: boolean;
   note?: string;
 }
 

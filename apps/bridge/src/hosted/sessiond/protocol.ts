@@ -4,8 +4,11 @@
  * 守护进程持有 Claude Code 子进程的 stdio，所以 Bridge 重启只会断开这条连接，
  * 正在跑的那一轮不受影响；重连后按 ack 序号补齐断线期间的输出。
  */
-/** 升到 2：attach 回执多带启动参数，旧守护进程认不出就得换掉，否则换模型的判断永远拿不到数据。 */
-export const SESSIOND_VERSION = 2;
+/**
+ * 升到 3：start 可以带额外的环境变量（pi 会话用 `PI_CODING_AGENT_DIR` 钉住子代理模型）。
+ * 旧守护进程会忽略这个字段、按自己的环境起进程，等于设置不生效，所以版本对不上就换掉。
+ */
+export const SESSIOND_VERSION = 3;
 
 /** 断线期间每个会话最多缓存这么多输出，超过就把最老的丢掉并标记断档。 */
 export const SESSIOND_BUFFER_BYTES = 4 * 1024 * 1024;
@@ -28,6 +31,8 @@ export interface SessiondStart {
   command: string;
   args: string[];
   cwd: string;
+  /** 只传多出来的那几项，守护进程按自己的环境合并。 */
+  env?: Record<string, string>;
 }
 
 export interface SessiondAttach {

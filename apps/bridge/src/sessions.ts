@@ -112,6 +112,7 @@ const ACTIVITY_METHODS = new Set([
   "hosted.resume",
   "hosted.interrupt",
   "hosted.setModel",
+  "hosted.setSubagentModel",
   "hosted.archive",
   "hosted.delete",
   "session.compact",
@@ -142,6 +143,10 @@ function describeActivity(request: RequestMessage): string | null {
   if (request.method === "hosted.setModel") {
     const model = (stringParam(params, "model") ?? "").trim();
     return `${model ? `把托管会话模型换成「${model}」` : "把托管会话模型改回 CLI 默认"}${suffix}`;
+  }
+  if (request.method === "hosted.setSubagentModel") {
+    const model = (stringParam(params, "model") ?? "").trim();
+    return `${model ? `把托管会话的子代理模型换成「${model}」` : "把托管会话的子代理模型改回跟随 pi 设置"}${suffix}`;
   }
   if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
     const path = (stringParam(params, "path") ?? "").trim();
@@ -534,6 +539,7 @@ export class DeviceSession implements ChannelSession {
         const agent = stringParam(params, "agent");
         const model = stringParam(params, "model");
         const effort = stringParam(params, "effort");
+        const subagentModel = stringParam(params, "subagentModel");
         const rawArgs = params["args"];
         const args = Array.isArray(rawArgs)
           ? rawArgs.filter((item): item is string => typeof item === "string")
@@ -544,6 +550,7 @@ export class DeviceSession implements ChannelSession {
           ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
+          ...(agent === "pi" && subagentModel ? { subagentModel } : {}),
           ...(args.length > 0 ? { args } : {}),
           ...(title ? { title } : {}),
         });
@@ -588,6 +595,15 @@ export class DeviceSession implements ChannelSession {
           throw new RpcError("invalid_params", "model 必须是字符串或 null");
         }
         return this.options.adapters.hostedSetModel(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setSubagentModel": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["model"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "model 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetSubagentModel(sessionId, typeof raw === "string" ? raw : null);
       }
       case "push.info": {
         const info: PushInfoResult = {

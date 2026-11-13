@@ -186,7 +186,10 @@ export async function startSessiondServer(options: SessiondServerOptions): Promi
     }
     let child: ChildProcessLike;
     try {
-      child = spawnChild(message.command, message.args, { cwd: message.cwd, env: process.env });
+      child = spawnChild(message.command, message.args, {
+        cwd: message.cwd,
+        env: message.env ? { ...process.env, ...message.env } : process.env,
+      });
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       log(`启动会话 ${message.sessionId} 失败：${detail}`);

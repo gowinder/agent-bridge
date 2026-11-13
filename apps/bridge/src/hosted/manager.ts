@@ -47,6 +47,7 @@ import { modelCatalog } from "../model-catalog.js";
 import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
+import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
 import { PiSession, type PiPending } from "./pi-session.js";
 import { piSubagentTasks } from "./pi-subagents.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
@@ -182,6 +183,8 @@ interface HostedRecord {
   effort?: string;
   /** 额外的 CLI 启动参数（已拆成 argv token），resume 时原样带上。 */
   args?: string[];
+  /** pi 会话：新派生的子代理用哪个模型；缺省跟随 pi 自己的设置。 */
+  subagentModel?: string;
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
@@ -540,6 +543,7 @@ export class HostedSessionManager {
               { label: "思考程度", value: record.effort ?? "CLI 默认" },
             ]),
         { label: "模型", value: modelLabel(record) },
+        ...(pi ? [{ label: "子代理模型", value: record.subagentModel ?? "跟随 pi 设置" }] : []),
         ...(record.args?.length ? [{ label: "启动参数", value: record.args.join(" ") }] : []),
         {
           label: "进程",
@@ -564,6 +568,7 @@ export class HostedSessionManager {
     this.assertModeAllowed(permissionMode);
     const model = this.model(params.model);
     const effort = agent === "pi" ? undefined : this.effort(params.effort);
+    const subagentModel = agent === "pi" ? this.model(params.subagentModel) : undefined;
     const extraArgs = this.extraArgs(params.args, agent);
     const now = Date.now();
     const id = randomUUID();
@@ -575,6 +580,7 @@ export class HostedSessionManager {
       permissionMode,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
+      ...(subagentModel ? { subagentModel } : {}),
       ...(extraArgs ? { args: extraArgs } : {}),
       createdAt: now,
       updatedAt: now,
@@ -622,6 +628,7 @@ export class HostedSessionManager {
     } catch (error) {
       this.log(`hosted: remove transcript failed: ${String(error)}`);
     }
+    removePiAgentDir(this.piAgentDirOf(record.id));
     this.records.delete(record.id);
     this.persistRecords();
     this.log(`hosted: removed ${record.id}`);
@@ -681,14 +688,15 @@ export class HostedSessionManager {
     if (record.agent === "pi") {
       const models = record.piModels ?? [];
       const current = record.model ?? record.observedModel;
-      const result: SessionModelsResult = { models, canSwitch: true };
+      const result: SessionModelsResult = { models, canSwitch: true, canSwitchSubagent: true };
       if (current) {
         result.current = current;
         result.currentName = models.find((item) => item.id === current)?.name ?? current;
       }
+      if (record.subagentModel) result.subagentModel = record.subagentModel;
       result.note =
         models.length > 0
-          ? "换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话。"
+          ? "换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话；子代理模型只影响之后新派生的子代理。"
           : "pi 的模型清单要等会话跑过一次才拿得到。";
       return result;
     }
@@ -734,6 +742,40 @@ export class HostedSessionManager {
     else delete record.model;
     // 实际模型是上一轮 init 报的，换了模型旧值就作废，下次运行重新记录。
     delete record.observedModel;
+    this.touch(record);
+    return this.summary(record);
+  }
+
+  /**
+   * 单独改这个会话派生子代理用的模型（只对 pi 有效）。
+   * pi 只在启动时读 settings.json，所以空闲进程要先停掉，下一条消息按新设置重新打开会话；
+   * 已经在跑的子代理不受影响，只有之后新派生的才用新模型。
+   * `value` 传 null 表示改回跟随 pi 自己的设置。
+   */
+  async setSubagentModel(sessionId: string, value: string | null): Promise<SessionSummary> {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    if (record.agent !== "pi") {
+      throw new RpcError("unsupported", "只有 pi 托管会话可以单独设置子代理模型");
+    }
+    const live = this.live.get(record.id);
+    const model = this.model(value?.trim() || undefined);
+    if (live?.busy || live?.pending || live?.piPending) {
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再换子代理模型");
+    }
+    // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
+    const agentDir = this.piAgentDirOf(record.id);
+    if (model) {
+      if (!preparePiAgentDir(agentDir, model)) {
+        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理模型没有生效`);
+      }
+    } else {
+      removePiAgentDir(agentDir);
+    }
+    if (live) this.kill(record.id);
+    await this.stopInSessiond(record.id, true);
+    if (model) record.subagentModel = model;
+    else delete record.subagentModel;
     this.touch(record);
     return this.summary(record);
   }
@@ -1059,7 +1101,16 @@ export class HostedSessionManager {
       else args.push("--model", record.model);
     }
     if (record.args?.length) args.push(...record.args);
-    const child = this.spawnProcess(binary, args, record.cwd, record.id, record.stdoutSeq ?? 0);
+    // 子代理模型只认 settings.json：给这个会话单独准备一份 agent 目录，用环境变量指过去。
+    const agentDir = preparePiAgentDir(this.piAgentDirOf(record.id), record.subagentModel);
+    const child = this.spawnProcess(
+      binary,
+      args,
+      record.cwd,
+      record.id,
+      record.stdoutSeq ?? 0,
+      agentDir ? { PI_CODING_AGENT_DIR: agentDir } : undefined,
+    );
     this.track(record, child, resume, binary);
   }
 
@@ -1070,10 +1121,20 @@ export class HostedSessionManager {
     cwd: string,
     sessionId: string,
     ack: number,
+    extraEnv?: Record<string, string>,
   ): HostedChild {
-    if (this.spawnFn) return this.spawnFn(command, args, { cwd, env: process.env, sessionId });
-    if (this.sessiond) return this.sessiond.spawnChild(command, args, { cwd, sessionId, ack });
-    return spawnLocal(command, args, { cwd, env: process.env });
+    const env = extraEnv ? { ...process.env, ...extraEnv } : process.env;
+    if (this.spawnFn) return this.spawnFn(command, args, { cwd, env, sessionId });
+    // 守护进程自己带环境，只把多出来的那几项传过去，别把整个 env 塞进协议。
+    if (this.sessiond) {
+      return this.sessiond.spawnChild(command, args, { cwd, sessionId, ack, ...(extraEnv ? { env: extraEnv } : {}) });
+    }
+    return spawnLocal(command, args, { cwd, env });
+  }
+
+  /** 这个会话专用的 pi agent 目录（只有设了子代理模型才会真的建）。 */
+  private piAgentDirOf(id: string): string {
+    return join(this.stateDir, "pi-agent", id);
   }
 
   /** 把子进程挂进 live 表并接好事件；新建与重连共用同一套退出/错误处理。 */
@@ -1603,6 +1664,7 @@ export class HostedSessionManager {
       permissionMode: record.permissionMode,
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
+      ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
       cwd: record.cwd,
     };
     if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
@@ -1790,6 +1852,9 @@ export class HostedSessionManager {
           ...(typeof item["effort"] === "string" && /^[a-z][a-z-]{0,15}$/.test(item["effort"])
             ? { effort: item["effort"] }
             : {}),
+          ...(typeof item["subagentModel"] === "string" && MODEL_PATTERN.test(item["subagentModel"])
+            ? { subagentModel: item["subagentModel"] }
+            : {}),
           ...(Array.isArray(item["args"]) ? { args: sanitizeExtraArgs(item["args"]) } : {}),
           ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
             ? { observedModel: item["observedModel"] }
@@ -1848,6 +1913,7 @@ export class HostedSessionManager {
               permissionMode: record.permissionMode,
               ...(record.model ? { model: record.model } : {}),
               ...(record.effort ? { effort: record.effort } : {}),
+              ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
               ...(record.args?.length ? { args: record.args } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),

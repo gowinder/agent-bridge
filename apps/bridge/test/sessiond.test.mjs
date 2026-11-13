@@ -170,6 +170,29 @@ test("sessiond: backlog 超过 bufferBytes 时丢最老的并标记 gap", async 
   assert.equal(view.result.backlog[0].seq, 2);
 });
 
+test("sessiond: start 把额外环境变量传给子进程", async (t) => {
+  const { dir, client } = await harness(t);
+  const sessionId = "session-env";
+  const script = 'process.stdout.write(`dir=${process.env.PI_CODING_AGENT_DIR}\\n`);';
+  const messageId = id("start");
+  client.send({
+    id: messageId,
+    op: "start",
+    sessionId,
+    command: process.execPath,
+    args: ["-e", script],
+    cwd: dir,
+    env: { PI_CODING_AGENT_DIR: "/tmp/pi-agent-test" },
+  });
+  const started = await waitFor(client.messages, (m) => m.id === messageId, "start 回执");
+  assert.equal(started.ok, true);
+  await waitFor(
+    client.messages,
+    (m) => m.op === "stdout" && m.data === "dir=/tmp/pi-agent-test\n",
+    "带环境变量的输出",
+  );
+});
+
 test("sessiond: socket 文件权限是 0600", async (t) => {
   const { server } = await harness(t);
   const mode = statSync(server.socketPath).mode & 0o777;

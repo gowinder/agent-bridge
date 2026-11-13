@@ -27,7 +27,7 @@ const SHUTDOWN_POLL_MS = 50;
 export type SessiondFallbackSpawn = (
   command: string,
   args: string[],
-  options: { cwd: string; sessionId: string },
+  options: { cwd: string; sessionId: string; env?: Record<string, string> },
 ) => HostedChild;
 
 export interface SessiondBridgeOptions {
@@ -41,6 +41,8 @@ export interface HostedCommandOptions {
   sessionId: string;
   /** 已经处理到的输出序号：接回已在跑的进程时用它补齐断线期间的输出。 */
   ack?: number;
+  /** 启动时额外带的环境变量（守护进程按自己的环境合并）。 */
+  env?: Record<string, string>;
 }
 
 function delay(ms: number): Promise<void> {
@@ -154,6 +156,7 @@ export class RemoteChild extends EventEmitter implements HostedChild {
         command,
         args,
         cwd: options.cwd,
+        ...(options.env ? { env: options.env } : {}),
       });
       if (this.closed) return;
       this.pidValue = typeof reply?.pid === "number" ? reply.pid : undefined;

@@ -140,6 +140,10 @@ export class SessionAdapters {
     return { session: await this.hostedManager.setModel(sessionId, model) };
   }
 
+  async hostedSetSubagentModel(sessionId: string, model: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
+  }
+
   hostedResume(sessionId: string): HostedResumeResult {
     return { session: this.hostedManager.resume(sessionId) };
   }
