@@ -16,6 +16,9 @@ const CONNECT_TIMEOUT_MS = 1_000;
 const SPAWN_TIMEOUT_MS = 5_000;
 /** bundled 的 socket 一开始可能连不上，轮询比一次长时间等待更容易成功。 */
 const SPAWN_POLL_MS = 100;
+/** 杀会话后等它退出：守护进程 SIGTERM 后 2s 补 SIGKILL，这里留够余量。 */
+const KILL_WAIT_MS = 100;
+const KILL_WAIT_TRIES = 30;
 /** 旧守护进程收到 shutdown 后要收尾子进程，最多等这么久让 socket 消失。 */
 const SHUTDOWN_WAIT_MS = 2_000;
 const SHUTDOWN_POLL_MS = 50;
@@ -35,6 +38,8 @@ export interface SessiondBridgeOptions {
 export interface HostedCommandOptions {
   cwd: string;
   sessionId: string;
+  /** 已经处理到的输出序号：接回已在跑的进程时用它补齐断线期间的输出。 */
+  ack?: number;
 }
 
 function delay(ms: number): Promise<void> {
@@ -74,6 +79,7 @@ export class RemoteChild extends EventEmitter implements HostedChild {
   private client: SessiondClient | null = null;
   private local: HostedChild | null = null;
   private pidValue: number | undefined;
+  private ack = 0;
   private ready = false;
   private closed = false;
   /** attach/start 回执到达前先接住事件，保证 backlog 先于断线后的实时输出。 */
@@ -114,6 +120,7 @@ export class RemoteChild extends EventEmitter implements HostedChild {
     }
     if (this.closed) return;
     this.client = client;
+    this.ack = options.ack ?? 0;
     try {
       const reply = await client.request<{ pid?: number | null }>({
         op: "start",
@@ -125,6 +132,42 @@ export class RemoteChild extends EventEmitter implements HostedChild {
       if (this.closed) return;
       this.pidValue = typeof reply?.pid === "number" ? reply.pid : undefined;
       this.ready = true;
+      this.flushReady();
+      this.release();
+    } catch (error) {
+      // 守护进程里这个会话还在跑（上一代 Bridge 留下的、或并发启动）：start 起不来，
+      // 只能接回去，否则每一条消息都会撞上 already running。
+      if (messageOf(error) === "already running") {
+        await this.adopt();
+        return;
+      }
+      this.fail(error);
+    }
+  }
+
+  /** 接管守护进程里已经在跑的同一个会话：先补 backlog，再放行实时事件与排队输入。 */
+  private async adopt(): Promise<void> {
+    const client = this.client;
+    if (!client) {
+      this.fail(new Error("会话已在守护进程里运行，但连接已断开"));
+      return;
+    }
+    try {
+      const result = await client.request<SessiondAttachResult>({
+        op: "attach",
+        sessionId: this.sessionId,
+        ack: this.ack,
+      });
+      if (this.closed) return;
+      if (!result.running) {
+        // 刚好在这一刻退出了：让上层照旧报错，下一次发送会重新 start。
+        this.fail(new Error("会话进程已退出"));
+        return;
+      }
+      this.pidValue = result.pid ?? undefined;
+      this.ready = true;
+      this.bridge.report(`会话 ${this.sessionId} 已在守护进程里运行，改为接回`);
+      for (const chunk of result.backlog) this.out.emit("data", chunk.data, chunk.seq);
       this.flushReady();
       this.release();
     } catch (error) {
@@ -364,6 +407,27 @@ export class SessiondBridge {
 
   remoteChild(sessionId: string): RemoteChild | null {
     return this.children.get(sessionId) ?? null;
+  }
+
+  /**
+   * 让守护进程杀掉某个会话的进程，并等它真的退出。
+   * Bridge 的 live 表里没有它（上一代 Bridge 留下的孤儿进程）时，只有这条路能停掉。
+   */
+  async killSession(sessionId: string): Promise<boolean> {
+    const client = await this.ensure();
+    const stillRunning = async (): Promise<boolean> => {
+      const infos = await client.request<SessiondSessionInfo[]>({ op: "list" });
+      return infos.some((info) => info.sessionId === sessionId && info.running);
+    };
+    if (!(await stillRunning())) return false;
+    // 不摘监听者：进程退出时 manager 还要靠 exit 事件收尾，守护进程广播后自己会摘掉。
+    client.send({ op: "kill", sessionId });
+    // 等退出：紧接着的 start 才不会又撞上 already running（守护进程 2s 后补 SIGKILL）。
+    for (let attempt = 0; attempt < KILL_WAIT_TRIES; attempt += 1) {
+      await delay(KILL_WAIT_MS);
+      if (!(await stillRunning())) return true;
+    }
+    return true;
   }
 
   /** 告诉守护进程这段输出已经处理，断线时不必再回放。 */

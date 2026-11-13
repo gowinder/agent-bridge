@@ -577,14 +577,16 @@ export class HostedSessionManager {
     return this.summary(record);
   }
 
-  stop(sessionId: string): HostedStopResult {
+  async stop(sessionId: string): Promise<HostedStopResult> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     // 用户主动关掉的会话不该在 Bridge 重启后被自动续跑；kill 本身不写注册表。
     record.pendingText = undefined;
     this.persistRecords();
-    const stopped = this.kill(record.id);
-    return { stopped, session: this.summary(record) };
+    const tracked = this.kill(record.id);
+    // Bridge 没跟踪到、但守护进程里还跑着的进程同样要停。
+    const orphan = await this.stopInSessiond(record.id);
+    return { stopped: tracked || orphan, session: this.summary(record) };
   }
 
   /** 网页上的模型选择：托管会话可以从网页换模型，换完下一条消息按新模型 resume。 */
@@ -605,7 +607,7 @@ export class HostedSessionManager {
   }
 
   /** `model` 传 null 表示改回「跟 CLI 默认走」。 */
-  setModel(sessionId: string, value: string | null): SessionSummary {
+  async setModel(sessionId: string, value: string | null): Promise<SessionSummary> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
@@ -618,8 +620,22 @@ export class HostedSessionManager {
     // 实际模型是上一轮 init 报的，换了模型旧值就作废，下次运行重新记录。
     delete record.observedModel;
     if (live) this.kill(record.id);
+    // 换模型必须让旧进程真的退出，否则下一条消息会接回还在跑的那一个，模型没换。
+    // 守护进程里没有跟踪到的旧进程（上一代 Bridge 留下的）也只能由它杀掉。
+    await this.stopInSessiond(record.id);
     this.touch(record);
     return this.summary(record);
+  }
+
+  /** 让守护进程停掉这个会话的进程（没有就不做），并等它退出。 */
+  private async stopInSessiond(id: string): Promise<boolean> {
+    if (!this.sessiond) return false;
+    try {
+      return await this.sessiond.killSession(id);
+    } catch (error) {
+      this.log(`hosted: kill ${id} in sessiond failed: ${String(error)}`);
+      return false;
+    }
   }
 
   /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
@@ -850,14 +866,20 @@ export class HostedSessionManager {
     if (record.effort) args.push("--effort", record.effort);
     // 网页加的启动参数放在最后，允许覆盖上面的默认值（例如 --agent 这种 Bridge 不认识的旗标）。
     if (record.args?.length) args.push(...record.args);
-    const child = this.spawnProcess(cli, args, record.cwd, record.id);
+    const child = this.spawnProcess(cli, args, record.cwd, record.id, record.stdoutSeq ?? 0);
     this.track(record, child, resume, cli);
   }
 
   /** 默认交给 sessiond 持有；注入 spawn 的测试和守护进程不可用时走本机。 */
-  private spawnProcess(command: string, args: string[], cwd: string, sessionId: string): HostedChild {
+  private spawnProcess(
+    command: string,
+    args: string[],
+    cwd: string,
+    sessionId: string,
+    ack: number,
+  ): HostedChild {
     if (this.spawnFn) return this.spawnFn(command, args, { cwd, env: process.env, sessionId });
-    if (this.sessiond) return this.sessiond.spawnChild(command, args, { cwd, sessionId });
+    if (this.sessiond) return this.sessiond.spawnChild(command, args, { cwd, sessionId, ack });
     return nodeSpawn(command, args, { cwd, env: process.env }) as unknown as HostedChild;
   }
 

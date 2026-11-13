@@ -300,11 +300,11 @@ test("two-question batch keeps multi-select answers as arrays", (t) => {
   });
 });
 
-test("stop kills the process and resume starts it again with --resume", (t) => {
+test("stop kills the process and resume starts it again with --resume", async (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
   const session = h.manager.create({ path: h.repo });
-  const stopped = h.manager.stop(session.sessionId);
+  const stopped = await h.manager.stop(session.sessionId);
   assert.equal(stopped.stopped, true);
   assert.equal(h.spawns[0].child.signals[0], "SIGTERM");
   assert.equal(stopped.session.live, false);
@@ -609,7 +609,7 @@ test("a session without an explicit model pins the model the CLI reports", (t) =
   assert.equal(args[args.indexOf("--model") + 1], "group/dsgroup");
 });
 
-test("the model can be switched from the web and the next run uses it", (t) => {
+test("the model can be switched from the web and the next run uses it", async (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
   const session = h.manager.create({ path: h.repo, model: "group/dsgroup" });
@@ -617,7 +617,7 @@ test("the model can be switched from the web and the next run uses it", (t) => {
   assert.equal(models.canSwitch, true);
   assert.equal(models.current, "group/dsgroup");
 
-  const switched = h.manager.setModel(session.sessionId, "ncncapi/claude-opus-5-5");
+  const switched = await h.manager.setModel(session.sessionId, "ncncapi/claude-opus-5-5");
   assert.equal(switched.model, "ncncapi/claude-opus-5-5");
   assert.equal(h.spawns[0].child.signals[0], "SIGTERM");
   h.manager.resume(session.sessionId);
@@ -625,19 +625,22 @@ test("the model can be switched from the web and the next run uses it", (t) => {
   assert.equal(args[args.indexOf("--model") + 1], "ncncapi/claude-opus-5-5");
 });
 
-test("switching back to the CLI default drops the pinned model", (t) => {
+test("switching back to the CLI default drops the pinned model", async (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
   const session = h.manager.create({ path: h.repo, model: "group/dsgroup" });
-  h.manager.setModel(session.sessionId, null);
+  await h.manager.setModel(session.sessionId, null);
   assert.equal(h.manager.session(session.sessionId).model, undefined);
   h.manager.resume(session.sessionId);
   assert.ok(!h.spawns[1].args.includes("--model"));
 });
 
-test("an invalid model name is rejected instead of reaching the CLI", (t) => {
+test("an invalid model name is rejected instead of reaching the CLI", async (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
   const session = h.manager.create({ path: h.repo });
-  assert.throws(() => h.manager.setModel(session.sessionId, "--dangerously-skip-permissions"), /模型名不合法/);
+  await assert.rejects(
+    h.manager.setModel(session.sessionId, "--dangerously-skip-permissions"),
+    /模型名不合法/,
+  );
 });

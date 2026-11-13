@@ -130,12 +130,12 @@ export class SessionAdapters {
     return { session: this.hostedManager.create(params) };
   }
 
-  hostedStop(sessionId: string): HostedStopResult {
+  hostedStop(sessionId: string): Promise<HostedStopResult> {
     return this.hostedManager.stop(sessionId);
   }
 
-  hostedSetModel(sessionId: string, model: string | null): SessionGetResult {
-    return { session: this.hostedManager.setModel(sessionId, model) };
+  async hostedSetModel(sessionId: string, model: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setModel(sessionId, model) };
   }
 
   hostedResume(sessionId: string): HostedResumeResult {

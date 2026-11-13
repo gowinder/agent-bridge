@@ -239,13 +239,33 @@ test("kill 后 exit 事件到达，live 变 false", async (t) => {
   const session = manager.create({ path: h.repo });
   await waitFor(() => /pid \d+/.test(processLabel(manager, session.sessionId)), "子进程已启动");
 
-  const stopped = manager.stop(session.sessionId);
+  const stopped = await manager.stop(session.sessionId);
   assert.equal(stopped.stopped, true);
   await waitFor(
     () => textsOf(manager, session.sessionId).some((text) => text.startsWith("托管进程已结束")),
     "exit 事件",
   );
   assert.equal(manager.session(session.sessionId).live, false);
+});
+
+test("守护进程里还在跑但 Bridge 没跟踪到：下一次发送接回去，不报 already running", async (t) => {
+  const h = await harness(t);
+  const manager = managerFor(h.stateDir);
+  t.after(() => manager.dispose());
+  const session = manager.create({ path: h.repo });
+  await manager.send(session.sessionId, "第一轮");
+  await waitFor(() => textsOf(manager, session.sessionId).includes("echo 第一轮"), "首轮回显");
+  const pid = pidOf(manager, session.sessionId);
+
+  // 上一代 Bridge 留下的孤儿进程就是这个状态：进程在 sessiond 里跑着，live 表里没有。
+  manager.live.delete(sessionUuid(session.sessionId));
+  await manager.send(session.sessionId, "第二轮");
+  await waitFor(() => textsOf(manager, session.sessionId).includes("echo 第二轮"), "接回后回显");
+  assert.ok(
+    !textsOf(manager, session.sessionId).some((text) => text.includes("already running")),
+    "不该出现启动失败提示",
+  );
+  assert.equal(pidOf(manager, session.sessionId), pid);
 });
 
 test("Bridge 重启后待批准的权限请求重新挂上，且不重复追加", async (t) => {
