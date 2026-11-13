@@ -117,7 +117,7 @@ final class AdminClient {
         return isPreviewRelay(relay) ? 47826 : 47825
     }
 
-    private static func isPreviewRelay(_ relay: String?) -> Bool {
+    static func isPreviewRelay(_ relay: String?) -> Bool {
         guard let relay, !relay.isEmpty else { return false }
         let host = URL(string: relay)?.host ?? relay
         return host.range(of: "preview", options: .caseInsensitive) != nil
@@ -397,6 +397,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairDeviceCountBefore = 0
     private var pairSawChannel = false
     private var pairOpenedAt: Double = 0
+    private let updater = Updater()
+    private var updateTimer: Timer?
+    private var promptedUpdate: String?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
@@ -411,6 +414,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         statusItem.menu = menu
         paint()
+        updater.onChange = { [weak self] in self?.paint() }
         Task {
             // 先读一次 info，端口默认值要靠中继地址区分 preview / 生产。
             if bridge == nil { bridge = BridgeCLI.info() }
@@ -420,12 +424,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { await self?.refresh() }
         }
+        Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            await checkForUpdates(automatic: true)
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 6 * 3600, repeats: true) { [weak self] _ in
+            Task { await self?.checkForUpdates(automatic: true) }
+        }
     }
 
     private func paint() {
         guard let button = statusItem.button else { return }
         let version = snapshot?.version ?? bridge?.version
-        let suffix = version.map { " · v\($0)" } ?? ""
+        let update = updater.available.map { " · 可更新 \($0.tag)" } ?? ""
+        let suffix = (version.map { " · v\($0)" } ?? "") + update
         if reachable {
             let online = snapshot?.connections.filter { $0.kind == "device" }.count ?? 0
             button.title = online > 0 ? " \(online)" : ""
@@ -481,6 +493,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 menu.addItem(item("初始化 Bridge…", #selector(initBridge), ""))
             }
             menu.addItem(item("管理端口…（\(AdminClient.port)）", #selector(changePort), ""))
+            addUpdateItems(to: menu)
             menu.addItem(.separator())
             menu.addItem(item("刷新", #selector(refreshNow), "r"))
             menu.addItem(item("退出", #selector(quit), "q"))
@@ -565,6 +578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         menu.addItem(item("管理端口：\(AdminClient.port)…", #selector(changePort), ""))
         menu.addItem(item("在浏览器中打开", #selector(openWeb), "o"))
+        addUpdateItems(to: menu)
         menu.addItem(item("刷新", #selector(refreshNow), "r"))
         menu.addItem(.separator())
         if bridgeProcess?.isRunning == true {
@@ -586,6 +600,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         item.isEnabled = false
         return item
+    }
+
+    /// 版本区：有新版本给一条可点的更新项，检查/下载中只显示状态。
+    private func addUpdateItems(to menu: NSMenu) {
+        menu.addItem(.separator())
+        if let release = updater.available, !updater.isBusy {
+            menu.addItem(item("发现新版本 \(release.tag) — 立即更新", #selector(installUpdate), ""))
+            if case .failed(let reason) = updater.phase {
+                menu.addItem(disabled("上次更新失败：\(reason)"))
+            }
+        } else if updater.isBusy {
+            menu.addItem(disabled(updater.summary))
+        } else {
+            menu.addItem(disabled("当前版本 v\(Updater.currentVersion)"))
+            if let failure = updater.lastFailure {
+                menu.addItem(disabled("检查更新失败：\(failure)"))
+            }
+        }
+        if !updater.isBusy {
+            menu.addItem(item("检查更新…", #selector(checkForUpdates), ""))
+        }
     }
 
     /// 设备子菜单里的「最近操作日志」：先列最近三条，后面再挂一个「更多」子菜单放全部历史。
@@ -629,6 +664,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func refreshNow() {
         Task { await refresh() }
+    }
+
+    @objc private func checkForUpdates() {
+        Task { await checkForUpdates(automatic: false) }
+    }
+
+    /// 自动检查发现新版本时弹一次确认；同一个版本在一次运行里只提示一次。
+    private func checkForUpdates(automatic: Bool) async {
+        await updater.check()
+        guard automatic, pairWindow == nil,
+              let release = updater.available, promptedUpdate != release.tag else { return }
+        promptedUpdate = release.tag
+        let prompt = NSAlert()
+        prompt.messageText = "发现新版本 \(release.tag)"
+        prompt.informativeText = "当前版本 v\(Updater.currentVersion)。点「立即更新」会下载 DMG、替换应用，完成后自动重启。"
+        prompt.addButton(withTitle: "立即更新")
+        prompt.addButton(withTitle: "稍后")
+        NSApp.activate(ignoringOtherApps: true)
+        if prompt.runModal() == .alertFirstButtonReturn { startUpdate(release) }
+    }
+
+    @objc private func installUpdate() {
+        guard let release = updater.available else { return }
+        let confirm = NSAlert()
+        confirm.messageText = "更新到 \(release.tag)？"
+        confirm.informativeText = "会下载安装包并替换当前应用，完成后自动重启。由菜单栏启动的 Bridge 会跟着重启。"
+        confirm.addButton(withTitle: "更新")
+        confirm.addButton(withTitle: "取消")
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+        startUpdate(release)
+    }
+
+    private func startUpdate(_ release: GitHubRelease) {
+        let bridgePid: Int? = {
+            guard let process = bridgeProcess, process.isRunning else { return nil }
+            return Int(process.processIdentifier)
+        }()
+        updater.install(release, bridgePid: bridgePid)
     }
 
     @objc private func disconnectDevice(_ sender: NSMenuItem) {

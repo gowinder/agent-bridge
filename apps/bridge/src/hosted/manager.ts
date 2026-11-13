@@ -122,6 +122,10 @@ interface LiveProcess {
   stderrTail: string;
   /** 最后一次启动是否为 --resume，用来识别「会话记录不存在」并自动改走新建。 */
   resumed: boolean;
+  /** 主动停止（按钮或空闲超时）时先置位；退出事件据此照常提示「已结束」。 */
+  killed?: boolean;
+  /** 退出事件已经处理过，迟到或重复的 error/exit 不再写第二条系统消息。 */
+  finished?: boolean;
 }
 
 export interface HostedChild {
@@ -537,7 +541,12 @@ export class HostedSessionManager {
       if (line && !line.startsWith("[claude-code:")) this.log(`hosted ${record.id} stderr: ${line.slice(0, 300)}`);
     });
     child.on("error", (error) => {
-      this.live.delete(record.id);
+      // 停止后马上发消息会先放入新进程；旧进程迟到的 error/exit 不能把它从跟踪里删掉。
+      const current = this.live.get(record.id);
+      if (current && current !== live) return;
+      if (current === live) this.live.delete(record.id);
+      if (live.finished) return;
+      live.finished = true;
       const detail =
         error.code === "ENOENT"
           ? `找不到 Claude Code CLI：${cli}。托管会话需要它在 PATH 或 AGENT_BRIDGE_CLAUDE_PATH 中。`
@@ -553,10 +562,14 @@ export class HostedSessionManager {
       this.touch(record);
     });
     child.on("exit", (code, signal) => {
-      this.live.delete(record.id);
+      const current = this.live.get(record.id);
+      if (current && current !== live) return;
+      if (current === live) this.live.delete(record.id);
+      if (live.finished) return;
+      live.finished = true;
       // 会话记录从来没生成过（例如上次 spawn 直接失败）时，--resume 会立刻退出；
       // 这种会话改走 --session-id 新建一次，用户不必手动删掉重来。
-      if (!signal && code !== 0 && live.resumed && /no conversation found/i.test(live.stderrTail)) {
+      if (!live.killed && !signal && code !== 0 && live.resumed && /no conversation found/i.test(live.stderrTail)) {
         this.log(`hosted ${record.id}: 会话记录不存在，改为新建`);
         try {
           this.start(record, false);
@@ -918,6 +931,7 @@ export class HostedSessionManager {
   private kill(id: string): boolean {
     const live = this.live.get(id);
     if (!live) return false;
+    live.killed = true;
     this.live.delete(id);
     try {
       live.child.stdin?.end();

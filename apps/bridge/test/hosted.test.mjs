@@ -422,3 +422,34 @@ test("slash commands survive a manager restart", (t) => {
   t.after(() => next.dispose());
   assert.deepEqual(next.messagesFor(session.sessionId, { limit: 10 }).slashCommands, ["compact", "design"]);
 });
+
+test("sending to a stopped session resumes the process", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  h.manager.stop(session.sessionId);
+  assert.equal(h.spawns.length, 1);
+  assert.equal(h.manager.session(session.sessionId).live, false);
+
+  const result = await h.manager.send(session.sessionId, "继续");
+  assert.equal(result.delivered, true);
+  assert.equal(h.spawns.length, 2);
+  const args = h.spawns[1].args;
+  assert.equal(args[args.indexOf("--resume") + 1], session.sessionId.replace("hosted:", ""));
+  assert.equal(h.manager.session(session.sessionId).live, true);
+});
+
+test("a late exit from the stopped process keeps the resumed one tracked", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  const first = h.spawns[0].child;
+  h.manager.stop(session.sessionId);
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.manager.session(session.sessionId).live, true);
+
+  // 真实进程收到 SIGTERM 后可能过一会儿才退出：这时新进程已经在 live 里了。
+  first.emit("exit", null, "SIGTERM");
+  assert.equal(h.manager.session(session.sessionId).live, true);
+  assert.equal(h.spawns.length, 2);
+});
