@@ -31,9 +31,41 @@ export function modelCatalog(): ModelOption[] {
   const now = Date.now();
   if (cache && now - cache.at < CACHE_MS) return cache.models;
   const published = publishedCatalogModels();
-  const models = published.length > 0 ? published : cachedCatalogModels();
+  const base = published.length > 0 ? published : cachedCatalogModels();
+  // 用户自己配的模型（magpie 路由等）排在最前：它们通常才是使用者想选的。
+  const custom = pickerModels();
+  const taken = new Set(custom.map((item) => item.id));
+  const models = [...custom, ...base.filter((item) => !taken.has(item.id))];
   cache = { at: now, models };
   return models;
+}
+
+/**
+ * `~/.claude/settings.json` 的 `modelPicker.options`：桌面/CLI 模型选择器里的自定义条目，
+ * 由 magpie 之类的路由器写入。静态 catalog 里没有这些 id，托管面板要单独读一份。
+ */
+function pickerModels(): ModelOption[] {
+  const out: ModelOption[] = [];
+  try {
+    const raw = JSON.parse(
+      readFileSync(join(homedir(), ".claude", "settings.json"), "utf8"),
+    ) as { modelPicker?: { options?: unknown } };
+    const list = raw.modelPicker?.options;
+    if (!Array.isArray(list)) return out;
+    const seen = new Set<string>();
+    for (const item of list) {
+      if (typeof item !== "object" || item === null) continue;
+      const entry = item as Record<string, unknown>;
+      const id = typeof entry["model"] === "string" ? entry["model"].trim() : "";
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const label = typeof entry["label"] === "string" ? entry["label"].trim() : "";
+      out.push({ id, name: label || id, section: "custom" });
+    }
+  } catch {
+    // 没配 picker 或格式变了：没有自定义模型。
+  }
+  return out;
 }
 
 /** 桌面端拉取的 signed catalog：surfaces.ccd 就是 Code 会话模型选择器的清单。 */

@@ -2006,9 +2006,10 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     const notify = notifyButton();
     if (notify) secondary.append(notify);
     secondary.append(
-      el("span", { className: "conn" }, [
+      el("span", { className: "conn", attrs: { title: `Bridge ${connected.info.version}` } }, [
         el("span", { className: "dot" }),
         el("span", { text: connected.info.name }),
+        el("span", { className: "conn-version", text: `v${connected.info.version}` }),
       ]),
       button("设备", () => navigate({ level: "devices" }), "btn ghost small"),
       button("断开", showHome, "btn ghost small"),
@@ -2626,6 +2627,7 @@ function hostedCreatePanel(
   void call<HostedOptionsResult>("hosted.options")
     .then((info) => {
       const groups: Array<[string, ModelOption[]]> = [
+        ["自定义", info.models.filter((item) => item.section === "custom")],
         ["常用", info.models.filter((item) => (item.section ?? "main") === "main")],
         ["更多", info.models.filter((item) => item.section === "overflow")],
       ];

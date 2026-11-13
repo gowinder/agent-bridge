@@ -684,8 +684,11 @@ export interface SessionModelsParams {
 export interface ModelOption {
   id: string;
   name: string;
-  /** 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。 */
-  section?: "main" | "overflow";
+  /**
+   * 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。
+   * `custom` 是用户自己配在 `~/.claude/settings.json` 的 modelPicker（例如 magpie 路由模型）。
+   */
+  section?: "main" | "overflow" | "custom";
 }
 
 /** 当前会话的模型信息；各 agent 能给出的内容不一样，缺字段就是不知道。 */
