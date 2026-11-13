@@ -190,6 +190,57 @@ test("PiSession answers extension dialogs and parses assistant turns", () => {
   assert.deepEqual(assistant.args[0], [{ type: "text", text: "好了" }]);
 });
 
+test("pi session rail lists its background subagent runs", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const piId = session.sessionId.replace("hosted:", "");
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  writeRun(runs, "run-done", {
+    sessionId: piId,
+    state: "complete",
+    startedAt: now - 60_000,
+    lastActivityAt: now - 50_000,
+    steps: [{ agent: "scout", sessionName: "scout: 数一下目录" }],
+  });
+  writeRun(runs, "run-live", {
+    sessionId: piId,
+    state: "running",
+    startedAt: now - 5_000,
+    lastActivityAt: now - 1_000,
+    currentStep: 1,
+    steps: [{ agent: "scout" }, { agent: "builder", sessionName: "builder: 写报告" }],
+  });
+  // 别的会话的 run 不能混进来。
+  writeRun(runs, "run-other", { sessionId: "another-session", state: "running", steps: [{ agent: "scout" }] });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  const tasks = h.manager.rail(session.sessionId).tasks;
+  assert.deepEqual(
+    tasks.map((task) => [task.taskId, task.status, task.agentType, task.name]),
+    [
+      ["run-live", "running", "builder", "builder: 写报告"],
+      ["run-done", "done", "scout", "scout: 数一下目录"],
+    ],
+  );
+  assert.equal(tasks[0].detail, "2 步 · 第 2 步");
+});
+
+function writeRun(runs, runId, status) {
+  const dir = join(runs, runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "status.json"), JSON.stringify({ runId, ...status }));
+}
+
 test("stopping a hosted process takes its grandchildren with it", async (t) => {
   const script = `
     const { spawn } = require("node:child_process");

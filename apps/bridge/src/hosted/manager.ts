@@ -48,6 +48,7 @@ import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
 import { PiSession, type PiPending } from "./pi-session.js";
+import { piSubagentTasks } from "./pi-subagents.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
 
@@ -548,7 +549,8 @@ export class HostedSessionManager {
       ],
       servers: [],
       // 子代理记录和桌面会话同一份：CLI 按 --session-id 写在自己的 projects 目录下。
-      tasks: subagentTasks([record.id]),
+      // pi 没有这份转录，后台子代理 run 的状态在 pi-subagents 自己的临时目录里。
+      tasks: pi ? piSubagentTasks(record.id) : subagentTasks([record.id]),
       ...(record.context ? { context: record.context } : {}),
       note: "This session is hosted by Bridge, not by the Claude desktop app.",
     };

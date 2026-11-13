@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-13
+
+### Added
+
+- pi 托管会话的侧栏「后台任务」显示 pi-subagents 派生的后台子代理：读 `pi-subagents` 自己的 `async-subagent-runs/<runId>/status.json`，按会话 id 过滤，列出名字、代理类型、步数进度与运行/结束状态。前台子代理跑在 pi 进程内部、没有可读产物，仍然看不到。
+
 ## [0.8.1] - 2026-11-13
 
 ### Changed
