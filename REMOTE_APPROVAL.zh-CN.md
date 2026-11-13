@@ -32,6 +32,28 @@ Bridge 往运行中的 Claude Code 桌面会话送文字，只有一条路：CLI
 
 网页上点 AskUserQuestion 的选项，答案不是走桌面提问通道回去的，而是把选项文案拼成文本再 `message.send`（`apps/web/src/main.ts:4014`），到会话里同样是 peer 信封。
 
+### 2.1 终端 CLI 会话：没有任何代答通道（2026-11-13 在 Claude Code 2.1.323 上核实）
+
+终端里直接起的 `claude` 弹出 AskUserQuestion 时，Bridge 侧三条可能的路都走不通：
+
+- **peer socket**（`/tmp/cc-socks/<pid>.sock`）：`control` 帧只处理 `rename`、`peer_message_status`、`notify_when_idle`，没有回答提问或批准权限的动作。会话卡在提问界面时写进去的 `user` 帧不被消费，收不到回执，网页显示「已写入本地通道，但未收到投递确认」；终端答完后这条消息才落到会话里，变成一条游离回合。
+- **写 tty 从设备**：pty 实测（`os.openpty` + 另一个进程写 `/dev/ttysNNN`）只有写 master 才进输入队列，写从设备进的是输出队列，目标进程的 stdin 读不到。
+- **`TIOCSTI`**：非 root 下 `EPERM`。
+
+所以 `claude-code-cli` 适配器在会话等待选择时把 `canSend` 置为 false：输入框禁用，服务端 `message.send` 对非选项文本返 `conflict`。
+
+### 2.2 例外：会话跑在 herdr 面板里（可行）
+
+上面的结论只对「Bridge 拿不到这个 pty」成立。终端会话实际跑在 herdr 的 pty 里，而 herdr 的 socket API 能把按键送进那个 pty（`herdr pane send-keys <pane> down enter`），所以这条路是通的：
+
+- 面板 ↔ 会话：`herdr pane list` 的 `agent_session.value` 就是转录文件名的那个 uuid，直接对应 Bridge 的 CLI 会话。
+- 网页点选项 → `message.send` → 适配器在 `pendingAskQuestions` 里拿到待答提问的选项，把选项文案换成下标。
+- 按键前先 `herdr pane read` 看面板：只有 `❯` 正指着其中一个已知选项时才发 ↓×N + Enter；看不到就拒绝，避免把按键打进用户的提示符。
+- 只支持单题单选；多题/多选仍要回终端。
+- 没有 herdr（其他机器、herdr 没装）时退回 2.1 的行为：选项不可点，提示在终端回答。
+
+实测（2026-11-13，herdr 0.9.5）：`herdr pane send-keys` 送到 raw 模式进程的 stdin 是 `\x1b[B\x1b[B\r`（↓↓Enter）；`herdr pane read --format text` 里 `❯` 原样保留，能认出当前高亮项。
+
 ### 3. 判定差在动作，不在内容
 
 收到消息的 Claude 对普通请求照做，对不可逆或对外的动作要求「用户本人在本会话说过」。peer 消息不能当作本人批准，是会话侧的安全规则：否则任何被转发的文本都能冒充用户批准生产操作。所以症状表现为「文本可以，合并会串」——其实是同一个会话认了内容，不认发送者。

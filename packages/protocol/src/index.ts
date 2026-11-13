@@ -434,6 +434,11 @@ export interface SessionSummary {
   busy?: boolean;
   /** The client is blocked on a question only the user can answer (AskUserQuestion). */
   needsDecision?: boolean;
+  /**
+   * 终端会话停在一个提问上，但 Bridge 能通过 herdr 面板按键替你选中：
+   * 网页的选项按钮可点，点击走 `message.send`，由 Bridge 换算成 ↓/Enter。
+   */
+  askChannel?: "herdr";
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;

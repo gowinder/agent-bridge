@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-11-13
+
+### Added
+
+- 终端 CLI 会话跑在 herdr 面板里时，网页的提问选项可以真答：Bridge 按 `herdr pane list` 的 `agent_session.value` 找到对应面板，读面板确认 `❯` 指着这个提问后，用 `herdr pane send-keys` 发 ↓×N + Enter。只支持单题单选，看不到提问就不按键；没有 herdr 时退回「请在终端回答」。
+
+### Fixed
+
+- 终端 CLI 会话等 AskUserQuestion 时，网页点选项显示「已发送」但终端仍在等：peer socket 只处理 rename/peer_message_status/notify_when_idle，写 tty 从设备只进输出队列，TIOCSTI 非 root 被拒，注入的消息要等终端答完才落到会话里，成为一条游离回合。现在这类会话等待选择期间 `canSend` 为 false，`message.send` 对非选项文本直接返 `conflict`。
+
 ## [0.3.7] - 2026-11-13
 
 ### Added
