@@ -106,6 +106,8 @@ export const METHODS = [
   "session.compact",
   "session.rename",
   "hosted.dirs",
+  "hosted.addDir",
+  "hosted.removeDir",
   "hosted.options",
   "hosted.create",
   "hosted.stop",
@@ -554,6 +556,12 @@ export interface HostedDirsResult {
   /** hosted.json 的 allowBypassPermissions 开关；false 时 permissionModes 不含 bypassPermissions。 */
   allowBypassPermissions: boolean;
   note?: string;
+}
+
+/** 把目录加入/移出托管白名单（写回 Bridge 状态目录的 hosted.json）。 */
+export interface HostedDirParams {
+  /** 绝对路径，或 `~` 开头的路径；添加时目录必须已存在。 */
+  path: string;
 }
 
 export interface HostedCreateParams {

@@ -104,6 +104,8 @@ const ACTIVITY_METHODS = new Set([
   "shell.exec",
   "shell.cancel",
   "file.upload.finish",
+  "hosted.addDir",
+  "hosted.removeDir",
   "hosted.create",
   "hosted.stop",
   "hosted.resume",
@@ -130,6 +132,11 @@ function describeActivity(request: RequestMessage): string | null {
     const command = (stringParam(params, "command") ?? "").trim().split("\n")[0] ?? "";
     if (!command) return "执行命令";
     return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
+  }
+  if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
+    const path = (stringParam(params, "path") ?? "").trim();
+    const verb = request.method === "hosted.addDir" ? "添加" : "移除";
+    return path ? `${verb}托管目录「${path}」` : `${verb}托管目录`;
   }
   if (request.method === "session.rename") {
     const title = (stringParam(params, "title") ?? "").trim();
@@ -428,6 +435,10 @@ export class DeviceSession implements ChannelSession {
       }
       case "hosted.dirs":
         return this.options.adapters.hostedDirs();
+      case "hosted.addDir":
+        return this.options.adapters.hostedAddDir(stringParam(params, "path") ?? "");
+      case "hosted.removeDir":
+        return this.options.adapters.hostedRemoveDir(stringParam(params, "path") ?? "");
       case "hosted.create": {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");

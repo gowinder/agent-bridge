@@ -11,7 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, isAbsolute, join, resolve } from "node:path";
 import type {
   ContextUsage,
   HostedCreateParams,
@@ -218,6 +218,65 @@ export class HostedSessionManager {
       result.note = `尚未配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`;
     }
     return result;
+  }
+
+  /** 把目录加进托管白名单：只收已存在的绝对路径，重复添加是幂等的。 */
+  addDir(input: string): HostedDirsResult {
+    const target = this.normalizeDir(input);
+    if (!isDirectory(target)) throw new RpcError("invalid_params", `目录不存在：${target}`);
+    const known = this.config.dirs.map((dir) => canonical(expandHome(dir)) ?? resolve(expandHome(dir)));
+    if (!known.includes(target)) {
+      this.config = { ...this.config, dirs: [...this.config.dirs, target] };
+      this.writeConfig();
+      this.log(`hosted: 允许托管目录 ${target}`);
+    }
+    return this.configForClient();
+  }
+
+  /** 移出白名单：已有会话保留，只是不能再从这里新建。目录已被删掉时也允许移除。 */
+  removeDir(input: string): HostedDirsResult {
+    const target = this.normalizeDir(input);
+    const dirs = this.config.dirs.filter(
+      (dir) => (canonical(expandHome(dir)) ?? resolve(expandHome(dir))) !== target,
+    );
+    if (dirs.length !== this.config.dirs.length) {
+      this.config = { ...this.config, dirs };
+      this.writeConfig();
+      this.log(`hosted: 移除托管目录 ${target}`);
+    }
+    return this.configForClient();
+  }
+
+  /** 统一成绝对路径（~ 展开、存在的路径取 realpath）；不检查目录是否存在。 */
+  private normalizeDir(input: string): string {
+    const raw = input.trim();
+    if (!raw) throw new RpcError("invalid_params", "目录不能为空");
+    if (!raw.startsWith("~") && !isAbsolute(raw)) {
+      throw new RpcError("invalid_params", `需要绝对路径：${raw}`);
+    }
+    return canonical(expandHome(raw)) ?? resolve(expandHome(raw));
+  }
+
+  /** 写回 hosted.json：保留其它设置，权限按状态目录的惯例收紧到 0600。 */
+  private writeConfig(): void {
+    const path = join(this.stateDir, "hosted.json");
+    const payload = {
+      dirs: this.config.dirs,
+      idleTimeoutMs: this.config.idleTimeoutMs,
+      allowBypassPermissions: this.config.allowBypassPermissions,
+      ...(this.config.cliPath ? { cliPath: this.config.cliPath } : {}),
+    };
+    try {
+      mkdirSync(this.stateDir, { recursive: true });
+      const tmp = `${path}.tmp`;
+      writeFileSync(tmp, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+      renameSync(tmp, path);
+    } catch (cause) {
+      throw new RpcError(
+        "internal",
+        `写入 ${path} 失败：${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
   }
 
   projects(): ProjectInfo[] {
