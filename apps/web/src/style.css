@@ -814,11 +814,13 @@ details[open] > .dock-project-head::before {
   font-size: 12.5px;
 }
 
-.todo-add {
+.btn.todo-add {
   flex: none;
+  width: 28px;
   height: 28px;
-  padding: 0 10px;
-  font-size: 12px;
+  padding: 0;
+  display: grid;
+  place-items: center;
 }
 
 .todo-list {
@@ -950,11 +952,13 @@ details[open] > .dock-project-head::before {
   font-size: 12.5px;
 }
 
-.todo-save {
+.btn.todo-save {
   flex: none;
+  width: 26px;
   height: 26px;
-  padding: 0 8px;
-  font-size: 12px;
+  padding: 0;
+  display: grid;
+  place-items: center;
 }
 .todo-hidden {
   margin: 0;
