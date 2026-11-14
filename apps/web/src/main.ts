@@ -5432,8 +5432,14 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
         compactChanged = true;
       }
     }
-    if (result.context) state.context = result.context;
-    if (result.context || compactChanged) paintContext(state);
+    if (result.context) {
+      // 轮询每 5 秒一次，上下文没变就不重建弹层：重建会打断正在输入的阈值。
+      const changed = JSON.stringify(result.context) !== JSON.stringify(state.context);
+      state.context = result.context;
+      if (changed || compactChanged) paintContext(state);
+    } else if (compactChanged) {
+      paintContext(state);
+    }
     if (result.slashCommands) state.slashCommands = result.slashCommands;
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
@@ -5514,6 +5520,8 @@ function paintContext(state: ChatState): void {
     <circle class="context-arc" cx="10" cy="10" r="${radius}" fill="none" stroke-width="2.6" stroke-linecap="round" transform="rotate(-90 10 10)" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${(circumference * (1 - ratio)).toFixed(2)}"/>
   </svg>`;
 
+  // 弹层每轮轮询都会重建：正在输入的阈值不能被清掉，先记下草稿与光标，重建后还原。
+  const draft = contextDraft(pop, state);
   pop.replaceChildren(
     el("div", { className: "context-head" }, [
       el("span", { className: "context-percent", text: `${percent}%` }),
@@ -5538,6 +5546,31 @@ function paintContext(state: ChatState): void {
     ...(percent >= 50 ? [contextCompactActions(state)] : []),
     ...(state.session.hostedAgent === "pi" ? [contextCompactionSetting(state)] : []),
   );
+  restoreContextDraft(pop, draft);
+}
+
+/** 上下文弹层里正在编辑的输入框草稿；保存中或没有焦点时不保留。 */
+interface ContextDraft {
+  value: string;
+  start: number | null;
+  end: number | null;
+}
+
+function contextDraft(pop: HTMLElement, state: ChatState): ContextDraft | null {
+  if (state.compaction?.pending) return null;
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement)) return null;
+  if (active.dataset["persist"] !== "compaction" || !pop.contains(active)) return null;
+  return { value: active.value, start: active.selectionStart, end: active.selectionEnd };
+}
+
+function restoreContextDraft(pop: HTMLElement, draft: ContextDraft | null): void {
+  if (!draft) return;
+  const next = pop.querySelector<HTMLInputElement>('input[data-persist="compaction"]');
+  if (!next || next.disabled) return;
+  next.value = draft.value;
+  next.focus();
+  if (draft.start !== null && draft.end !== null) next.setSelectionRange(draft.start, draft.end);
 }
 
 /** 上下文过半时在弹层里给出压缩入口：客户端能自己压就调用，否则复制命令让用户粘贴。 */
@@ -5605,7 +5638,7 @@ function contextCompactionSetting(state: ChatState): HTMLElement {
   const current = state.session.compactionReserveTokens;
   const input = el("input", {
     className: "context-input",
-    attrs: { type: "number", min: "0", step: "1024", inputmode: "numeric", placeholder: "16384" },
+    attrs: { type: "number", min: "0", step: "1024", inputmode: "numeric", placeholder: "16384", "data-persist": "compaction" },
   });
   if (typeof current === "number") input.value = String(current);
   input.disabled = pending;
