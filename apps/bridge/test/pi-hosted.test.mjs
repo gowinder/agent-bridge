@@ -49,13 +49,17 @@ class FakeChild extends EventEmitter {
   }
 }
 
-function piHarness() {
+function piHarness(registry) {
   const root = mkdtempSync(join(tmpdir(), "pi-hosted-test-"));
   const repo = join(root, "repo");
   const stateDir = join(root, "state");
   mkdirSync(repo);
   mkdirSync(stateDir);
   writeFileSync(join(stateDir, "hosted.json"), JSON.stringify({ dirs: [repo], idleTimeoutMs: 60_000 }));
+  if (registry) {
+    mkdirSync(join(stateDir, "hosted"));
+    writeFileSync(join(stateDir, "hosted", "sessions.json"), JSON.stringify({ sessions: registry(repo) }));
+  }
   const spawns = [];
   const spawnFn = (command, args, options) => {
     const child = new FakeChild();
@@ -65,6 +69,16 @@ function piHarness() {
   process.env.AGENT_BRIDGE_PI_PATH = process.execPath;
   const manager = new HostedSessionManager({ stateDir, spawn: spawnFn });
   return { repo, stateDir, spawns, manager };
+}
+
+/** 命令是异步回执：等到子进程里真的出现了第 count 条这类命令再回。 */
+async function waitForWrite(child, type, count = 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const sent = child.writes().filter((item) => item.type === type);
+    if (sent.length >= count) return sent[count - 1];
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`没有等到第 ${count} 条 ${type} 命令`);
 }
 
 function piHandlers() {
@@ -166,6 +180,164 @@ test("pi session without a live process records the model for the next start", a
   const args = h.spawns.at(-1).args;
   assert.equal(args[args.indexOf("--provider") + 1], "group");
   assert.equal(args[args.indexOf("--model") + 1], "dsgroup");
+});
+
+test("/new asks pi for a new session and resumes it by file path", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  child.reply("get_state", { sessionFile: "/state/sessions/old.jsonl" });
+
+  const pending = h.manager.send(session.sessionId, "/new");
+  await waitForWrite(child, "new_session");
+  child.reply("new_session", {});
+  // 新会话的 id 与文件都变了：回执之后 Bridge 要再问一遍 get_state 才能记住路径。
+  const statesBefore = child.writes().filter((item) => item.type === "get_state").length;
+  const asked = await waitForWrite(child, "get_state", statesBefore + 1);
+  const sessionPath = "/state/sessions/2026-01-01T00-00-00-000Z_新会话.jsonl";
+  child.emitJson({
+    id: asked.id,
+    type: "response",
+    command: "get_state",
+    success: true,
+    data: { sessionFile: sessionPath },
+  });
+  await pending;
+
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+  const messages = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages;
+  assert.equal(messages.at(-1).role, "system");
+  assert.match(messages.at(-1).blocks[0].text, /已开始新会话/);
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.piSessionPath, sessionPath);
+
+  // 重启后按文件续写，否则会退回 `/new` 之前的历史。
+  child.kill("SIGTERM");
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const args = h.spawns.at(-1).args;
+  assert.equal(args[args.indexOf("--session") + 1], sessionPath);
+  assert.equal(args.includes("--session-id"), false);
+});
+
+test("/compact passes the user's instructions to pi", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/compact 关注代码改动");
+  const compact = await waitForWrite(child, "compact");
+  assert.equal(compact.customInstructions, "关注代码改动");
+  child.reply("compact", { tokensBefore: 120_000, estimatedTokensAfter: 40_000 });
+  const sent = await pending;
+  assert.equal(sent.detail, "已在托管会话里执行命令");
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "system");
+  assert.match(last.blocks[0].text, /120,000 → 40,000 tokens/);
+});
+
+test("/session reports pi's own stats as a system message", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/session");
+  await waitForWrite(child, "get_session_stats");
+  child.reply("get_session_stats", {
+    userMessages: 3,
+    toolCalls: 7,
+    tokens: { total: 12_345 },
+    cost: 0.0432,
+    contextUsage: { percent: 18 },
+  });
+  await pending;
+
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "system");
+  assert.match(last.blocks[0].text, /用户消息 3 条、工具调用 7 次/);
+  assert.match(last.blocks[0].text, /12,345 tokens/);
+  assert.match(last.blocks[0].text, /上下文占用 18%/);
+});
+
+test("commands outside the bridge list still go to the model as plain text", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  await h.manager.send(session.sessionId, "/tree");
+  // `/tree` 依赖终端交互，Bridge 不能吞掉它：整行按普通用户消息发给 pi。
+  const prompts = child.writes().filter((item) => item.type === "prompt");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].message, "/tree");
+  assert.equal(child.writes().filter((item) => item.type === "new_session").length, 0);
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "user");
+  assert.equal(last.blocks[0].text, "/tree");
+});
+
+test("/new is refused while a turn is running", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  child.emitJson({ type: "agent_start" });
+
+  await h.manager.send(session.sessionId, "/new");
+  assert.equal(child.writes().filter((item) => item.type === "new_session").length, 0);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "system");
+  assert.match(last.blocks[0].text, /还在跑，等它结束再 \/new/);
+});
+
+test("registry resumes only from a usable pi session path", async (t) => {
+  const h = piHarness((repo) => [
+    { id: "good", cwd: repo, agent: "pi", piSessionPath: "/state/sessions/good.jsonl" },
+    // 非绝对路径与夹带换行的都不可信，当成没写过，回到 --session-id。
+    { id: "relative", cwd: repo, agent: "pi", piSessionPath: "sessions/relative.jsonl" },
+    { id: "newline", cwd: repo, agent: "pi", piSessionPath: "/state/sessions/bad\n.jsonl" },
+  ]);
+  t.after(() => h.manager.dispose());
+
+  await h.manager.send("hosted:good", "继续");
+  assert.equal(h.spawns[0].args[h.spawns[0].args.indexOf("--session") + 1], "/state/sessions/good.jsonl");
+
+  await h.manager.send("hosted:relative", "继续");
+  const relative = h.spawns.at(-1).args;
+  assert.equal(relative[relative.indexOf("--session-id") + 1], "relative");
+  assert.equal(relative.includes("--session"), false);
+
+  await h.manager.send("hosted:newline", "继续");
+  const newline = h.spawns.at(-1).args;
+  assert.equal(newline[newline.indexOf("--session-id") + 1], "newline");
+  assert.equal(newline.includes("--session"), false);
+});
+
+test("pi sessions advertise the commands the bridge handles itself", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  // pi 只报自己的扩展与模板命令，Bridge 接住的那几条由它补上，网页才看得到。
+  child.reply("get_commands", { commands: [{ name: "design" }, { name: "compact" }] });
+  assert.deepEqual(h.manager.messagesFor(session.sessionId, { limit: 1 }).slashCommands, [
+    "design",
+    "compact",
+    "export",
+    "model",
+    "name",
+    "new",
+    "session",
+    "thinking",
+    "quit",
+  ]);
 });
 
 test("PiSession answers extension dialogs and parses assistant turns", () => {

@@ -4,6 +4,10 @@ const MAX_BLOCK_CHARS = 4_000;
 const MAX_TOOL_CHARS = 300;
 /** 换模型等回执的上限：进程刚好退出时不能把网页一直挂着。 */
 const MODEL_SWITCH_TIMEOUT_MS = 15_000;
+/** 一次性命令（新建会话、改名、导出）的回执上限。 */
+const COMMAND_TIMEOUT_MS = 20_000;
+/** 压缩要真跑一次模型，给它足够长的时间。 */
+const COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** pi 的扩展 UI 请求里需要网页作答的那几种。 */
 export type PiDialogMethod = "select" | "confirm" | "input" | "editor";
@@ -151,6 +155,76 @@ export class PiSession {
     });
   }
 
+  /**
+   * 新建 pi 会话。`new_session` 会换一个会话文件（以及 id），所以回执之后还要问一遍
+   * `get_state`，把新的文件路径交给调用方记下来续写用。
+   */
+  async newSession(): Promise<{ sessionPath?: string; error?: string }> {
+    const record = await this.call("new_session");
+    if (record["success"] === undefined) return { error: "pi 没有回执" };
+    if (record["success"] !== true) return { error: reasonOf(record) };
+    const data = isRecord(record["data"]) ? record["data"] : {};
+    if (data["cancelled"] === true) return { error: "pi 取消了新建会话" };
+    const state = await this.state();
+    const sessionPath = typeof state["sessionFile"] === "string" ? state["sessionFile"] : "";
+    return sessionPath ? { sessionPath } : {};
+  }
+
+  /** 手动压缩上下文；过程本身走 compaction_start/compaction_end 事件，回执只用来报错与报数。 */
+  async compact(instructions?: string): Promise<{ error?: string; tokensBefore?: number; tokensAfter?: number }> {
+    const text = instructions?.trim() ?? "";
+    const record = await this.call("compact", text ? { customInstructions: text } : {}, COMPACT_TIMEOUT_MS);
+    if (record["success"] === undefined) return { error: "pi 没有回执" };
+    if (record["success"] !== true) return { error: reasonOf(record) };
+    const data = isRecord(record["data"]) ? record["data"] : {};
+    const before = typeof data["tokensBefore"] === "number" ? data["tokensBefore"] : undefined;
+    const after = typeof data["estimatedTokensAfter"] === "number" ? data["estimatedTokensAfter"] : undefined;
+    return {
+      ...(before !== undefined ? { tokensBefore: before } : {}),
+      ...(after !== undefined ? { tokensAfter: after } : {}),
+    };
+  }
+
+  /** 会话统计：给 `/session` 用，字段原样交给调用方格式化。 */
+  async stats(): Promise<Record<string, unknown> | null> {
+    const record = await this.call("get_session_stats");
+    if (record["success"] !== true) return null;
+    return isRecord(record["data"]) ? record["data"] : null;
+  }
+
+  async renameSession(name: string): Promise<{ error?: string }> {
+    const record = await this.call("set_session_name", { name });
+    if (record["success"] === undefined) return { error: "pi 没有回执" };
+    if (record["success"] !== true) return { error: reasonOf(record) };
+    return {};
+  }
+
+  async setThinkingLevel(level: string): Promise<{ error?: string; level?: string }> {
+    const record = await this.call("set_thinking_level", { level });
+    if (record["success"] === undefined) return { error: "pi 没有回执" };
+    if (record["success"] !== true) return { error: reasonOf(record) };
+    return { level };
+  }
+
+  async exportHtml(outputPath?: string): Promise<{ path?: string; error?: string }> {
+    const record = await this.call(
+      "export_html",
+      outputPath ? { outputPath } : {},
+      COMMAND_TIMEOUT_MS,
+    );
+    if (record["success"] === undefined) return { error: "pi 没有回执" };
+    if (record["success"] !== true) return { error: reasonOf(record) };
+    const data = isRecord(record["data"]) ? record["data"] : {};
+    const path = typeof data["path"] === "string" ? data["path"] : "";
+    return path ? { path } : {};
+  }
+
+  /** 当前会话状态（含 sessionFile）：只在新建会话后核对路径时用到。 */
+  private async state(): Promise<Record<string, unknown>> {
+    const record = await this.call("get_state");
+    return isRecord(record["data"]) ? record["data"] : {};
+  }
+
   /** 回答一条扩展提问；confirm 用 confirmed，其余用 value。 */
   answer(pending: PiPending, text: string): void {
     const payload: Record<string, unknown> = { type: "extension_ui_response", id: pending.id };
@@ -277,6 +351,33 @@ export class PiSession {
     this.handlers.pending(this.pending);
   }
 
+  /** 一次性命令：等回执，进程刚好退出时按超时收尾，别让调用方一直挂着。 */
+  private call(
+    type: string,
+    extra: Record<string, unknown> = {},
+    timeoutMs = COMMAND_TIMEOUT_MS,
+  ): Promise<Record<string, unknown>> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve({});
+      }, timeoutMs);
+      timer.unref();
+      this.command(
+        type,
+        (record) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(record);
+        },
+        extra,
+      );
+    });
+  }
+
   private command(
     type: string,
     callback: (record: Record<string, unknown>) => void,
@@ -291,6 +392,10 @@ export class PiSession {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function reasonOf(record: Record<string, unknown>): string {
+  return typeof record["error"] === "string" && record["error"] ? record["error"] : "未知原因";
 }
 
 function namesFromCommands(record: Record<string, unknown>): string[] {
