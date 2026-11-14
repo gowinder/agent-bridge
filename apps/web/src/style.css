@@ -1616,6 +1616,8 @@ details[open] > .dock-project-head::before {
   gap: 14px;
   min-width: 0;
   min-height: 0;
+  /* 侧栏占掉一列后主区可能只剩 600px 上下，composer 要能按自己的宽度换行。 */
+  container: chat-body / inline-size;
 }
 
 /* ---------- session rail ---------- */
@@ -3102,6 +3104,28 @@ body.has-file-preview {
   display: flex;
   gap: 8px;
   padding-bottom: 2px;
+}
+
+/*
+ * 侧栏、窗口和左侧 dock 一起挤下来时，主区可能只剩 600px 左右。此时输入框会被
+ * 模型选择等固定宽度的按钮压成一列字，所以按 chat-body 自己的宽度而不是视口宽度
+ * 退回手机上的「输入框独占一行」布局。
+ */
+@container chat-body (max-width: 700px) {
+  .composer-row {
+    flex-wrap: wrap;
+    align-items: center;
+  }
+
+  .composer-input {
+    flex-basis: 100%;
+    order: -1;
+    min-height: 40px;
+  }
+
+  .composer-row .btn.primary {
+    margin-left: auto;
+  }
 }
 
 .attach-btn {
