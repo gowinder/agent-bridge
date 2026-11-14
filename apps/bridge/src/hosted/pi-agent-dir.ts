@@ -5,10 +5,13 @@
 //
 // 不能整目录软链 `npm`：pi 解析已安装的包时要真实目录，软链过去会当成没装，扩展全不加载。
 import {
+  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -32,6 +35,51 @@ export interface PiSubagentSettings {
 }
 
 /**
+ * pi 会往这些目录里写运行时数据（会话转录、任务、子代理记录）。
+ * 它们必须整目录软链到源目录，不能像只读资源那样建成真实目录：
+ * 否则 pi 把会话写进 target 里，下一次重建被 rmSync 连带删掉，
+ * `--session-id` 再启动就只能新建一个空会话（表现为历史全丢）。
+ */
+const RUNTIME_DIRS = new Set(["sessions", "missions", "pi-subagents"]);
+
+/**
+ * 老版本的这些目录是真实目录，里面已经有 pi 写下的数据。
+ * 重建之前先搬回源目录，否则升级后第一次启动就把历史清空了。
+ */
+function rescueRuntimeDir(target: string, source: string, name: string): void {
+  const from = join(target, name);
+  const to = join(source, name);
+  let entries: string[];
+  try {
+    if (lstatSync(from).isSymbolicLink() || !statSync(from).isDirectory()) return;
+    entries = readdirSync(from);
+  } catch {
+    return;
+  }
+  try {
+    mkdirSync(to, { recursive: true });
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const src = join(from, entry);
+    const dest = join(to, entry);
+    if (existsSync(dest)) continue;
+    try {
+      renameSync(src, dest);
+    } catch {
+      // 跨卷时 rename 会失败：退回复制再删，别把数据留在待删的 target 里。
+      try {
+        cpSync(src, dest, { recursive: true });
+        rmSync(src, { recursive: true, force: true });
+      } catch {
+        // 单项搬不动就留着，至少别抛错挡住 pi 启动。
+      }
+    }
+  }
+}
+
+/**
  * 准备这个会话专用的 pi agent 目录，返回要放进 `PI_CODING_AGENT_DIR` 的路径。
  * 没设子代理模型与思考等级、或读不到用户的 agent 目录时返回 null：不覆盖，pi 用默认目录。
  * 只覆盖传进来的项，其余沿用用户 settings.json 里的值（例如只设思考等级时模型仍跟随）。
@@ -50,6 +98,8 @@ export function preparePiAgentDir(
   } catch {
     return null;
   }
+  // 先抢救老版本落在 target 里的会话，再整体重建。
+  for (const name of RUNTIME_DIRS) rescueRuntimeDir(target, source, name);
   rmSync(target, { recursive: true, force: true });
   mkdirSync(target, { recursive: true });
   for (const name of entries) {
@@ -58,6 +108,11 @@ export function preparePiAgentDir(
     const to = join(target, name);
     try {
       if (statSync(from).isDirectory()) {
+        // 运行时数据整目录软链：重建时只删链接，源目录里的会话与任务不受影响。
+        if (RUNTIME_DIRS.has(name)) {
+          symlinkSync(from, to);
+          continue;
+        }
         mkdirSync(to, { recursive: true });
         for (const child of readdirSync(from)) {
           if (existsSync(join(to, child))) continue;
@@ -69,6 +124,18 @@ export function preparePiAgentDir(
     } catch {
       // 单个条目链不过去（权限、并发删除）不影响 pi 启动，缺的那项按默认处理。
     }
+  }
+  // 源目录里还没有 sessions 时（没在终端跑过 pi），先建出来再软链，
+  // 否则 pi 会在 target 里新建真实目录，下次重建又丢。
+  const sessionsSource = join(source, "sessions");
+  const sessionsTarget = join(target, "sessions");
+  try {
+    if (!existsSync(sessionsTarget)) {
+      mkdirSync(sessionsSource, { recursive: true });
+      symlinkSync(sessionsSource, sessionsTarget);
+    }
+  } catch {
+    // 建不出来就让 pi 自己用默认目录，至少不挡启动。
   }
   const settings = readSettings(join(source, "settings.json"));
   const subagents =
