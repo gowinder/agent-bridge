@@ -117,6 +117,7 @@ export const METHODS = [
   "hosted.resume",
   "hosted.setModel",
   "hosted.setSubagentModel",
+  "hosted.setCompaction",
   "hosted.archive",
   "hosted.delete",
   "push.info",
@@ -466,6 +467,8 @@ export interface SessionSummary {
   effort?: string;
   /** `hosted` pi only: 新派生的子代理用哪个模型；缺省跟随 pi 自己的设置。 */
   subagentModel?: string;
+  /** `hosted` pi only: 自动压缩阈值（剩多少 token 触发压缩）；缺省跟随 pi 自己的设置。 */
+  compactionReserveTokens?: number;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;

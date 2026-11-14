@@ -23,10 +23,12 @@ export function piAgentSourceDir(env: NodeJS.ProcessEnv = process.env): string {
   return configured ? configured : join(homedir(), ".pi", "agent");
 }
 
-/** 子代理在 settings.json 里的覆盖项；都没设时不另建目录。 */
+/** 子代理与压缩在 settings.json 里的覆盖项；都没设时不另建目录。 */
 export interface PiSubagentSettings {
   model?: string;
   thinking?: string;
+  /** `compaction.reserveTokens`：剩余这么多 token 时触发自动压缩。 */
+  reserveTokens?: number;
 }
 
 /**
@@ -39,7 +41,7 @@ export function preparePiAgentDir(
   options: PiSubagentSettings,
   source: string = piAgentSourceDir(),
 ): string | null {
-  if (!options.model && !options.thinking) return null;
+  if (!options.model && !options.thinking && options.reserveTokens === undefined) return null;
   // 指向自己就别动，否则会把真实目录清空。
   if (resolve(target) === resolve(source)) return null;
   let entries: string[];
@@ -76,6 +78,14 @@ export function preparePiAgentDir(
   if (options.model) subagents["defaultModel"] = options.model;
   if (options.thinking) subagents["defaultThinking"] = options.thinking;
   settings["subagents"] = subagents;
+  if (options.reserveTokens !== undefined) {
+    const compaction =
+      typeof settings["compaction"] === "object" && settings["compaction"] !== null && !Array.isArray(settings["compaction"])
+        ? { ...(settings["compaction"] as Record<string, unknown>) }
+        : {};
+    compaction["reserveTokens"] = options.reserveTokens;
+    settings["compaction"] = compaction;
+  }
   try {
     writeFileSync(join(target, "settings.json"), `${JSON.stringify(settings, null, 2)}\n`);
   } catch {

@@ -3567,6 +3567,42 @@ body.has-file-preview {
   opacity: 0.7;
 }
 
+.context-label {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.context-compaction-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.context-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.context-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.context-compaction-row .context-action {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 5px 9px;
+  white-space: nowrap;
+}
+
 .context-hint {
   margin: 6px 0 0;
   color: var(--muted);
