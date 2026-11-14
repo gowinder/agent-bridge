@@ -96,6 +96,11 @@ export class RelayApi {
     await this.call(`/devices/${deviceId}`, { method: "DELETE" });
   }
 
+  /** 删掉中继上的设备记录（只对已作废的设备用），否则菜单栏还会把它列出来。 */
+  async purgeDevice(deviceId: string): Promise<void> {
+    await this.call(`/devices/${deviceId}?purge=1`, { method: "DELETE" });
+  }
+
   async status(): Promise<RoomStatusResponse> {
     return (await this.call("/status", { method: "GET" })) as RoomStatusResponse;
   }

@@ -95,7 +95,7 @@ async function forward(
 ): Promise<Response> {
   const target = new URL(request.url);
   target.pathname = innerPath;
-  target.search = "";
+  // 查询串要跟着进 Room：DELETE /devices/:id?purge=1 靠它区分彻底删除和作废。
   target.protocol = "https:";
   target.host = "room.internal";
   return roomStub(env, roomId).fetch(new Request(target, request));

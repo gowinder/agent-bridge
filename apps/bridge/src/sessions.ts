@@ -15,6 +15,7 @@ import type {
   DeviceSummary,
   ErrorCode,
   EventMessage,
+  HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
   PairResult,
@@ -24,9 +25,12 @@ import type {
   ResponseMessage,
   SessionListParams,
   ShellEventData,
+  TodoKind,
   WireMessage,
 } from "@craftstead/protocol";
+import { TODO_KINDS } from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
+import type { AdminMessage } from "./admin.js";
 import { RpcError } from "./adapters/types.js";
 import type { Devtools } from "./devtools.js";
 import type { Pusher } from "./push.js";
@@ -46,6 +50,8 @@ interface SessionOptions {
   channel: string;
   send: (frame: Uint8Array) => void;
   log: (line: string) => void;
+  /** 只有会改变状态或内容的请求才会走到这里，供菜单栏的「最近操作日志」记录。 */
+  activity?: (line: string) => void;
   close: () => void;
 }
 
@@ -54,6 +60,8 @@ export interface PairingOptions extends SessionOptions {
   api: RelayApi;
   store: Store;
   hostName: string;
+  /** Bridge 自身版本，配对与 host.info 都会原样报给客户端。 */
+  version: string;
   deviceTtlSeconds: number | null;
   /** The code the user must see on both screens; shown in the menu bar while pairing. */
   onConfirmCode?: (code: string) => void;
@@ -85,9 +93,102 @@ function stringParam(params: Record<string, unknown>, name: string): string | un
   return typeof value === "string" ? value : undefined;
 }
 
+function todoKindParam(value: string | undefined): TodoKind {
+  const kind = value ?? "other";
+  if (!(TODO_KINDS as readonly string[]).includes(kind)) {
+    throw new RpcError("invalid_params", "待办分类无效");
+  }
+  return kind as TodoKind;
+}
+
 function numberParam(params: Record<string, unknown>, name: string): number | undefined {
   const value = params[name];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * 读接口（session.list、message.list、fs.* 等）每隔几秒就被轮询一次，记进操作日志
+ * 只会把真正做过的操作冲掉，所以只挑会改变状态或内容的请求。
+ */
+const ACTIVITY_METHODS = new Set([
+  "message.send",
+  "shell.exec",
+  "shell.cancel",
+  "file.upload.finish",
+  "hosted.addDir",
+  "hosted.removeDir",
+  "hosted.create",
+  "hosted.stop",
+  "hosted.resume",
+  "hosted.interrupt",
+  "hosted.setModel",
+  "hosted.setSubagentModel",
+  "hosted.setCompaction",
+  "hosted.archive",
+  "hosted.delete",
+  "session.compact",
+  "session.rename",
+  "session.pin",
+  "session.create",
+  "transfer.commit",
+  "device.revoke",
+  "device.rename",
+]);
+
+/** 把一次请求压缩成一行给人看的操作记录；不关心的请求返回 null。 */
+function describeActivity(request: RequestMessage): string | null {
+  if (!ACTIVITY_METHODS.has(request.method)) return null;
+  const params = isObject(request.params) ? request.params : {};
+  const sessionId = stringParam(params, "sessionId");
+  const suffix = sessionId ? `（会话 ${sessionId.slice(0, 8)}）` : "";
+  if (request.method === "message.send") {
+    const text = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
+    if (!text) return `发送附件${suffix}`;
+    return `发送消息「${text.length > 24 ? `${text.slice(0, 24)}…` : text}」${suffix}`;
+  }
+  if (request.method === "shell.exec") {
+    const command = (stringParam(params, "command") ?? "").trim().split("\n")[0] ?? "";
+    if (!command) return "执行命令";
+    return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
+  }
+  if (request.method === "hosted.setModel") {
+    const model = (stringParam(params, "model") ?? "").trim();
+    return `${model ? `把托管会话模型换成「${model}」` : "把托管会话模型改回 CLI 默认"}${suffix}`;
+  }
+  if (request.method === "hosted.setSubagentModel") {
+    const model = (stringParam(params, "model") ?? "").trim();
+    return `${model ? `把托管会话的子代理模型换成「${model}」` : "把托管会话的子代理模型改回跟随 pi 设置"}${suffix}`;
+  }
+  if (request.method === "hosted.setCompaction") {
+    const raw = params["reserveTokens"];
+    if (raw === null || raw === undefined) return `把自动压缩阈值改回跟随 pi 设置${suffix}`;
+    return `把自动压缩阈值改成剩 ${String(raw)} tokens${suffix}`;
+  }
+  if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
+    const path = (stringParam(params, "path") ?? "").trim();
+    const verb = request.method === "hosted.addDir" ? "添加" : "移除";
+    return path ? `${verb}托管目录「${path}」` : `${verb}托管目录`;
+  }
+  if (request.method === "session.create") {
+    const appId = stringParam(params, "appId") ?? "";
+    const text = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
+    const head = text.length > 24 ? `${text.slice(0, 24)}…` : text;
+    return `在 ${appId} 新建会话${head ? `「${head}」` : ""}`;
+  }
+  if (request.method === "session.pin") {
+    return `${params["pinned"] === true ? "置顶" : "取消置顶"}会话${suffix}`;
+  }
+  if (request.method === "hosted.archive") {
+    return `${params["archived"] === true ? "归档" : "取消归档"}托管会话${suffix}`;
+  }
+  if (request.method === "hosted.delete") {
+    return `删除托管会话${suffix}`;
+  }
+  if (request.method === "session.rename") {
+    const title = (stringParam(params, "title") ?? "").trim();
+    return title ? `重命名会话为「${title.length > 24 ? `${title.slice(0, 24)}…` : title}」${suffix}` : `恢复会话原名${suffix}`;
+  }
+  return request.method;
 }
 
 function composeMessage(text: string, attachments: MessageAttachment[]): string {
@@ -197,7 +298,7 @@ export class PairingSession implements ChannelSession {
       confirmCode: this.expectedCode,
       bridge: {
         name: this.options.hostName,
-        version: "0.1.0",
+        version: this.options.version,
         platform: `${process.platform} ${process.arch}`,
       },
     };
@@ -231,11 +332,18 @@ export interface DeviceSessionOptions extends SessionOptions {
   api: RelayApi;
   store: Store;
   hostName: string;
+  /** Bridge 自身版本，配对与 host.info 都会原样报给客户端。 */
+  version: string;
   adapters: SessionAdapters;
   uploads: UploadStore;
   devtools: Devtools;
   pusher: Pusher;
+  /** 收到用户输入时上报一条：菜单栏的日志页与气泡都从这里取。 */
+  onMessage?: (message: AdminMessage) => void;
 }
+
+/** 一条用户输入在日志里保留的最大长度。 */
+const MAX_LOGGED_MESSAGE_CHARS = 500;
 
 export class DeviceSession implements ChannelSession {
   private handshake: NoiseHandshake | null = null;
@@ -285,20 +393,64 @@ export class DeviceSession implements ChannelSession {
 
   private async handleRequest(request: RequestMessage): Promise<void> {
     let response: ResponseMessage;
+    const activity = describeActivity(request);
+    if (activity) this.options.activity?.(activity);
+    if (request.method === "message.send") this.reportMessage(request);
     try {
       response = { v: 1, kind: "response", id: request.id, ok: true, result: await this.dispatch(request) };
     } catch (error) {
+      const message = error instanceof RpcError
+        ? error.message
+        : error instanceof Error
+          ? error.message
+          : "internal error";
+      if (activity) this.options.activity?.(`${request.method} 失败：${message}`);
       if (error instanceof RpcError) {
         response = errorResponse(request.id, error.code, error.message);
       } else {
-        response = errorResponse(
-          request.id,
-          "internal",
-          error instanceof Error ? error.message : "internal error",
-        );
+        response = errorResponse(request.id, "internal", message);
       }
     }
     this.respond(response);
+  }
+
+  /**
+   * 把这条用户输入连同工程、agent、客户端一起报给菜单栏。会话信息读不到时
+   * 只记会话 id，不能因为日志把发送本身拖慢或弄失败。
+   */
+  private reportMessage(request: RequestMessage): void {
+    const report = this.options.onMessage;
+    if (!report) return;
+    const params = isObject(request.params) ? request.params : {};
+    const sessionId = stringParam(params, "sessionId") ?? "";
+    const raw = (stringParam(params, "text") ?? "").replace(/\s+/g, " ").trim();
+    const text = raw || "（附件）";
+    void (async () => {
+      let title: string | undefined;
+      let project: string | undefined;
+      let agent: string | undefined;
+      if (sessionId) {
+        try {
+          const { session } = await this.options.adapters.session(sessionId);
+          title = session.title;
+          project = session.cwd ?? session.projectId;
+          agent = session.appId;
+        } catch {
+          // 会话已经不在：日志里只留 id。
+        }
+      }
+      report({
+        at: Date.now(),
+        deviceId: this.options.device.id,
+        deviceName: this.options.device.name,
+        sessionId,
+        ...(title ? { title } : {}),
+        ...(project ? { project } : {}),
+        ...(agent ? { agent } : {}),
+        text:
+          text.length > MAX_LOGGED_MESSAGE_CHARS ? `${text.slice(0, MAX_LOGGED_MESSAGE_CHARS)}…` : text,
+      });
+    })();
   }
 
   private async dispatch(request: RequestMessage): Promise<unknown> {
@@ -307,7 +459,7 @@ export class DeviceSession implements ChannelSession {
       case "host.info": {
         const info: HostInfoResult = {
           name: this.options.hostName,
-          version: "0.1.0",
+          version: this.options.version,
           platform: `${process.platform} ${process.arch}`,
           adapters: this.options.adapters.hostAdapters(),
           devtools: this.options.devtools.status(),
@@ -362,6 +514,165 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.compact(sessionId);
+      }
+      case "session.rename": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["title"];
+        if (raw !== null && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "title must be string or null");
+        }
+        return this.options.adapters.rename(sessionId, raw);
+      }
+      case "session.create": {
+        const appId = stringParam(params, "appId");
+        const projectId = stringParam(params, "projectId");
+        const text = stringParam(params, "text") ?? "";
+        if (!appId) throw new RpcError("invalid_params", "appId required");
+        if (!projectId) throw new RpcError("invalid_params", "projectId required");
+        return this.options.adapters.createSession({ appId, projectId, text });
+      }
+      case "hosted.dirs":
+        return this.options.adapters.hostedDirs();
+      case "hosted.addDir":
+        return this.options.adapters.hostedAddDir(stringParam(params, "path") ?? "");
+      case "hosted.removeDir":
+        return this.options.adapters.hostedRemoveDir(stringParam(params, "path") ?? "");
+      case "hosted.create": {
+        const path = stringParam(params, "path");
+        if (!path) throw new RpcError("invalid_params", "path required");
+        const permissionMode = stringParam(params, "permissionMode");
+        // 只接受白名单里的模式；bypassPermissions 还取决于 hosted.json 的 allowBypassPermissions。
+        if (permissionMode && !this.options.adapters.hostedModes().includes(permissionMode as HostedPermissionMode)) {
+          throw new RpcError(
+            "invalid_params",
+            permissionMode === "bypassPermissions"
+              ? "Bridge 未允许托管会话使用 bypassPermissions（hosted.json 的 allowBypassPermissions）"
+              : `托管会话不接受该权限模式：${permissionMode}`,
+          );
+        }
+        const title = stringParam(params, "title");
+        const agent = stringParam(params, "agent");
+        const model = stringParam(params, "model");
+        const effort = stringParam(params, "effort");
+        const subagentModel = stringParam(params, "subagentModel");
+        const thinking = stringParam(params, "thinking");
+        const subagentThinking = stringParam(params, "subagentThinking");
+        const rawArgs = params["args"];
+        const args = Array.isArray(rawArgs)
+          ? rawArgs.filter((item): item is string => typeof item === "string")
+          : [];
+        return this.options.adapters.hostedCreate({
+          path,
+          ...(agent === "pi" ? { agent: "pi" as const } : {}),
+          ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
+          ...(model ? { model } : {}),
+          ...(effort ? { effort } : {}),
+          ...(agent === "pi" && subagentModel ? { subagentModel } : {}),
+          ...(agent === "pi" && thinking ? { thinking } : {}),
+          ...(agent === "pi" && subagentThinking ? { subagentThinking } : {}),
+          ...(args.length > 0 ? { args } : {}),
+          ...(title ? { title } : {}),
+        });
+      }
+      case "hosted.options":
+        return this.options.adapters.hostedOptions();
+      case "hosted.interrupt": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.hostedInterrupt(sessionId);
+      }
+      case "hosted.stop": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.hostedStop(sessionId);
+      }
+      case "hosted.resume": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.hostedResume(sessionId);
+      }
+      case "session.pin": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.pin(sessionId, params["pinned"] !== false);
+      }
+      // 待办存在 Bridge 自己的库里：换前端还在，换一台主机就是另一个库。
+      case "todo.list":
+        return this.options.store.listTodos();
+      case "todo.add": {
+        const title = (stringParam(params, "title") ?? "").trim();
+        if (!title) throw new RpcError("invalid_params", "待办内容不能为空");
+        if (title.length > 500) throw new RpcError("invalid_params", "待办内容最多 500 字");
+        return this.options.store.addTodo(title, todoKindParam(stringParam(params, "kind")));
+      }
+      case "todo.check": {
+        const todoId = stringParam(params, "todoId");
+        if (!todoId) throw new RpcError("invalid_params", "todoId required");
+        const item = this.options.store.setTodoChecked(todoId, params["checked"] !== false);
+        if (!item) throw new RpcError("not_found", "待办不存在");
+        return item;
+      }
+      case "todo.update": {
+        const todoId = stringParam(params, "todoId");
+        if (!todoId) throw new RpcError("invalid_params", "todoId required");
+        const patch: { title?: string; kind?: TodoKind } = {};
+        if (params["title"] !== undefined) {
+          const title = (stringParam(params, "title") ?? "").trim();
+          if (!title) throw new RpcError("invalid_params", "待办内容不能为空");
+          if (title.length > 500) throw new RpcError("invalid_params", "待办内容最多 500 字");
+          patch.title = title;
+        }
+        if (params["kind"] !== undefined) patch.kind = todoKindParam(stringParam(params, "kind"));
+        if (patch.title === undefined && patch.kind === undefined) {
+          throw new RpcError("invalid_params", "没有要修改的字段");
+        }
+        const item = this.options.store.updateTodo(todoId, patch);
+        if (!item) throw new RpcError("not_found", "待办不存在");
+        return item;
+      }
+      case "todo.remove": {
+        const todoId = stringParam(params, "todoId");
+        if (!todoId) throw new RpcError("invalid_params", "todoId required");
+        if (!this.options.store.removeTodo(todoId)) throw new RpcError("not_found", "待办不存在");
+        return { ok: true };
+      }
+      case "hosted.archive": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.archive(sessionId, params["archived"] !== false);
+      }
+      case "hosted.delete": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        return this.options.adapters.deleteSession(sessionId);
+      }
+      case "hosted.setModel": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["model"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "model 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetModel(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setSubagentModel": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["model"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "model 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetSubagentModel(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setCompaction": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["reserveTokens"];
+        if (raw !== null && raw !== undefined && typeof raw !== "number") {
+          throw new RpcError("invalid_params", "reserveTokens 必须是数字或 null");
+        }
+        return this.options.adapters.hostedSetCompactionReserveTokens(sessionId, typeof raw === "number" ? raw : null);
       }
       case "push.info": {
         const info: PushInfoResult = {

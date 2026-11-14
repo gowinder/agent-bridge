@@ -104,6 +104,22 @@ export const METHODS = [
   "session.rail",
   "session.models",
   "session.compact",
+  "session.rename",
+  "session.pin",
+  "session.create",
+  "hosted.dirs",
+  "hosted.addDir",
+  "hosted.removeDir",
+  "hosted.options",
+  "hosted.create",
+  "hosted.stop",
+  "hosted.interrupt",
+  "hosted.resume",
+  "hosted.setModel",
+  "hosted.setSubagentModel",
+  "hosted.setCompaction",
+  "hosted.archive",
+  "hosted.delete",
   "push.info",
   "push.subscribe",
   "push.unsubscribe",
@@ -129,6 +145,12 @@ export const METHODS = [
   "fs.read",
   "shell.exec",
   "shell.cancel",
+  // 待办存在 Bridge 自己的库里，与具体会话无关。
+  "todo.list",
+  "todo.add",
+  "todo.update",
+  "todo.check",
+  "todo.remove",
 ] as const;
 
 export type Method = (typeof METHODS)[number];
@@ -382,8 +404,17 @@ export interface AdapterCapabilities {
 
 export interface AppInfo {
   appId: string;
-  provider: "anthropic" | "openai" | "google" | "deepseek";
-  kind: "claude-code" | "codex" | "antigravity" | "antigravity-desktop" | "dsh";
+  provider: "anthropic" | "openai" | "google" | "deepseek" | "other";
+  kind:
+    | "claude-code"
+    | "claude-code-cli"
+    | "codex"
+    | "codex-cli"
+    | "antigravity"
+    | "antigravity-desktop"
+    | "dsh"
+    | "pi"
+    | "hosted";
   name: string;
   version?: string;
   mode: AdapterMode;
@@ -405,20 +436,45 @@ export interface SessionSummary {
   projectId: string;
   kind: string;
   title: string;
+  /** 仅当显示名被 Bridge 覆盖时出现，值为源应用里的原标题。 */
+  originalTitle?: string;
   createdAt: number;
   updatedAt: number;
   archived: boolean;
+  /** 用户在网页置顶的会话：列表里排在前面。 */
+  pinned?: boolean;
   /** Desktop currently holds a live process / open view for this session. */
   live: boolean;
   /** The session process is actively running a turn right now. */
   busy?: boolean;
   /** The client is blocked on a question only the user can answer (AskUserQuestion). */
   needsDecision?: boolean;
+  /**
+   * 终端会话停在一个提问上，但 Bridge 能通过 herdr 面板按键替你选中：
+   * 网页的选项按钮可点，点击走 `message.send`，由 Bridge 换算成 ↓/Enter。
+   */
+  askChannel?: "herdr";
   canSend: boolean;
   /** Set when canSend is false. */
   sendBlockedReason?: string;
   /** The client exposes a native "compact this conversation" action to the bridge. */
   canCompact?: boolean;
+  /** This session is a Claude Code process held by Bridge, not a desktop session. */
+  hosted?: boolean;
+  /** `hosted` only: whether Bridge currently owns a running process for it. */
+  hostedState?: "running" | "idle" | "stopped";
+  /** `hosted` only: the permission mode Bridge passes to the CLI. */
+  permissionMode?: string;
+  /** `hosted` only: which CLI holds the process. Absent means Claude Code. */
+  hostedAgent?: HostedAgent;
+  /** `hosted` only: the --model Bridge passes to the CLI; absent means the CLI default. */
+  model?: string;
+  /** `hosted` only: the --effort level Bridge passes to the CLI; absent means the CLI default. */
+  effort?: string;
+  /** `hosted` pi only: 新派生的子代理用哪个模型；缺省跟随 pi 自己的设置。 */
+  subagentModel?: string;
+  /** `hosted` pi only: 自动压缩阈值（剩多少 token 触发压缩）；缺省跟随 pi 自己的设置。 */
+  compactionReserveTokens?: number;
   /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
@@ -462,6 +518,8 @@ export interface MessageBlock {
   actions?: NextStepAction[];
   /** `ask` only: the structured questions, for clients that can draw them. */
   questions?: MessageQuestion[];
+  /** `next-step` only: 等待应答的权限确认；会话在忙（等批准）时也允许点击。 */
+  pending?: boolean;
 }
 
 export interface MessageRecord {
@@ -493,6 +551,149 @@ export interface SessionGetResult {
   session: SessionSummary;
 }
 
+export interface SessionRenameParams {
+  sessionId: string;
+  /** null 或空串 = 清除覆盖，恢复原名 */
+  title: string | null;
+}
+
+export interface SessionRenameResult {
+  session: SessionSummary;
+}
+
+/** 由 Bridge 代桌面应用起一个会话；第一条消息随创建一起发给该应用。 */
+export interface SessionCreateParams {
+  appId: string;
+  projectId: string;
+  text: string;
+}
+
+export interface SessionCreateResult {
+  session: SessionSummary;
+}
+
+// ---- Todo list (per Bridge, not per session) ----
+
+/** 待办分类；写进输入框时会变成「功能: …」「bug: …」这样的前缀。 */
+export const TODO_KINDS = ["feature", "bug", "other"] as const;
+export type TodoKind = (typeof TODO_KINDS)[number];
+
+export interface TodoItem {
+  todoId: string;
+  title: string;
+  kind: TodoKind;
+  createdAt: number;
+  /** null = 还没有勾选。 */
+  checkedAt: number | null;
+}
+
+/** 未完成的按创建时间倒序；已完成只给最近几条，总数另报。 */
+export interface TodoListResult {
+  open: TodoItem[];
+  done: TodoItem[];
+  doneTotal: number;
+}
+
+// ---- Hosted sessions (Claude Code processes owned by Bridge) ----
+
+/** Permission modes the CLI accepts; `default` is only a UI alias for `manual`. */
+export type HostedPermissionMode = "manual" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan";
+
+/** Bridge 托管会话可以由哪个 CLI 持有：Claude Code（stream-json）或 pi（rpc）。 */
+export type HostedAgent = "claude" | "pi";
+
+/** 新建面板里可选的托管引擎；available 为 false 时按钮置灰并显示 detail。 */
+export interface HostedAgentOption {
+  id: HostedAgent;
+  label: string;
+  available: boolean;
+  detail?: string;
+}
+
+/** One directory the local Bridge allowlists for hosted sessions. */
+export interface HostedDirInfo {
+  path: string;
+  name: string;
+  sessionCount: number;
+  /** false when the directory was removed after it was allowlisted. */
+  exists: boolean;
+}
+
+export interface HostedDirsResult {
+  enabled: boolean;
+  dirs: HostedDirInfo[];
+  idleTimeoutMs: number;
+  permissionModes: HostedPermissionMode[];
+  /** hosted.json 的 allowBypassPermissions 开关；false 时 permissionModes 不含 bypassPermissions。 */
+  allowBypassPermissions: boolean;
+  note?: string;
+}
+
+/** 把目录加入/移出托管白名单（写回 Bridge 状态目录的 hosted.json）。 */
+export interface HostedDirParams {
+  /** 绝对路径，或 `~` 开头的路径；添加时目录必须已存在。 */
+  path: string;
+}
+
+export interface HostedCreateParams {
+  /** Must equal one of `hosted.dirs`; absolute path or one already resolved there. */
+  path: string;
+  /** 由哪个 CLI 持有进程；省略即 Claude Code。pi 没有权限模式与思考程度。 */
+  agent?: HostedAgent;
+  permissionMode?: HostedPermissionMode;
+  /** Claude Code `--model` value; omitted uses the CLI default. */
+  model?: string;
+  /** pi only: 新派生的子代理用哪个模型；省略则跟随 pi 自己的设置。 */
+  subagentModel?: string;
+  /** pi only: `--thinking` 的等级（off/minimal/low/medium/high/xhigh/max）；省略跟随 pi 设置。 */
+  thinking?: string;
+  /** pi only: 新派生的子代理的思考等级；省略跟随 pi 自己的设置。 */
+  subagentThinking?: string;
+  /** Claude Code `--effort` level; omitted uses the CLI default. */
+  effort?: string;
+  /**
+   * 额外的 CLI 启动参数，每项按空格拆成 argv（例如 `--agent mix-agent`）。
+   * 决定会话身份、协议与权限的旗标不接受：那些由 Bridge 按会话记录设置。
+   */
+  args?: string[];
+  title?: string;
+}
+
+/** 新建托管会话时可选的模型与思考程度，取自本机 CLI。 */
+export interface HostedOptionsResult {
+  /** 模型目录的常用与更多两组；空数组表示读不到目录，只能用 CLI 默认模型。 */
+  models: ModelOption[];
+  /** `--effort` 的可用档位，按从低到高排列。 */
+  efforts: string[];
+  /** 可选的托管引擎，第一个是默认项。 */
+  agents?: HostedAgentOption[];
+  /**
+   * pi 认得的模型（`厂商/模型`），来自跑过的 pi 会话上报的清单，用来填「子代理模型」选择框。
+   * 一条 pi 会话都没跑过时没有这个字段，网页退回手填。
+   */
+  piModels?: ModelOption[];
+  note?: string;
+}
+
+export interface HostedSessionParams {
+  sessionId: string;
+}
+
+export interface HostedStopResult {
+  stopped: boolean;
+  session?: SessionSummary;
+}
+
+export interface HostedInterruptResult {
+  /** false when no turn was running, so the web client can tell «已停止» from «没有在跑». */
+  interrupted: boolean;
+  session?: SessionSummary;
+}
+
+export interface HostedResumeResult {
+  session: SessionSummary;
+}
+
 export interface ContextDetail {
   label: string;
   value: string;
@@ -517,6 +718,8 @@ export interface MessageListResult {
   note?: string;
   /** Context window usage of the session, when the client exposes it. */
   context?: ContextUsage;
+  /** Slash commands (skills included) the client accepts in this session; names without the slash. */
+  slashCommands?: string[];
   /** The client is still working on the latest turn. */
   busy?: boolean;
   /** The latest turn was stopped by the user before it finished. */
@@ -580,8 +783,11 @@ export interface SessionModelsParams {
 export interface ModelOption {
   id: string;
   name: string;
-  /** 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。 */
-  section?: "main" | "overflow";
+  /**
+   * 桌面端把次要模型收在「更多」里；保留原始分组，菜单据此排序。
+   * `custom` 是用户自己配在 `~/.claude/settings.json` 的 modelPicker（例如 magpie 路由模型）。
+   */
+  section?: "main" | "overflow" | "custom";
 }
 
 /** 当前会话的模型信息；各 agent 能给出的内容不一样，缺字段就是不知道。 */
@@ -593,6 +799,10 @@ export interface SessionModelsResult {
   models: ModelOption[];
   /** 能否从网页切换模型；false 时看 note。 */
   canSwitch: boolean;
+  /** pi 托管会话：新派生子代理用的模型；缺省表示跟随 pi 自己的设置。 */
+  subagentModel?: string;
+  /** 能否从网页换子代理模型（只有 pi 托管会话可以）。 */
+  canSwitchSubagent?: boolean;
   note?: string;
 }
 

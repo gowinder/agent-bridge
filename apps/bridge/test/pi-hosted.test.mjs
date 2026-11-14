@@ -1,0 +1,960 @@
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { EventEmitter, once } from "node:events";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { HostedSessionManager } from "../dist/hosted/manager.js";
+import { PiSession } from "../dist/hosted/pi-session.js";
+import { killProcess, markProcessGroup } from "../dist/hosted/process-group.js";
+
+class FakeChild extends EventEmitter {
+  constructor() {
+    super();
+    this.pid = 5150;
+    this.chunks = [];
+    this.signals = [];
+    this.stdin = {
+      write: (chunk) => {
+        this.chunks.push(chunk);
+        return true;
+      },
+      end: () => undefined,
+    };
+    this.stdout = new EventEmitter();
+    this.stderr = new EventEmitter();
+  }
+
+  kill(signal = "SIGTERM") {
+    this.signals.push(signal);
+    this.emit("exit", 0, null);
+    return true;
+  }
+
+  emitJson(payload) {
+    this.stdout.emit("data", `${JSON.stringify(payload)}\n`);
+  }
+
+  /** 回一条命令响应：按类型找到最近一条没回过的命令，带上它的 id。 */
+  reply(command, data, extra = {}) {
+    const sent = this.writes().filter((item) => item.type === command);
+    const last = sent[sent.length - 1];
+    assert.ok(last, `没有发出 ${command} 命令`);
+    this.emitJson({ id: last.id, type: "response", command, success: true, data, ...extra });
+  }
+
+  writes() {
+    return this.chunks.map((chunk) => JSON.parse(chunk.trim()));
+  }
+}
+
+function piHarness(registry) {
+  const root = mkdtempSync(join(tmpdir(), "pi-hosted-test-"));
+  const repo = join(root, "repo");
+  const stateDir = join(root, "state");
+  mkdirSync(repo);
+  mkdirSync(stateDir);
+  writeFileSync(join(stateDir, "hosted.json"), JSON.stringify({ dirs: [repo], idleTimeoutMs: 60_000 }));
+  if (registry) {
+    mkdirSync(join(stateDir, "hosted"));
+    writeFileSync(join(stateDir, "hosted", "sessions.json"), JSON.stringify({ sessions: registry(repo) }));
+  }
+  const spawns = [];
+  const spawnFn = (command, args, options) => {
+    const child = new FakeChild();
+    spawns.push({ command, args, options, child });
+    return child;
+  };
+  process.env.AGENT_BRIDGE_PI_PATH = process.execPath;
+  const manager = new HostedSessionManager({ stateDir, spawn: spawnFn });
+  return { repo, stateDir, spawns, manager };
+}
+
+/** 命令是异步回执：等到子进程里真的出现了第 count 条这类命令再回。 */
+async function waitForWrite(child, type, count = 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const sent = child.writes().filter((item) => item.type === type);
+    if (sent.length >= count) return sent[count - 1];
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`没有等到第 ${count} 条 ${type} 命令`);
+}
+
+/** 系统消息是异步写进转录的：等到它出现再断言。 */
+async function waitForSystemMessage(manager, sessionId, pattern, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const list = manager.messagesFor(sessionId, { limit: 20 }).messages;
+    const found = [...list]
+      .reverse()
+      .find((item) => item.role === "system" && pattern.test(item.blocks?.[0]?.text ?? ""));
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`没有等到匹配 ${pattern} 的系统消息`);
+}
+
+function piHandlers() {
+  const calls = [];
+  const handler = (name) => (...args) => calls.push({ name, args });
+  return {
+    calls,
+    handlers: {
+      assistant: handler("assistant"),
+      system: handler("system"),
+      context: handler("context"),
+      pending: handler("pending"),
+      busy: handler("busy"),
+      settled: handler("settled"),
+      title: handler("title"),
+      commands: handler("commands"),
+      models: handler("models"),
+      model: handler("model"),
+      log: handler("log"),
+    },
+  };
+}
+
+test("creating a pi session starts rpc mode with the bridge session id", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  assert.equal(h.spawns.length, 1);
+  const { args } = h.spawns[0];
+  assert.equal(args[0], "--mode");
+  assert.equal(args[1], "rpc");
+  assert.equal(args[args.indexOf("--session-id") + 1], session.sessionId.replace("hosted:", ""));
+  assert.ok(args.includes("--approve"));
+  assert.ok(!args.includes("--permission-mode"));
+});
+
+test("pi set_model switches in place without restarting the process", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi", model: "ncncapi/claude-opus-5-5" });
+  const child = h.spawns[0].child;
+  child.reply("get_state", { model: { provider: "ncncapi", id: "claude-opus-5-5" } });
+
+  // 回合进行中也能换：pi 的 set_model 不等回合结束。
+  child.emitJson({ type: "agent_start" });
+  const pending = h.manager.setModel(session.sessionId, "group/dsgroup");
+  const sent = child.writes().filter((item) => item.type === "set_model");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].provider, "group");
+  assert.equal(sent[0].modelId, "dsgroup");
+  child.emitJson({
+    id: sent[0].id,
+    type: "response",
+    command: "set_model",
+    success: true,
+    data: { provider: "group", id: "dsgroup" },
+  });
+  const switched = await pending;
+  assert.equal(switched.model, "group/dsgroup");
+  assert.equal(h.spawns.length, 1);
+  assert.deepEqual(child.signals, []);
+});
+
+test("pi refusing a model surfaces the error and keeps the record", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi", model: "ncncapi/claude-opus-5-5" });
+  const child = h.spawns[0].child;
+  child.reply("get_state", { model: { provider: "ncncapi", id: "claude-opus-5-5" } });
+
+  const pending = h.manager.setModel(session.sessionId, "group/dsgroup");
+  const sent = child.writes().filter((item) => item.type === "set_model").at(-1);
+  child.emitJson({
+    id: sent.id,
+    type: "response",
+    command: "set_model",
+    success: false,
+    error: "Model not found: dsgroup",
+  });
+  await assert.rejects(pending, /pi 换模型失败：Model not found/);
+  const kept = h.manager.sessions().find((item) => item.sessionId === session.sessionId);
+  assert.equal(kept.model, "ncncapi/claude-opus-5-5");
+  assert.deepEqual(child.signals, []);
+});
+
+test("pi session without a live process records the model for the next start", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  child.kill("SIGTERM");
+
+  const switched = await h.manager.setModel(session.sessionId, "group/dsgroup");
+  assert.equal(switched.model, "group/dsgroup");
+  // 下一条消息按新模型重启，--provider 与 --model 都带上。
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const args = h.spawns.at(-1).args;
+  assert.equal(args[args.indexOf("--provider") + 1], "group");
+  assert.equal(args[args.indexOf("--model") + 1], "dsgroup");
+});
+
+test("/new asks pi for a new session and resumes it by file path", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  child.reply("get_state", { sessionFile: "/state/sessions/old.jsonl" });
+
+  const pending = h.manager.send(session.sessionId, "/new");
+  await waitForWrite(child, "new_session");
+  child.reply("new_session", {});
+  // 新会话的 id 与文件都变了：回执之后 Bridge 要再问一遍 get_state 才能记住路径。
+  const statesBefore = child.writes().filter((item) => item.type === "get_state").length;
+  const asked = await waitForWrite(child, "get_state", statesBefore + 1);
+  const sessionPath = "/state/sessions/2026-01-01T00-00-00-000Z_新会话.jsonl";
+  child.emitJson({
+    id: asked.id,
+    type: "response",
+    command: "get_state",
+    success: true,
+    data: { sessionFile: sessionPath },
+  });
+  await pending;
+
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+  const messages = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages;
+  assert.equal(messages.at(-1).role, "system");
+  assert.match(messages.at(-1).blocks[0].text, /已开始新会话/);
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.piSessionPath, sessionPath);
+
+  // 重启后按文件续写，否则会退回 `/new` 之前的历史。
+  child.kill("SIGTERM");
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const args = h.spawns.at(-1).args;
+  assert.equal(args[args.indexOf("--session") + 1], sessionPath);
+  assert.equal(args.includes("--session-id"), false);
+});
+
+test("/compact passes the user's instructions to pi", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const sent = await h.manager.send(session.sessionId, "/compact 关注代码改动");
+  // 压缩要真跑一次模型，不能占住设备通道：send 必须先返回。
+  assert.equal(sent.detail, "已在托管会话里执行命令");
+  const compact = await waitForWrite(child, "compact");
+  assert.equal(compact.customInstructions, "关注代码改动");
+  child.reply("compact", { tokensBefore: 120_000, estimatedTokensAfter: 40_000 });
+  await waitForSystemMessage(h.manager, session.sessionId, /120,000 → 40,000 tokens/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/session reports pi's own stats as a system message", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/session");
+  await waitForWrite(child, "get_session_stats");
+  child.reply("get_session_stats", {
+    userMessages: 3,
+    toolCalls: 7,
+    tokens: { total: 12_345 },
+    cost: 0.0432,
+    contextUsage: { percent: 18 },
+  });
+  await pending;
+
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "system");
+  assert.match(last.blocks[0].text, /用户消息 3 条、工具调用 7 次/);
+  assert.match(last.blocks[0].text, /12,345 tokens/);
+  assert.match(last.blocks[0].text, /上下文占用 18%/);
+});
+
+test("commands outside the bridge list still go to the model as plain text", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  await h.manager.send(session.sessionId, "/tree");
+  // `/tree` 依赖终端交互，Bridge 不能吞掉它：整行按普通用户消息发给 pi。
+  const prompts = child.writes().filter((item) => item.type === "prompt");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].message, "/tree");
+  assert.equal(child.writes().filter((item) => item.type === "new_session").length, 0);
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "user");
+  assert.equal(last.blocks[0].text, "/tree");
+});
+
+test("/new is refused while a turn is running", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  child.emitJson({ type: "agent_start" });
+
+  await h.manager.send(session.sessionId, "/new");
+  assert.equal(child.writes().filter((item) => item.type === "new_session").length, 0);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "system");
+  assert.match(last.blocks[0].text, /还在跑，等它结束再 \/new/);
+});
+
+test("registry resumes only from a usable pi session path", async (t) => {
+  const h = piHarness((repo) => [
+    { id: "good", cwd: repo, agent: "pi", piSessionPath: "/state/sessions/good.jsonl" },
+    // 非绝对路径与夹带换行的都不可信，当成没写过，回到 --session-id。
+    { id: "relative", cwd: repo, agent: "pi", piSessionPath: "sessions/relative.jsonl" },
+    { id: "newline", cwd: repo, agent: "pi", piSessionPath: "/state/sessions/bad\n.jsonl" },
+  ]);
+  t.after(() => h.manager.dispose());
+
+  await h.manager.send("hosted:good", "继续");
+  assert.equal(h.spawns[0].args[h.spawns[0].args.indexOf("--session") + 1], "/state/sessions/good.jsonl");
+
+  await h.manager.send("hosted:relative", "继续");
+  const relative = h.spawns.at(-1).args;
+  assert.equal(relative[relative.indexOf("--session-id") + 1], "relative");
+  assert.equal(relative.includes("--session"), false);
+
+  await h.manager.send("hosted:newline", "继续");
+  const newline = h.spawns.at(-1).args;
+  assert.equal(newline[newline.indexOf("--session-id") + 1], "newline");
+  assert.equal(newline.includes("--session"), false);
+});
+
+test("pi sessions advertise the commands the bridge handles itself", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+  // pi 只报自己的扩展与模板命令，Bridge 接住的那几条由它补上，网页才看得到。
+  child.reply("get_commands", { commands: [{ name: "design" }] });
+  assert.deepEqual(h.manager.messagesFor(session.sessionId, { limit: 1 }).slashCommands, [
+    "design",
+    "compact",
+    "export",
+    "model",
+    "name",
+    "new",
+    "session",
+    "thinking",
+    "quit",
+  ]);
+});
+
+test("/model switches the pi session through its native set_model", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/model group/dsgroup");
+  const sent = await waitForWrite(child, "set_model");
+  assert.equal(sent.provider, "group");
+  assert.equal(sent.modelId, "dsgroup");
+  child.emitJson({
+    id: sent.id,
+    type: "response",
+    command: "set_model",
+    success: true,
+    data: { provider: "group", id: "dsgroup" },
+  });
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /模型已换成 group\/dsgroup/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/thinking forwards a known level and rejects an unknown one", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const first = h.manager.send(session.sessionId, "/thinking high");
+  const sent = await waitForWrite(child, "set_thinking_level");
+  assert.equal(sent.level, "high");
+  child.reply("set_thinking_level", {});
+  await first;
+  await waitForSystemMessage(h.manager, session.sessionId, /思考等级已设为 high/);
+
+  await h.manager.send(session.sessionId, "/thinking ultra");
+  assert.equal(child.writes().filter((item) => item.type === "set_thinking_level").length, 1);
+  await waitForSystemMessage(h.manager, session.sessionId, /不支持的思考等级/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/name renames the session in pi and in the record", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/name 新名字");
+  const sent = await waitForWrite(child, "set_session_name");
+  assert.equal(sent.name, "新名字");
+  child.reply("set_session_name", {});
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /已改名为「新名字」/);
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId).title, "新名字");
+});
+
+test("/export keeps the output inside the session working directory", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  await h.manager.send(session.sessionId, "/export ../escape.html");
+  assert.equal(child.writes().filter((item) => item.type === "export_html").length, 0);
+  await waitForSystemMessage(h.manager, session.sessionId, /必须在这个会话的工作目录里/);
+
+  const pending = h.manager.send(session.sessionId, "/export out.html");
+  const sent = await waitForWrite(child, "export_html");
+  // 记录的 cwd 是 canonical 过的（macOS 下 /var 会变成 /private/var），两边对齐再比。
+  const root = realpathSync(h.repo);
+  assert.equal(sent.outputPath, join(root, "out.html"));
+  child.reply("export_html", { path: join(root, "out.html") });
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /已导出到/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/quit stops the hosted process", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  await h.manager.send(session.sessionId, "/quit");
+  assert.ok(child.signals.includes("SIGTERM"));
+  await waitForSystemMessage(h.manager, session.sessionId, /已停掉托管进程/);
+});
+
+test("/new fails loudly when pi does not report a session file", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/new");
+  await waitForWrite(child, "new_session");
+  child.reply("new_session", {});
+  // prime 那条 get_state 之后才是新建会话的这一条。
+  const asked = await waitForWrite(child, "get_state", 2);
+  child.emitJson({ id: asked.id, type: "response", command: "get_state", success: true, data: {} });
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /没有报回新的会话文件/);
+
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.piSessionPath, undefined);
+});
+
+test("slash commands are not answered into a pending extension dialog", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  child.emitJson({
+    type: "extension_ui_request",
+    id: "ui-1",
+    method: "select",
+    title: "选一个",
+    options: ["A", "B"],
+  });
+  await h.manager.send(session.sessionId, "/new");
+  assert.equal(child.writes().filter((item) => item.type === "new_session").length, 0);
+  assert.equal(child.writes().filter((item) => item.type === "extension_ui_response").length, 0);
+  await waitForSystemMessage(h.manager, session.sessionId, /正在等你回答/);
+});
+
+test("an extension command with the same name wins over the bridge command", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  child.reply("get_commands", { commands: [{ name: "compact" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.manager.send(session.sessionId, "/compact 交给扩展");
+  assert.equal(child.writes().filter((item) => item.type === "compact").length, 0);
+  const prompts = child.writes().filter((item) => item.type === "prompt");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].message, "/compact 交给扩展");
+});
+
+test("PiSession answers extension dialogs and parses assistant turns", () => {
+  const written = [];
+  const { calls, handlers } = piHandlers();
+  const pi = new PiSession((line) => written.push(JSON.parse(line)), handlers);
+
+  pi.feed(`${JSON.stringify({ type: "extension_ui_request", id: "ui-1", method: "select", title: "选一个", options: ["a", "b"] })}\n`);
+  const pending = calls.find((call) => call.name === "pending");
+  assert.equal(pending.args[0].id, "ui-1");
+
+  pi.answer(pending.args[0], "b");
+  assert.deepEqual(written.at(-1), { type: "extension_ui_response", id: "ui-1", value: "b" });
+
+  pi.feed(
+    `${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", model: { provider: "group", id: "dsgroup" }, content: [{ type: "text", text: "好了" }] },
+    })}\n`,
+  );
+  const assistant = calls.find((call) => call.name === "assistant");
+  assert.deepEqual(assistant.args[0], [{ type: "text", text: "好了" }]);
+});
+
+test("pi context reports the model's own window instead of a 200k guess", () => {
+  const written = [];
+  const { calls, handlers } = piHandlers();
+  const pi = new PiSession((line) => written.push(JSON.parse(line)), handlers);
+  pi.prime();
+  const request = written.find((item) => item.type === "get_available_models");
+  pi.feed(
+    `${JSON.stringify({
+      id: request.id,
+      type: "response",
+      command: "get_available_models",
+      success: true,
+      data: { models: [{ provider: "codex", id: "gpt-6.1-sol", name: "6.1 sol", contextWindow: 500_000 }] },
+    })}\n`,
+  );
+  pi.feed(
+    `${JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        provider: "codex",
+        model: "gpt-6.1-sol",
+        content: [{ type: "text", text: "好了" }],
+        usage: { input: 270, cacheRead: 188_288, cacheWrite: 0, output: 706 },
+      },
+    })}\n`,
+  );
+  const context = calls.find((call) => call.name === "context").args[0];
+  assert.equal(context.windowTokens, 500_000);
+  assert.equal(context.windowEstimated, undefined);
+  assert.equal(context.model, "codex/gpt-6.1-sol");
+  assert.equal(context.usedTokens, 188_558);
+});
+
+test("pi session rail lists its background subagent runs", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const piId = session.sessionId.replace("hosted:", "");
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  writeRun(runs, "run-done", {
+    sessionId: piId,
+    state: "complete",
+    startedAt: now - 60_000,
+    lastActivityAt: now - 50_000,
+    steps: [{ agent: "scout", sessionName: "scout: 数一下目录" }],
+  });
+  writeRun(runs, "run-live", {
+    sessionId: piId,
+    state: "running",
+    startedAt: now - 5_000,
+    lastActivityAt: now - 1_000,
+    currentStep: 1,
+    steps: [{ agent: "scout" }, { agent: "builder", sessionName: "builder: 写报告" }],
+  });
+  // 真实 pi-subagents 记的是会话文件绝对路径，不是裸 id。
+  writeRun(runs, "run-path", {
+    sessionId: `/state/sessions/--repo--/2026-11-13T22-45-14-079Z_${piId}.jsonl`,
+    state: "complete",
+    startedAt: now - 120_000,
+    lastActivityAt: now - 110_000,
+    steps: [{ agent: "reviewer" }],
+  });
+  // 别的会话的 run 不能混进来。
+  writeRun(runs, "run-other", { sessionId: "another-session", state: "running", steps: [{ agent: "scout" }] });
+  writeRun(runs, "run-other-path", { sessionId: "/tmp/sessions/2026-11-13T00-00-00-000Z_another-session.jsonl" });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  const tasks = h.manager.rail(session.sessionId).tasks;
+  assert.deepEqual(
+    tasks.map((task) => [task.taskId, task.status, task.agentType, task.name]),
+    [
+      ["run-live", "running", "builder", "builder: 写报告"],
+      ["run-done", "done", "scout", "scout: 数一下目录"],
+      ["run-path", "done", "reviewer", "reviewer"],
+    ],
+  );
+  assert.equal(tasks[0].detail, "2 步 · 第 2 步");
+});
+
+/** 假装用户的 pi agent 目录：真实目录里只有一个 settings.json 和一个 npm 包目录。 */
+function fakeAgentDir(stateDir) {
+  const source = join(stateDir, "pi-source");
+  mkdirSync(join(source, "npm", "pi-subagents"), { recursive: true });
+  writeFileSync(
+    join(source, "settings.json"),
+    JSON.stringify({ packages: ["npm:pi-subagents"], subagents: { defaultModel: "a/b" } }),
+  );
+  return source;
+}
+
+function withAgentDir(t, source) {
+  const previous = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = source;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previous;
+  });
+}
+
+function readSubagentModel(dir) {
+  return JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).subagents.defaultModel;
+}
+
+test("pi subagent model gets its own agent dir instead of touching the user's", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+
+  const session = h.manager.create({ path: h.repo, agent: "pi", subagentModel: "group/dsgroup" });
+  const dir = h.spawns[0].options.env.PI_CODING_AGENT_DIR;
+  assert.equal(dir, join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", "")));
+  assert.equal(readSubagentModel(dir), "group/dsgroup");
+  // 其余设置原样带过去，否则用户的 packages 等配置会丢。
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).packages, ["npm:pi-subagents"]);
+  // npm 必须是真目录（子项软链）：整目录软链过去 pi 会当成没装扩展。
+  assert.ok(lstatSync(join(dir, "npm")).isDirectory());
+  assert.equal(session.subagentModel, "group/dsgroup");
+  assert.equal(h.manager.models(session.sessionId).subagentModel, "group/dsgroup");
+  assert.equal(h.manager.models(session.sessionId).canSwitchSubagent, true);
+  const rail = h.manager.rail(session.sessionId).environment;
+  assert.equal(rail.find((row) => row.label === "子代理模型")?.value, "group/dsgroup");
+});
+
+test("pi thinking levels go to --thinking and the subagent settings", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+
+  const session = h.manager.create({
+    path: h.repo,
+    agent: "pi",
+    model: "deepseek/deepseek-flash",
+    thinking: "High",
+    subagentModel: "group/dsgroup",
+    subagentThinking: "low",
+  });
+  const { args } = h.spawns[0];
+  assert.equal(args[args.indexOf("--thinking") + 1], "high");
+  const settings = JSON.parse(readFileSync(join(h.spawns[0].options.env.PI_CODING_AGENT_DIR, "settings.json"), "utf8"));
+  assert.equal(settings.subagents.defaultModel, "group/dsgroup");
+  assert.equal(settings.subagents.defaultThinking, "low");
+  // 只设思考等级时模型仍沿用用户自己的 settings.json。
+  const onlyThinking = h.manager.create({ path: h.repo, agent: "pi", subagentThinking: "medium" });
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  assert.equal(dir, join(h.stateDir, "pi-agent", onlyThinking.sessionId.replace("hosted:", "")));
+  const copied = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(copied.subagents.defaultModel, "a/b");
+  assert.equal(copied.subagents.defaultThinking, "medium");
+
+  const rail = h.manager.rail(session.sessionId).environment;
+  assert.equal(rail.find((row) => row.label === "思考等级")?.value, "high");
+  assert.equal(rail.find((row) => row.label === "子代理思考等级")?.value, "low");
+
+  // 登记表里留着，Bridge 重启后还在。
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.thinking, "high");
+  assert.equal(record.subagentThinking, "low");
+});
+
+test("pi refuses unknown thinking levels", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  assert.throws(() => h.manager.create({ path: h.repo, agent: "pi", thinking: "ultra" }), /思考等级/);
+  assert.throws(() => h.manager.create({ path: h.repo, agent: "pi", subagentThinking: "ultra" }), /思考等级/);
+});
+
+test("changing the subagent model restarts the idle pi process with the new setting", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  // 没设子代理模型就跟着用户自己的 agent 目录走，不另建。
+  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+
+  const updated = await h.manager.setSubagentModel(session.sessionId, "group/dsgroup");
+  assert.equal(updated.subagentModel, "group/dsgroup");
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  assert.equal(readSubagentModel(dir), "group/dsgroup");
+
+  // 改回跟随 pi 设置：agent 目录清掉，下一次启动不再带这个环境变量。
+  h.spawns.at(-1).child.kill("SIGTERM");
+  await h.manager.setSubagentModel(session.sessionId, null);
+  assert.equal(existsSync(dir), false);
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId).subagentModel, undefined);
+});
+
+test("subagent model is refused for claude sessions and while a turn is running", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const claude = h.manager.create({ path: h.repo });
+  await assert.rejects(h.manager.setSubagentModel(claude.sessionId, "group/dsgroup"), /只有 pi/);
+
+  const pi = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns.at(-1).child;
+  child.emitJson({ type: "agent_start" });
+  await assert.rejects(h.manager.setSubagentModel(pi.sessionId, "group/dsgroup"), /还在跑/);
+  assert.deepEqual(child.signals, []);
+});
+
+test("pi compaction threshold goes into the session's settings and outlives the process", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  // 用户自己已经配了别的压缩项，改阈值只能覆盖 reserveTokens。
+  writeFileSync(
+    join(source, "settings.json"),
+    JSON.stringify({
+      packages: ["npm:pi-subagents"],
+      subagents: { defaultModel: "a/b" },
+      compaction: { enabled: true, keepRecentTokens: 20_000 },
+    }),
+  );
+  withAgentDir(t, source);
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  // 没设压缩阈值时直接用用户自己的 agent 目录，不另建。
+  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+
+  const updated = await h.manager.setCompactionReserveTokens(session.sessionId, 40_000);
+  assert.equal(updated.compactionReserveTokens, 40_000);
+  // 阈值没有 RPC 热改，只能停掉旧进程，下一条消息按新 settings 重启。
+  assert.deepEqual(h.spawns[0].child.signals, ["SIGTERM"]);
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  assert.equal(dir, join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", "")));
+  const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction.reserveTokens, 40_000);
+  assert.equal(settings.compaction.enabled, true);
+  assert.equal(settings.compaction.keepRecentTokens, 20_000);
+  assert.equal(settings.subagents.defaultModel, "a/b");
+
+  const rail = h.manager.rail(session.sessionId).environment;
+  assert.equal(rail.find((row) => row.label === "自动压缩")?.value, "剩 40,000 tokens 时压缩");
+  // 登记表里留着，Bridge 重启后还在。
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.compactionReserveTokens, 40_000);
+
+  // 改回跟随 pi 设置：压缩项不再写进会话目录，rail 也回到默认文案。
+  h.spawns.at(-1).child.kill("SIGTERM");
+  const cleared = await h.manager.setCompactionReserveTokens(session.sessionId, null);
+  assert.equal(cleared.compactionReserveTokens, undefined);
+  // 没有其它要覆盖的项，会话专属目录整个清掉，回到用户自己的 settings.json。
+  assert.equal(existsSync(dir), false);
+  const after = h.manager.rail(session.sessionId).environment;
+  assert.equal(after.find((row) => row.label === "自动压缩")?.value, "跟随 pi 设置（默认剩 16384）");
+});
+
+test("compaction threshold and subagent model share the same agent dir", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const session = h.manager.create({ path: h.repo, agent: "pi", subagentModel: "group/dsgroup" });
+  await h.manager.setCompactionReserveTokens(session.sessionId, 32_000);
+  const dir = join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", ""));
+  let settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction.reserveTokens, 32_000);
+  assert.equal(settings.subagents.defaultModel, "group/dsgroup");
+
+  // 清掉阈值不能连带把子代理模型一起清掉。
+  await h.manager.setCompactionReserveTokens(session.sessionId, null);
+  settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction, undefined);
+  assert.equal(settings.subagents.defaultModel, "group/dsgroup");
+
+  // 反过来，换子代理模型也要保留已设的阈值。
+  await h.manager.setCompactionReserveTokens(session.sessionId, 24_000);
+  await h.manager.setSubagentModel(session.sessionId, "other/model");
+  settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction.reserveTokens, 24_000);
+  assert.equal(settings.subagents.defaultModel, "other/model");
+});
+
+test("compaction threshold is refused for non-pi sessions, bad values and while a turn runs", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const claude = h.manager.create({ path: h.repo });
+  await assert.rejects(h.manager.setCompactionReserveTokens(claude.sessionId, 20_000), /只有 pi/);
+
+  const pi = h.manager.create({ path: h.repo, agent: "pi" });
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, 1024.5), /整数/);
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, -1), /整数/);
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, 5_000_000), /整数/);
+
+  const child = h.spawns.at(-1).child;
+  child.emitJson({ type: "agent_start" });
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, 20_000), /还在跑/);
+  assert.deepEqual(child.signals, []);
+});
+
+test("pi model catalog comes from pi's own config files", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  writeFileSync(
+    join(source, "models.json"),
+    JSON.stringify({ providers: { magpie: { models: [{ id: "group/dsgroup", name: "dsgroup · routing group" }] } } }),
+  );
+  writeFileSync(
+    join(source, "models-store.json"),
+    JSON.stringify({
+      xai: { models: [{ id: "grok-4.7", name: "Grok 4.7" }] },
+      deepseek: { models: [{ id: "deepseek-flash", name: "DeepSeek V4.1 Flash" }] },
+    }),
+  );
+  // 没登录的 provider 不进清单，和 pi 的 get_available_models 一致。
+  writeFileSync(join(source, "auth.json"), JSON.stringify({ deepseek: {} }));
+  withAgentDir(t, source);
+
+  assert.deepEqual(h.manager.options().piModels, [
+    { id: "magpie/group/dsgroup", name: "dsgroup · routing group" },
+    { id: "deepseek/deepseek-flash", name: "DeepSeek V4.1 Flash" },
+  ]);
+});
+
+test("pi background run artifacts become task messages", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const piId = session.sessionId.replace("hosted:", "");
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-test-"));
+  const runs = join(root, "async-subagent-runs");
+  writeRun(runs, "run-msgs", { sessionId: piId, state: "complete", steps: [{ agent: "scout" }] });
+  const events = [
+    { type: "message_end", message: { role: "system", content: "几千字的启动提示词" } },
+    { type: "message_end", message: { role: "user", content: [{ type: "text", text: "数一下文件" }], timestamp: 1000 } },
+    {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "先 ls" },
+          { type: "toolCall", id: "c1", name: "bash", arguments: { command: "ls" } },
+        ],
+        timestamp: 2000,
+      },
+    },
+    { type: "message_end", message: { role: "toolResult", toolCallId: "c1", content: [{ type: "text", text: "a.txt" }], timestamp: 3000 } },
+    { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "共 1 个文件" }], timestamp: 4000 } },
+    // 写到一半的最后一行要跳过。
+    '{"type":"message_end","message":{"role":"assistant","cont',
+  ];
+  writeFileSync(join(runs, "run-msgs", "events.jsonl"), `${events.map((e) => JSON.stringify(e)).join("\n")}\n`);
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  const page = h.manager.taskMessages(session.sessionId, "run-msgs", { limit: 50 });
+  assert.deepEqual(
+    page.messages.map((message) => [message.role, message.blocks.map((block) => block.type)]),
+    [
+      ["user", ["text"]],
+      ["assistant", ["tool"]],
+      ["assistant", ["text"]],
+      ["assistant", ["text"]],
+    ],
+  );
+  assert.equal(page.messages[1].blocks[0].text, '调用 bash {"command":"ls"}');
+  assert.equal(page.messages.at(-1).blocks[0].text, "共 1 个文件");
+  assert.equal(page.completeness, "partial");
+
+  // 分页游标与路径拼接都要挡住。
+  const older = h.manager.taskMessages(session.sessionId, "run-msgs", { limit: 2, before: page.messages[3].messageId });
+  assert.equal(older.messages.length, 2);
+  assert.equal(older.nextBefore, page.messages[1].messageId);
+  assert.throws(() => h.manager.taskMessages(session.sessionId, "../run-msgs", { limit: 10 }), /未知后台任务/);
+});
+
+function writeRun(runs, runId, status) {
+  const dir = join(runs, runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "status.json"), JSON.stringify({ runId, ...status }));
+}
+
+test("stopping a hosted process takes its grandchildren with it", async (t) => {
+  const script = `
+    const { spawn } = require("node:child_process");
+    const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+    process.stdout.write(String(child.pid) + "\\n");
+    setInterval(() => {}, 1000);
+  `;
+  const parent = markProcessGroup(
+    spawn(process.execPath, ["-e", script], { stdio: ["ignore", "pipe", "ignore"], detached: true }),
+  );
+  t.after(() => {
+    try {
+      killProcess(parent, "SIGKILL");
+    } catch {
+      // 已经退出。
+    }
+  });
+  const grandchildPid = await new Promise((resolve, reject) => {
+    let buffer = "";
+    parent.stdout.on("data", (chunk) => {
+      buffer += String(chunk);
+      const index = buffer.indexOf("\n");
+      if (index >= 0) resolve(Number(buffer.slice(0, index)));
+    });
+    parent.once("error", reject);
+  });
+  assert.ok(grandchildPid > 0);
+
+  killProcess(parent, "SIGTERM");
+  await once(parent, "exit");
+  await waitForExit(grandchildPid);
+  assert.throws(() => process.kill(grandchildPid, 0), /ESRCH/);
+});
+
+async function waitForExit(pid) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      process.kill(pid, 0);
+    } catch {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}

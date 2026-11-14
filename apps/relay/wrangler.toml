@@ -40,9 +40,10 @@ run_worker_first = ["/v1/*"]
 
 [env.preview]
 name = "agent-bridge-preview"
+# 预览也用自有域名：workers.dev 在部分网络下访问不了。
 # routes 是可继承键：不显式清空，preview 部署会把这台 Worker 也绑到生产域名上。
-routes = []
-workers_dev = true
+routes = [{ pattern = "agent-bridge-preview.craftstead.app", custom_domain = true }]
+workers_dev = false
 
 [env.preview.durable_objects]
 bindings = [{ name = "ROOMS", class_name = "Room" }]

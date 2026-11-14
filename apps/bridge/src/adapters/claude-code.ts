@@ -13,7 +13,7 @@ import {
 } from "node:fs";
 import { createServer, createConnection, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type {
   AppInfo,
   ContextUsage,
@@ -32,6 +32,9 @@ import type {
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
+import { contextUsageFromUsage } from "../context-usage.js";
+import { modelCatalog } from "../model-catalog.js";
+import { subagentDirsFor, subagentTasks as readSubagentTasks } from "../subagents.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
@@ -50,7 +53,7 @@ const WAKE_WAIT_MS = 30_000;
 const WAKE_POLL_MS = 400;
 const MAX_BLOCK_CHARS = 4_000;
 
-interface DesktopSession {
+export interface DesktopSession {
   localId: string;
   cliSessionId: string;
   priorCliSessionIds: string[];
@@ -66,15 +69,6 @@ interface DesktopSession {
   effort: string;
   /** Server names taken from the enabled MCP tool ids (`local:<server>:<tool>`). */
   mcpServers: string[];
-}
-
-interface SubagentMeta {
-  agentType?: string;
-  description?: string;
-  name?: string;
-  spawnDepth?: number;
-  finished?: boolean;
-  pickedEffortModel?: string;
 }
 
 interface RawEntry {
@@ -107,6 +101,8 @@ interface CachedMessages {
   interrupted?: boolean;
   /** 还有 AskUserQuestion 没有对应的 tool_result：客户端正等着用户选。 */
   pendingAsk?: boolean;
+  /** 那个待答提问的问题与选项，供终端面板按键代答时换算。 */
+  pendingAskQuestions?: MessageQuestion[];
 }
 
 function asString(value: unknown): string {
@@ -227,28 +223,6 @@ function matchCatalogModel(raw: string, catalog: ModelOption[]): ModelOption | u
   return best;
 }
 
-/** 目录里的 models 数组：只留下选择器会显示的常用与更多两组。 */
-function modelOptionsOf(list: unknown): ModelOption[] {
-  if (!Array.isArray(list)) return [];
-  const out: ModelOption[] = [];
-  for (const item of list) {
-    if (typeof item !== "object" || item === null) continue;
-    const entry = item as Record<string, unknown>;
-    const id = typeof entry["id"] === "string" ? entry["id"] : "";
-    const name = typeof entry["name"] === "string" ? entry["name"] : "";
-    if (!id || !name) continue;
-    const section = entry["section"];
-    if (section !== "main" && section !== "overflow") continue;
-    out.push({ id, name, section });
-  }
-  return out;
-}
-
-function isMillionTokenModel(model: string): boolean {
-  const name = model.toLowerCase();
-  return name.includes("[1m]") || name.includes("-1m") || name.includes("1m-context");
-}
-
 /** A turn the user stopped is recorded as a synthetic user entry. */
 function isInterruptEntry(entry: RawEntry): boolean {
   if (entry.type !== "user" || entry.isSidechain) return false;
@@ -283,14 +257,14 @@ function trackBusy(busy: BusyState, entry: RawEntry): void {
  * the turn is still open and the desktop shows a question box. Answers land as a tool_result,
  * so the set empties as soon as either side replies.
  */
-function trackAsks(pending: Set<string>, content: unknown): void {
+function trackAsks(pending: Map<string, unknown>, content: unknown): void {
   if (!Array.isArray(content)) return;
   for (const raw of content) {
     if (typeof raw !== "object" || raw === null) continue;
     const block = raw as Record<string, unknown>;
     if (block["type"] === "tool_use" && block["name"] === ASK_TOOL) {
       const id = asString(block["id"]);
-      if (id) pending.add(id);
+      if (id) pending.set(id, block["input"]);
     } else if (block["type"] === "tool_result") {
       const id = asString(block["tool_use_id"]);
       if (id) pending.delete(id);
@@ -311,11 +285,6 @@ function isBusy(busy: BusyState | undefined): boolean {
   if (busy.lastUserAt <= busy.lastTurnEndAt) return false;
   return Date.now() - busy.lastActivityAt < BUSY_IDLE_MS;
 }
-
-/** A subagent whose meta still says "running" is only believed while its file is fresh. */
-const SUBAGENT_RUNNING_MAX_AGE_MS = 10 * 60_000;
-/** The rail lists the newest tasks only; a long session can spawn hundreds. */
-const MAX_RAIL_TASKS = 20;
 
 /** MCP tool ids look like `local:<server>:<tool>`; the rail lists the server. */
 function mcpServersOf(tools: unknown, remote: unknown): string[] {
@@ -359,7 +328,7 @@ const metaCache = new Map<string, { mtimeMs: number; session: DesktopSession | n
 let rootsCache: { roots: string[]; checkedAt: number } | null = null;
 
 export class ClaudeCodeAdapter implements SessionAdapter {
-  readonly key = "claude-code";
+  readonly key: string = "claude-code";
   private processCache: {
     at: number;
     bySession: Map<string, number>;
@@ -539,7 +508,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   models(sessionId: string): SessionModelsResult {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知会话");
-    const catalog = this.modelCatalog();
+    const catalog = modelCatalog();
     // 会话记录里的模型是建会话时选的，在桌面里切换后不会回写；转录里最后一条回复
     // 实际用的模型才算「当前模型」。
     const raw = this.runningModel(record) ?? (record.model || undefined);
@@ -557,7 +526,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   }
 
   /** 转录里最后一条主链回复用的模型；读不到就交给会话记录兜底。 */
-  private runningModel(record: DesktopSession): string | undefined {
+  protected runningModel(record: DesktopSession): string | undefined {
     if (!record.cliSessionId) return undefined;
     const path = this.transcriptPath(record.cliSessionId);
     if (!path) return undefined;
@@ -568,8 +537,20 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
+  /** 待答提问的问题与选项；没有待答提问或读不到 transcript 时返回 null。 */
+  protected pendingAskQuestions(record: DesktopSession): MessageQuestion[] | null {
+    if (!record.cliSessionId) return null;
+    const path = this.transcriptPath(record.cliSessionId);
+    if (!path) return null;
+    try {
+      return this.readTranscript(path, `${this.key}:${record.localId}`).askQuestions ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   /** 正在运行的会话是否停在一个没人回答的提问上；读不到 transcript 就当没有。 */
-  private pendingAsk(record: DesktopSession): boolean {
+  protected pendingAsk(record: DesktopSession): boolean {
     if (!record.cliSessionId) return false;
     const path = this.transcriptPath(record.cliSessionId);
     if (!path) return false;
@@ -578,74 +559,6 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     } catch {
       return false;
     }
-  }
-
-  private modelCatalogCache: { at: number; models: ModelOption[] } | null = null;
-
-  private modelCatalog(): ModelOption[] {
-    const now = Date.now();
-    if (this.modelCatalogCache && now - this.modelCatalogCache.at < 60_000) {
-      return this.modelCatalogCache.models;
-    }
-    const published = this.publishedCatalogModels();
-    const models = published.length > 0 ? published : this.cachedCatalogModels();
-    this.modelCatalogCache = { at: now, models };
-    return models;
-  }
-
-  /** 桌面端拉取的 signed catalog：surfaces.ccd 就是 Code 会话模型选择器的清单。 */
-  private publishedCatalogModels(): ModelOption[] {
-    for (const name of ["Claude-3p", "Claude"]) {
-      const path = join(SUPPORT_DIR, name, "model-catalog", "published.json");
-      try {
-        const outer = JSON.parse(readFileSync(path, "utf8")) as { documentBytes?: unknown };
-        if (typeof outer.documentBytes !== "string") continue;
-        const doc = JSON.parse(Buffer.from(outer.documentBytes, "base64").toString("utf8")) as {
-          surfaces?: Record<string, { model_selector_config?: { models?: unknown }[] }>;
-        };
-        const configs = doc.surfaces?.["ccd"]?.model_selector_config ?? doc.surfaces?.["cc"]?.model_selector_config;
-        const models = modelOptionsOf(configs?.[0]?.models);
-        if (models.length > 0) return models;
-      } catch {
-        // 应用没写过这份缓存：试下一个目录，最后退回 CLI 的本地缓存。
-      }
-    }
-    return [];
-  }
-
-  /** CLI 自己缓存的目录，字段比桌面端少一档，内容也常常落后一版。 */
-  private cachedCatalogModels(): ModelOption[] {
-    const models: ModelOption[] = [];
-    try {
-      const dir = join(homedir(), ".claude", "cache", "model-catalog");
-      const files = readdirSync(dir)
-        .filter((name) => name.endsWith("-ccd.json"))
-        .map((name) => {
-          const path = join(dir, name);
-          try {
-            return { path, mtimeMs: statSync(path).mtimeMs };
-          } catch {
-            return null;
-          }
-        })
-        .filter((item): item is { path: string; mtimeMs: number } => item !== null)
-        .sort((a, b) => b.mtimeMs - a.mtimeMs);
-      const raw = files[0] ? JSON.parse(readFileSync(files[0].path, "utf8")) : null;
-      const list = raw?.catalog?.config?.models;
-      if (Array.isArray(list)) {
-        for (const item of list) {
-          if (typeof item?.id !== "string" || typeof item?.name !== "string") continue;
-          models.push({
-            id: item.id,
-            name: item.name,
-            ...(item.section === "main" || item.section === "overflow" ? { section: item.section } : {}),
-          });
-        }
-      }
-    } catch {
-      // 没有缓存或格式变了：只展示当前模型名。
-    }
-    return models;
   }
 
   taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
@@ -749,17 +662,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
-  /** `~/.claude/projects/<project>/<cliSessionId>/subagents` for this session and its priors. */
+  /** 这个会话（含被它续接的前几个 CLI 会话）派生的子代理目录。 */
   private subagentDirs(record: DesktopSession): string[] {
-    const dirs: string[] = [];
-    for (const id of [record.cliSessionId, ...record.priorCliSessionIds]) {
-      if (!id) continue;
-      const path = this.transcriptPath(id);
-      if (!path) continue;
-      const dir = join(dirname(path), id, "subagents");
-      if (existsSync(dir) && !dirs.includes(dir)) dirs.push(dir);
-    }
-    return dirs;
+    return subagentDirsFor([record.cliSessionId, ...record.priorCliSessionIds]);
   }
 
   private subagentFile(record: DesktopSession, taskId: string): string | null {
@@ -772,60 +677,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   }
 
   private subagentTasks(record: DesktopSession): RailTask[] {
-    const tasks: RailTask[] = [];
-    const seen = new Set<string>();
-    for (const dir of this.subagentDirs(record)) {
-      let names: string[];
-      try {
-        names = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        if (!name.endsWith(".meta.json")) continue;
-        const taskId = name.slice(0, -".meta.json".length);
-        if (seen.has(taskId)) continue;
-        const jsonl = join(dir, `${taskId}.jsonl`);
-        if (!existsSync(jsonl)) continue;
-        let meta: SubagentMeta;
-        let metaMtimeMs = 0;
-        try {
-          meta = JSON.parse(readFileSync(join(dir, name), "utf8")) as SubagentMeta;
-          metaMtimeMs = statSync(join(dir, name)).mtimeMs;
-        } catch {
-          continue;
-        }
-        seen.add(taskId);
-        // meta 在子代理启动时写入、结束时才补 finished；运行期间只有 jsonl 在增长。
-        let jsonlMtimeMs = 0;
-        let startedAt: number | undefined;
-        try {
-          const info = statSync(jsonl);
-          jsonlMtimeMs = info.mtimeMs;
-          startedAt = info.birthtimeMs;
-        } catch {
-          // fall back to meta
-        }
-        const updatedAt = Math.max(metaMtimeMs, jsonlMtimeMs);
-        const running = meta.finished !== true && Date.now() - updatedAt < SUBAGENT_RUNNING_MAX_AGE_MS;
-        const task: RailTask = {
-          taskId,
-          name: meta.name || meta.description || taskId,
-          kind: "subagent",
-          status: running ? "running" : "done",
-          updatedAt,
-        };
-        if (meta.name && meta.description) task.detail = meta.description;
-        if (meta.agentType) task.agentType = meta.agentType;
-        if (meta.pickedEffortModel) task.model = meta.pickedEffortModel;
-        if (typeof meta.spawnDepth === "number") task.depth = meta.spawnDepth;
-        if (startedAt) task.startedAt = startedAt;
-        tasks.push(task);
-      }
-    }
-    return tasks
-      .sort((a, b) => (b.startedAt ?? b.updatedAt ?? 0) - (a.startedAt ?? a.updatedAt ?? 0))
-      .slice(0, MAX_RAIL_TASKS);
+    return readSubagentTasks([record.cliSessionId, ...record.priorCliSessionIds]);
   }
 
   messageText(sessionId: string, messageId: string): MessageText | null {
@@ -908,13 +760,13 @@ export class ClaudeCodeAdapter implements SessionAdapter {
    * 桌面端为工作树会话写了 originCwd；没有这个字段的旧记录按路径推断，
    * 否则每个工作树都会变成一个独立项目，会话在原项目里就找不到了。
    */
-  private projectCwdOf(cwd: string, originCwd: string): string {
+  protected projectCwdOf(cwd: string, originCwd: string): string {
     if (originCwd) return originCwd;
     const at = cwd.indexOf("/.claude/worktrees/");
     return at > 0 ? cwd.slice(0, at) : cwd;
   }
 
-  private projectIdFor(cwd: string): string {
+  protected projectIdFor(cwd: string): string {
     return `${this.key}:${cwd || "ungrouped"}`;
   }
 
@@ -926,7 +778,12 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return roots;
   }
 
-  private records(): DesktopSession[] {
+  /** 默认只认桌面索引；CLI 适配器覆写 records()，这里保留桌面索引给去重使用。 */
+  protected records(): DesktopSession[] {
+    return this.desktopRecords();
+  }
+
+  protected desktopRecords(): DesktopSession[] {
     // 桌面有几个数据目录（Claude / Claude-3p）会同时写入，只读其中一个会漏掉会话。
     const byId = new Map<string, DesktopSession>();
     for (const root of this.roots()) {
@@ -987,14 +844,14 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
-  private record(sessionId: string): DesktopSession | null {
+  protected record(sessionId: string): DesktopSession | null {
     const localId = sessionId.startsWith(`${this.key}:`)
       ? sessionId.slice(this.key.length + 1)
       : sessionId;
     return this.records().find((item) => item.localId === localId) ?? null;
   }
 
-  private scanProcesses(maxAgeMs = 2_000): {
+  protected scanProcesses(maxAgeMs = 2_000): {
     bySession: Map<string, number>;
     busy: Set<string>;
     error: string | null;
@@ -1086,7 +943,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     }
   }
 
-  private livePid(record: DesktopSession, bySession: Map<string, number>): number | undefined {
+  protected livePid(record: DesktopSession, bySession: Map<string, number>): number | undefined {
     return this.liveMatch(record, bySession)?.pid;
   }
 
@@ -1115,7 +972,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     execFile(command, args, { timeout: 10_000 }, () => undefined);
   }
 
-  private liveMatch(
+  protected liveMatch(
     record: DesktopSession,
     bySession: Map<string, number>,
   ): { pid: number; id: string } | undefined {
@@ -1131,7 +988,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return undefined;
   }
 
-  private socketFor(pid: number | undefined): string | null {
+  protected socketFor(pid: number | undefined): string | null {
     if (pid === undefined) return null;
     const direct = join(SOCKET_DIR, `${pid}.sock`);
     if (existsSync(direct)) return direct;
@@ -1145,7 +1002,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return null;
   }
 
-  private transcriptPath(cliSessionId: string): string | null {
+  protected transcriptPath(cliSessionId: string): string | null {
     const now = Date.now();
     const cached = this.transcriptPathCache.get(cliSessionId);
     if (cached && now - cached.checkedAt < 60_000) return cached.path;
@@ -1166,7 +1023,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return path;
   }
 
-  private readTranscript(
+  protected readTranscript(
     path: string,
     sessionId: string,
   ): {
@@ -1175,6 +1032,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     busy: boolean;
     interrupted: boolean;
     needsDecision: boolean;
+    askQuestions?: MessageQuestion[];
   } {
     let mtimeMs = 0;
     let size = 0;
@@ -1195,6 +1053,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         busy: running,
         interrupted,
         needsDecision: running && cached.pendingAsk === true,
+        ...(cached.pendingAskQuestions ? { askQuestions: cached.pendingAskQuestions } : {}),
       };
     }
 
@@ -1202,7 +1061,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     let context: ContextUsage | undefined;
     const busy: BusyState = { lastUserAt: 0, lastTurnEndAt: 0, lastActivityAt: 0 };
     /** 已发出、还没有结果的提问工具调用；有剩的就是客户端正等着用户选。 */
-    const pendingAsks = new Set<string>();
+    const pendingAsks = new Map<string, unknown>();
     let lastContentOrder = -1;
     let lastInterruptOrder = -1;
     let order = 0;
@@ -1238,6 +1097,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     const interrupted = lastInterruptOrder > lastContentOrder;
     const running = isBusy(busy) && !interrupted;
     const pendingAsk = pendingAsks.size > 0;
+    // 中断（Esc）过的提问也不会有 tool_result：那种“待答”不是真在等，别拿去代答。
+    const askQuestions =
+      running && pendingAsk
+        ? askBlock([...pendingAsks.values()].pop(), MAX_BLOCK_CHARS)?.questions
+        : undefined;
     this.messageCache.set(path, {
       mtimeMs,
       size,
@@ -1246,6 +1110,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       busy,
       interrupted,
       pendingAsk,
+      ...(askQuestions ? { pendingAskQuestions: askQuestions } : {}),
     });
     return {
       messages,
@@ -1253,34 +1118,14 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       busy: running,
       interrupted,
       needsDecision: running && pendingAsk,
+      ...(askQuestions ? { askQuestions } : {}),
     };
   }
 
   /** Latest assistant usage entry wins; it describes the context the next turn will see. */
   private contextOf(entry: RawEntry): ContextUsage | undefined {
     if (entry.type !== "assistant" || entry.isSidechain) return undefined;
-    const usage = entry.message?.usage;
-    if (!usage) return undefined;
-    const input = asNumber(usage["input_tokens"]);
-    const cacheRead = asNumber(usage["cache_read_input_tokens"]);
-    const cacheWrite = asNumber(usage["cache_creation_input_tokens"]);
-    const output = asNumber(usage["output_tokens"]);
-    const used = input + cacheRead + cacheWrite;
-    if (used <= 0) return undefined;
-    const model = asString(entry.message?.model);
-    const known = /claude|opus|sonnet|haiku/i.test(model);
-    return {
-      usedTokens: used,
-      windowTokens: isMillionTokenModel(model) ? 1_000_000 : 200_000,
-      ...(model ? { model } : {}),
-      ...(known ? {} : { windowEstimated: true }),
-      details: [
-        { label: "输入", value: input.toLocaleString("en-US") },
-        { label: "缓存读", value: cacheRead.toLocaleString("en-US") },
-        { label: "缓存写", value: cacheWrite.toLocaleString("en-US") },
-        { label: "输出", value: output.toLocaleString("en-US") },
-      ],
-    };
+    return contextUsageFromUsage(entry.message?.usage, asString(entry.message?.model));
   }
 
   private toMessage(
@@ -1366,11 +1211,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return (peer?.[1] ?? joined).trim();
   }
 
-  private stripSystem(text: string): string {
+  protected stripSystem(text: string): string {
     return text.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
   }
 
-  private async confirmInTranscript(cliSessionId: string, text: string): Promise<boolean> {
+  protected async confirmInTranscript(cliSessionId: string, text: string): Promise<boolean> {
     const path = this.transcriptPath(cliSessionId);
     if (!path) return false;
     const needle = text.trim().slice(0, 40);
@@ -1440,7 +1285,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     });
   }
 
-  private injectUds(target: string, text: string, mode: string, origin?: string): Promise<MessageSendResult> {
+  protected injectUds(target: string, text: string, mode: string, origin?: string): Promise<MessageSendResult> {
     const own = join(SOCKET_DIR, `${process.pid}.sock`);
     return new Promise<MessageSendResult>((resolve, reject) => {
       let settled = false;

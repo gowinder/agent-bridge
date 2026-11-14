@@ -28,7 +28,7 @@ archs="${AGENT_BRIDGE_ARCHS:-$(uname -m)}"
 slices=()
 for arch in $archs; do
   slice="$contents/MacOS/AgentBridge-$arch"
-  swiftc -O -target "$arch-apple-macos13.0" "$here/main.swift" -o "$slice" -framework AppKit
+  swiftc -O -target "$arch-apple-macos13.0" "$here/main.swift" "$here/Update.swift" -o "$slice" -framework AppKit
   slices+=("$slice")
 done
 if [ "${#slices[@]}" -gt 1 ]; then
@@ -106,6 +106,7 @@ cat > "$contents/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$short_version</string>
   <key>CFBundleVersion</key><string>$build_number</string>
+  <key>AgentBridgeVersion</key><string>$version</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>

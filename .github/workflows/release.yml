@@ -162,12 +162,28 @@ jobs:
           set -eu
           sha=$(cut -d' ' -f1 AgentBridge.dmg.sha256)
           notes="$RUNNER_TEMP/notes.md"
+          # 相对上一个版本改了什么：直接取 CHANGELOG 里这一版的小节，缺了就失败，
+          # 不能只发版本号与安装步骤。
+          changes="$RUNNER_TEMP/changes.md"
+          awk -v v="$VERSION" '
+            index($0, "## [" v "]") == 1 { capture = 1; next }
+            capture && /^## \[/ { exit }
+            capture { print }
+          ' CHANGELOG.md > "$changes"
+          if ! grep -q '[^[:space:]]' "$changes"; then
+            echo "CHANGELOG.md 缺少 [$VERSION] 小节，Release 说明没有内容可写" >&2
+            exit 1
+          fi
           {
             echo "Agent Bridge 菜单栏 app + bridge CLI，已打包成一个 DMG。"
             echo
             echo "- 版本：\`$VERSION\`"
             echo "- 要求：macOS 13 或更新（universal：Apple Silicon 与 Intel）"
             echo "- SHA-256：\`$sha\`"
+            echo
+            echo "## 本版改动"
+            echo
+            cat "$changes"
             echo
             echo "## 安装"
             echo

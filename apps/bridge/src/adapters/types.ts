@@ -53,6 +53,8 @@ export interface SessionAdapter {
   taskMessages?(sessionId: string, taskId: string, page: MessagePage): MessageListResult | Promise<MessageListResult>;
   /** `origin` 是发起人的标识（例如配对设备名），用于让目标会话区分消息从哪个客户端来。 */
   send(sessionId: string, text: string, origin?: string): Promise<MessageSendResult>;
+  /** 客户端没有可用的无界面入口时可以不实现；实现后 capabilities.create 才能为 true。 */
+  create?(params: { projectId: string; text: string }): Promise<SessionSummary>;
 }
 
 export function truncate(text: string, max: number): { text: string; truncated?: boolean } {
