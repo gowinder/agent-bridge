@@ -5569,7 +5569,8 @@ function restoreContextDraft(pop: HTMLElement, draft: ContextDraft | null): void
   const next = pop.querySelector<HTMLInputElement>('input[data-persist="compaction"]');
   if (!next || next.disabled) return;
   next.value = draft.value;
-  next.focus();
+  // preventScroll：重绘发生在滚动位置之上时，别把页面拉回输入框。
+  next.focus({ preventScroll: true });
   if (draft.start !== null && draft.end !== null) next.setSelectionRange(draft.start, draft.end);
 }
 
