@@ -7,6 +7,16 @@ import { join } from "node:path";
 import type { RailTask } from "@craftstead/protocol";
 
 const RUNS_DIR_NAME = "async-subagent-runs";
+/**
+ * status.json 里的 sessionId 可能是裸 id，也可能是会话文件路径
+ * （`<时间戳>_<sessionId>.jsonl`）；Bridge 的会话记录只存裸 id。
+ */
+function sameSession(recorded: string | undefined, piSessionId: string): boolean {
+  if (!recorded) return false;
+  if (recorded === piSessionId) return true;
+  const base = recorded.slice(recorded.lastIndexOf("/") + 1).slice(recorded.lastIndexOf("\\") + 1);
+  return base === piSessionId || base === `${piSessionId}.jsonl` || base.endsWith(`_${piSessionId}.jsonl`);
+}
 /** 状态还写着在跑、但这么久没动静的 run 不再算在跑（进程被杀掉的情况）。 */
 const RUN_STALE_MS = 10 * 60_000;
 /** 侧栏只列最新的这些。 */
@@ -76,7 +86,7 @@ export function piSubagentTasks(
       continue;
     }
     // run 目录按用户共享，只留这个会话派生的。
-    if (status.sessionId !== piSessionId) continue;
+    if (!sameSession(status.sessionId, piSessionId)) continue;
     const task = taskOf(entry.name, status, entry.mtimeMs);
     if (task) tasks.push(task);
   }
@@ -93,7 +103,7 @@ export function piRunDir(piSessionId: string, runId: string, root = piSubagentRo
   try {
     const status = JSON.parse(readFileSync(join(dir, "status.json"), "utf8")) as PiRunStatus;
     // run 目录按用户共享，别的会话的 run 不给看。
-    if (status.sessionId !== piSessionId) return null;
+    if (!sameSession(status.sessionId, piSessionId)) return null;
   } catch {
     return null;
   }

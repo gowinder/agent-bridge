@@ -190,6 +190,40 @@ test("PiSession answers extension dialogs and parses assistant turns", () => {
   assert.deepEqual(assistant.args[0], [{ type: "text", text: "好了" }]);
 });
 
+test("pi context reports the model's own window instead of a 200k guess", () => {
+  const written = [];
+  const { calls, handlers } = piHandlers();
+  const pi = new PiSession((line) => written.push(JSON.parse(line)), handlers);
+  pi.prime();
+  const request = written.find((item) => item.type === "get_available_models");
+  pi.feed(
+    `${JSON.stringify({
+      id: request.id,
+      type: "response",
+      command: "get_available_models",
+      success: true,
+      data: { models: [{ provider: "codex", id: "gpt-6.1-sol", name: "6.1 sol", contextWindow: 500_000 }] },
+    })}\n`,
+  );
+  pi.feed(
+    `${JSON.stringify({
+      type: "message_end",
+      message: {
+        role: "assistant",
+        provider: "codex",
+        model: "gpt-6.1-sol",
+        content: [{ type: "text", text: "好了" }],
+        usage: { input: 270, cacheRead: 188_288, cacheWrite: 0, output: 706 },
+      },
+    })}\n`,
+  );
+  const context = calls.find((call) => call.name === "context").args[0];
+  assert.equal(context.windowTokens, 500_000);
+  assert.equal(context.windowEstimated, undefined);
+  assert.equal(context.model, "codex/gpt-6.1-sol");
+  assert.equal(context.usedTokens, 188_558);
+});
+
 test("pi session rail lists its background subagent runs", (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());
@@ -214,8 +248,17 @@ test("pi session rail lists its background subagent runs", (t) => {
     currentStep: 1,
     steps: [{ agent: "scout" }, { agent: "builder", sessionName: "builder: 写报告" }],
   });
+  // 真实 pi-subagents 记的是会话文件绝对路径，不是裸 id。
+  writeRun(runs, "run-path", {
+    sessionId: `/state/sessions/--repo--/2026-11-13T22-45-14-079Z_${piId}.jsonl`,
+    state: "complete",
+    startedAt: now - 120_000,
+    lastActivityAt: now - 110_000,
+    steps: [{ agent: "reviewer" }],
+  });
   // 别的会话的 run 不能混进来。
   writeRun(runs, "run-other", { sessionId: "another-session", state: "running", steps: [{ agent: "scout" }] });
+  writeRun(runs, "run-other-path", { sessionId: "/tmp/sessions/2026-11-13T00-00-00-000Z_another-session.jsonl" });
 
   const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
   process.env.PI_SUBAGENTS_TEMP_ROOT = root;
@@ -230,6 +273,7 @@ test("pi session rail lists its background subagent runs", (t) => {
     [
       ["run-live", "running", "builder", "builder: 写报告"],
       ["run-done", "done", "scout", "scout: 数一下目录"],
+      ["run-path", "done", "reviewer", "reviewer"],
     ],
   );
   assert.equal(tasks[0].detail, "2 步 · 第 2 步");

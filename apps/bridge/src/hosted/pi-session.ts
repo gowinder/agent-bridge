@@ -42,6 +42,8 @@ export class PiSession {
   private counter = 0;
   private readonly waiting = new Map<string, (record: Record<string, unknown>) => void>();
   private pending: PiPending | null = null;
+  /** 模型清单里带的窗口大小：`provider/modelId` → tokens。 */
+  private readonly contextWindows = new Map<string, number>();
 
   constructor(
     private readonly writeLine: (line: string) => void,
@@ -55,6 +57,7 @@ export class PiSession {
       if (names.length > 0) this.handlers.commands(names);
     });
     this.command("get_available_models", (record) => {
+      this.rememberWindows(record);
       const models = modelsFrom(record);
       if (models.length > 0) this.handlers.models(models);
     });
@@ -63,6 +66,28 @@ export class PiSession {
       const model = modelIdOf(data["model"]);
       if (model) this.handlers.model(model);
     });
+  }
+
+  /** pi 的模型清单里带 contextWindow，留着算上下文百分比；pi 的自动压缩也按这个窗口算。 */
+  private rememberWindows(record: Record<string, unknown>): void {
+    const data = isRecord(record["data"]) ? record["data"] : {};
+    const list = Array.isArray(data["models"]) ? data["models"] : [];
+    for (const item of list) {
+      const id = modelIdOf(item);
+      const window = isRecord(item) && typeof item["contextWindow"] === "number" ? item["contextWindow"] : 0;
+      if (id && window > 0) this.contextWindows.set(id, window);
+    }
+  }
+
+  /** 助手消息里的 model 是裸 id，模型清单里是 `provider/modelId`，对一下。 */
+  private windowOf(model: string): number | undefined {
+    if (!model) return undefined;
+    const exact = this.contextWindows.get(model);
+    if (exact) return exact;
+    for (const [id, window] of this.contextWindows) {
+      if (id.endsWith(`/${model}`)) return window;
+    }
+    return undefined;
   }
 
   /** 发一轮用户消息。已经在跑的时候按 steer 排队，交给当前这一轮之后执行。 */
@@ -185,8 +210,8 @@ export class PiSession {
     if (type === "message_end") {
       const message = isRecord(record["message"]) ? record["message"] : null;
       if (!message || message["role"] !== "assistant") return;
-      const model = modelIdOf(message["model"]);
-      const usage = contextOf(message["usage"], model);
+      const model = modelOf(message);
+      const usage = contextOf(message["usage"], model, this.windowOf(model));
       if (usage) this.handlers.context(usage);
       const blocks = blocksOf(message["content"]);
       const stopReason = typeof message["stopReason"] === "string" ? message["stopReason"] : "";
@@ -294,6 +319,8 @@ function modelsFrom(record: Record<string, unknown>): ModelOption[] {
 
 /** pi 的模型对象：{ provider, modelId, name }；拼成 `provider/modelId` 存进会话记录。 */
 function modelIdOf(value: unknown): string {
+  // 助手消息里的 model 是字符串，协议响应里才是对象。
+  if (typeof value === "string") return value;
   if (!isRecord(value)) return "";
   const modelId = typeof value["modelId"] === "string" ? value["modelId"] : typeof value["id"] === "string" ? value["id"] : "";
   if (!modelId) return "";
@@ -301,12 +328,20 @@ function modelIdOf(value: unknown): string {
   return provider ? `${provider}/${modelId}` : modelId;
 }
 
+/** 助手消息把 model 和 provider 分开给，拼回 `provider/modelId`。 */
+function modelOf(message: Record<string, unknown>): string {
+  const model = modelIdOf(message["model"]);
+  const provider = typeof message["provider"] === "string" ? message["provider"] : "";
+  if (!model) return "";
+  return provider && !model.startsWith(`${provider}/`) ? `${provider}/${model}` : model;
+}
+
 function dispositionOf(record: Record<string, unknown>): string {
   const data = isRecord(record["data"]) ? record["data"] : {};
   return typeof data["disposition"] === "string" ? data["disposition"] : "";
 }
 
-function contextOf(usage: unknown, model: string): ContextUsage | undefined {
+function contextOf(usage: unknown, model: string, windowTokens?: number): ContextUsage | undefined {
   if (!isRecord(usage)) return undefined;
   const count = (key: string): number => {
     const value = usage[key];
@@ -320,9 +355,9 @@ function contextOf(usage: unknown, model: string): ContextUsage | undefined {
   if (used <= 0) return undefined;
   return {
     usedTokens: used,
-    // pi 不上报窗口大小；先按 200k 估，侧栏会标成估算值。
-    windowTokens: 200_000,
-    windowEstimated: true,
+    // 窗口来自 pi 的模型清单；拿不到就按 200k 估，侧栏会标成估算值。
+    windowTokens: windowTokens ?? 200_000,
+    ...(windowTokens ? {} : { windowEstimated: true }),
     ...(model ? { model } : {}),
     details: [
       { label: "输入", value: input.toLocaleString("en-US") },
