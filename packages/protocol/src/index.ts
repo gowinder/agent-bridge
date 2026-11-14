@@ -145,6 +145,11 @@ export const METHODS = [
   "fs.read",
   "shell.exec",
   "shell.cancel",
+  // 待办存在 Bridge 自己的库里，与具体会话无关。
+  "todo.list",
+  "todo.add",
+  "todo.check",
+  "todo.remove",
 ] as const;
 
 export type Method = (typeof METHODS)[number];
@@ -564,6 +569,28 @@ export interface SessionCreateParams {
 
 export interface SessionCreateResult {
   session: SessionSummary;
+}
+
+// ---- Todo list (per Bridge, not per session) ----
+
+/** 待办分类；写进输入框时会变成「功能: …」「bug: …」这样的前缀。 */
+export const TODO_KINDS = ["feature", "bug", "other"] as const;
+export type TodoKind = (typeof TODO_KINDS)[number];
+
+export interface TodoItem {
+  todoId: string;
+  title: string;
+  kind: TodoKind;
+  createdAt: number;
+  /** null = 还没有勾选。 */
+  checkedAt: number | null;
+}
+
+/** 未完成的按创建时间倒序；已完成只给最近几条，总数另报。 */
+export interface TodoListResult {
+  open: TodoItem[];
+  done: TodoItem[];
+  doneTotal: number;
 }
 
 // ---- Hosted sessions (Claude Code processes owned by Bridge) ----

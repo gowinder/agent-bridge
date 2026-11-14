@@ -1,7 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import type { TodoItem, TodoKind, TodoListResult } from "@craftstead/protocol";
 import { migrateRelayUrls } from "./relay-url.js";
 
 export interface DeviceRecord {
@@ -119,7 +121,65 @@ export class Store {
          PRIMARY KEY(app_id, session_id)
        )`,
     );
+    // 待办是 Bridge 级的：换前端还在，换一台主机就是另一个库。
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS todos (
+         todo_id TEXT PRIMARY KEY,
+         title TEXT NOT NULL,
+         kind TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         checked_at INTEGER
+       )`,
+    );
+    this.db.exec("CREATE INDEX IF NOT EXISTS todos_checked ON todos (checked_at, created_at)");
     migrateRelayUrls(this);
+  }
+
+  /**
+   * 待办列表：未勾选的全部按创建时间倒序，已勾选的只取最近 `doneLimit` 条。
+   * doneTotal 让前端能说明还有多少条被收起来。
+   */
+  listTodos(doneLimit = 5): TodoListResult {
+    const open = this.db
+      .prepare(
+        `SELECT todo_id, title, kind, created_at, checked_at FROM todos
+         WHERE checked_at IS NULL ORDER BY created_at DESC`,
+      )
+      .all()
+      .map(todoRow);
+    const done = this.db
+      .prepare(
+        `SELECT todo_id, title, kind, created_at, checked_at FROM todos
+         WHERE checked_at IS NOT NULL ORDER BY checked_at DESC LIMIT ?`,
+      )
+      .all(doneLimit)
+      .map(todoRow);
+    const total = this.db.prepare("SELECT COUNT(*) AS n FROM todos WHERE checked_at IS NOT NULL").get();
+    return { open, done, doneTotal: Number(total?.["n"] ?? 0) };
+  }
+
+  addTodo(title: string, kind: TodoKind): TodoItem {
+    const now = Date.now();
+    const todoId = randomUUID();
+    this.db
+      .prepare("INSERT INTO todos (todo_id, title, kind, created_at, checked_at) VALUES (?, ?, ?, ?, NULL)")
+      .run(todoId, title, kind, now);
+    return { todoId, title, kind, createdAt: now, checkedAt: null };
+  }
+
+  /** 勾选/取消勾选；找不到这条待办时返回 null。 */
+  setTodoChecked(todoId: string, checked: boolean): TodoItem | null {
+    const row = this.db.prepare("SELECT todo_id, title, kind, created_at, checked_at FROM todos WHERE todo_id = ?").get(todoId);
+    if (!row) return null;
+    const checkedAt = checked ? Date.now() : null;
+    this.db.prepare("UPDATE todos SET checked_at = ? WHERE todo_id = ?").run(checkedAt, todoId);
+    return todoRow({ ...row, checked_at: checkedAt });
+  }
+
+  removeTodo(todoId: string): boolean {
+    const before = this.db.prepare("SELECT 1 FROM todos WHERE todo_id = ?").get(todoId);
+    this.db.prepare("DELETE FROM todos WHERE todo_id = ?").run(todoId);
+    return Boolean(before);
   }
 
   meta(key: string): string | null {
@@ -335,4 +395,16 @@ export class Store {
   close(): void {
     this.db.close();
   }
+}
+
+/** sqlite 行 → TodoItem；checked_at 为 NULL 时表示还没勾选。 */
+function todoRow(row: Record<string, unknown>): TodoItem {
+  const checked = row["checked_at"];
+  return {
+    todoId: String(row["todo_id"]),
+    title: String(row["title"]),
+    kind: String(row["kind"]) as TodoKind,
+    createdAt: Number(row["created_at"]),
+    checkedAt: typeof checked === "number" ? checked : null,
+  };
 }
