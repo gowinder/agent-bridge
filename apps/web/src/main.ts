@@ -110,6 +110,23 @@ function button(label: string, onClick: () => void, className = "btn"): HTMLButt
   return node;
 }
 
+/** 正在输入法组合中的输入框：那一下回车是给输入法的，不能当成提交。 */
+const imeComposing = new WeakSet<EventTarget>();
+
+function trackIme(input: HTMLElement): void {
+  input.addEventListener("compositionstart", () => imeComposing.add(input));
+  input.addEventListener("compositionend", () => {
+    // Safari 在 compositionend 之后紧跟的 Enter 已经不带 isComposing：晚一拍再放开。
+    window.setTimeout(() => imeComposing.delete(input), 0);
+  });
+}
+
+/** 中文输入法用回车确认候选词时会发 keydown Enter（keyCode 229），不能触发提交。 */
+function isImeEnter(event: KeyboardEvent): boolean {
+  if (event.isComposing || event.keyCode === 229) return true;
+  return imeComposing.has(event.currentTarget as EventTarget);
+}
+
 const ICONS = {
   chevron:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5 10.5 8 6 12.5"/></svg>',
@@ -121,6 +138,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.4" y="5.4" width="7.6" height="7.6" rx="1.4"/><path d="M10.6 5.4v-1A1.4 1.4 0 0 0 9.2 3H4.4A1.4 1.4 0 0 0 3 4.4v4.8a1.4 1.4 0 0 0 1.4 1.4h1"/></svg>',
   close:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg>',
+  plus:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>',
   device:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="7.6" rx="1.4"/><path d="M5.6 13.2h4.8"/></svg>',
   swap:
@@ -1169,8 +1188,9 @@ function passwordDialog(options: {
       }
     };
     for (const field of options.confirm ? [input, again] : [input]) {
+      trackIme(field);
       field.addEventListener("keydown", (event) => {
-        if (event.key === "Enter") void run();
+        if (event.key === "Enter" && !isImeEnter(event)) void run();
       });
     }
     document.addEventListener("keydown", onKey);
@@ -1355,8 +1375,9 @@ function renameSessionSheet(summary: SessionSummary, onSaved: (session: SessionS
     : null;
   const cancel = button("取消", finish, "btn secondary");
 
+  trackIme(input);
   input.addEventListener("keydown", (event) => {
-    if (event.key === "Enter") void submit(input.value.trim() || null);
+    if (event.key === "Enter" && !isImeEnter(event)) void submit(input.value.trim() || null);
   });
   document.addEventListener("keydown", onKey);
   mask.addEventListener("click", (event) => {
@@ -1955,9 +1976,13 @@ function dockTodos(): HTMLElement {
   input.addEventListener("input", () => {
     todoDraft.title = input.value;
   });
+  trackIme(input);
 
   const list = el("div", { className: "todo-list" });
-  const addButton = button("添加", () => void add(), "btn primary todo-add");
+  const addButton = button("", () => void add(), "btn primary todo-add");
+  addButton.append(icon("plus"));
+  addButton.setAttribute("aria-label", "添加待办");
+  addButton.setAttribute("title", "添加待办");
 
   const refresh = async (): Promise<void> => {
     try {
@@ -1973,22 +1998,30 @@ function dockTodos(): HTMLElement {
     paintList();
   };
 
+  let adding = false;
   const add = async (): Promise<void> => {
+    // 连按回车不能把同一条存两遍、也不能把输入框里的文字拆成好几条。
+    if (adding) return;
     const title = input.value.trim();
     if (!title) {
       input.focus();
       return;
     }
+    adding = true;
     addButton.disabled = true;
     try {
       await call("todo.add", { title, kind: select.value });
-      todoDraft = { title: "", kind: select.value as TodoKind };
-      input.value = "";
+      const kind = select.value as TodoKind;
+      todoDraft = { title: "", kind };
+      // 提交期间整页重绘会换掉输入框，清当前那个，否则旧文本会被还原回来又提交一次。
+      const live = document.querySelector<HTMLInputElement>(".dock-todos .todo-input");
+      (live ?? input).value = "";
       await refresh();
     } catch (error) {
       todoError = messageOf(error);
       paintList();
     } finally {
+      adding = false;
       addButton.disabled = false;
     }
   };
@@ -2065,6 +2098,7 @@ function dockTodos(): HTMLElement {
     input.addEventListener("input", () => {
       todoEditDraft.title = input.value;
     });
+    trackIme(input);
 
     const cancel = (): void => {
       editingTodoId = null;
@@ -2089,6 +2123,8 @@ function dockTodos(): HTMLElement {
 
     input.addEventListener("keydown", (event) => {
       if (event.key === "Enter") {
+        // 输入法上屏的回车不保存，否则半截文字就被存下、输入框又被清空。
+        if (isImeEnter(event)) return;
         event.preventDefault();
         void save();
       } else if (event.key === "Escape") {
@@ -2097,11 +2133,20 @@ function dockTodos(): HTMLElement {
       }
     });
 
+    const saveButton = button("", () => void save(), "btn primary todo-save");
+    saveButton.append(icon("check"));
+    saveButton.setAttribute("aria-label", "保存");
+    saveButton.setAttribute("title", "保存");
+    const cancelButton = button("", cancel, "btn ghost todo-save");
+    cancelButton.append(icon("close"));
+    cancelButton.setAttribute("aria-label", "取消");
+    cancelButton.setAttribute("title", "取消");
+
     const form = el("div", { className: `todo-edit${done ? " is-done" : ""}` }, [
       select,
       input,
-      button("保存", () => void save(), "btn primary todo-save"),
-      button("取消", cancel, "btn ghost todo-save"),
+      saveButton,
+      cancelButton,
     ]);
     // 刚插进 DOM 后再聚焦，光标放到末尾。
     window.setTimeout(() => {
@@ -2140,7 +2185,8 @@ function dockTodos(): HTMLElement {
   };
 
   input.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
+    // 中文输入法用回车确认候选词：这一下是给输入法的，提交了就会把一条待办拆成几条。
+    if (event.key !== "Enter" || isImeEnter(event)) return;
     event.preventDefault();
     void add();
   });
@@ -2983,8 +3029,9 @@ function hostedAddDirForm(onAdded: () => void): HTMLElement {
       status.textContent = messageOf(error);
     }
   };
+  trackIme(input);
   input.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
+    if (event.key !== "Enter" || isImeEnter(event)) return;
     event.preventDefault();
     void submitPath();
   });
@@ -3421,8 +3468,9 @@ function hostedCreatePanel(
     saveHostedArgPrefs();
     renderArgs();
   };
+  trackIme(argsInput);
   argsInput.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter") return;
+    if (event.key !== "Enter" || isImeEnter(event)) return;
     // 回车只加参数，不提交表单。
     event.preventDefault();
     addArg(argsInput.value);
@@ -4366,7 +4414,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
         renderSlashMenu();
         return;
       }
-      if (event.key === "Enter" || event.key === "Tab") {
+      if ((event.key === "Enter" || event.key === "Tab") && !isImeEnter(event)) {
         event.preventDefault();
         const name = slashItems[slashIndex];
         if (name) applySlash(name);
