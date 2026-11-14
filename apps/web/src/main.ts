@@ -1921,7 +1921,11 @@ function dockTodos(): HTMLElement {
 
   const refresh = async (): Promise<void> => {
     try {
-      todoCache = await call<TodoListResult>("todo.list");
+      const result = await call<TodoListResult>("todo.list");
+      if (!result || !Array.isArray(result.open) || !Array.isArray(result.done)) {
+        throw new Error("这个 Bridge 还不支持待办，需要更新 App");
+      }
+      todoCache = result;
       todoError = "";
     } catch (error) {
       todoError = messageOf(error);
@@ -2002,7 +2006,7 @@ function dockTodos(): HTMLElement {
     if (todoError) parts.push(el("p", { className: "hint warn", text: todoError }));
     const data = todoCache;
     if (!data) {
-      parts.push(el("p", { className: "hint", text: "正在读取待办…" }));
+      if (!todoError) parts.push(el("p", { className: "hint", text: "正在读取待办…" }));
     } else {
       if (data.open.length === 0) {
         parts.push(el("p", { className: "hint", text: "没有待办。" }));
