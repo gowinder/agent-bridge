@@ -5,7 +5,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
-import { basename, dirname, extname, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import {
   DEVTOOLS_CAPABILITIES,
   MAX_MESSAGE_BYTES,
@@ -122,6 +122,8 @@ export class Devtools {
   private rootsCache: { at: number; roots: ScopedRoot[] } | null = null;
   private rootsLoading: Promise<ScopedRoot[]> | null = null;
   private readonly expiry = new Map<Capability, ExpiryState>();
+  /** uploads 根的真实路径；undefined 表示还没算过，null 表示目录不存在。 */
+  private uploadsReal: string | null | undefined;
 
   constructor(
     private readonly store: Store,
@@ -299,17 +301,33 @@ export class Devtools {
   }
 
   /** Resolves a client path and refuses anything outside the scoped project root. */
-  private resolveInside(root: ScopedRoot, path: string): string {
+  private resolveInside(root: ScopedRoot, path: string, allowUploads = false): string {
     let real: string;
     try {
       real = realpathSync(resolve(root.real, path));
     } catch {
       throw new RpcError("not_found", "路径不存在");
     }
-    if (real !== root.real && !real.startsWith(root.real + sep)) {
+    const inside = real === root.real || real.startsWith(root.real + sep);
+    if (!inside && !(allowUploads && this.insideUploads(real))) {
       throw new RpcError("unauthorized", "路径不在该项目目录内");
     }
     return real;
+  }
+
+  /**
+   * 聊天里发的附件落在 state 目录的 uploads 下，不属于任何项目。转录里引用这些
+   * 路径时也要能预览，否则点开自己刚发的图片会得到「路径不在该项目目录内」。
+   */
+  private insideUploads(real: string): boolean {
+    if (this.uploadsReal === undefined) {
+      try {
+        this.uploadsReal = realpathSync(join(this.store.dir, "uploads"));
+      } catch {
+        this.uploadsReal = null;
+      }
+    }
+    return this.uploadsReal !== null && real.startsWith(this.uploadsReal + sep);
   }
 
   async listDirs(sessionId: string | undefined, root: string, path?: string): Promise<FsListResult> {
@@ -362,7 +380,7 @@ export class Devtools {
     const scoped = await this.scope(sessionId, root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     this.requireCapability("files");
-    const real = this.resolveInside(scoped, path);
+    const real = this.resolveInside(scoped, path, true);
     let stats;
     try {
       stats = statSync(real);
