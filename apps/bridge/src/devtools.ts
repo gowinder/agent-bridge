@@ -330,6 +330,15 @@ export class Devtools {
     return this.uploadsReal !== null && real.startsWith(this.uploadsReal + sep);
   }
 
+  /** 路径是否指向 uploads 里的附件；不存在或解析失败一律按「不是附件」处理。 */
+  private insideUploadsPath(path: string): boolean {
+    try {
+      return this.insideUploads(realpathSync(path));
+    } catch {
+      return false;
+    }
+  }
+
   async listDirs(sessionId: string | undefined, root: string, path?: string): Promise<FsListResult> {
     this.requireCapability("files");
     const scoped = await this.scope(sessionId, root);
@@ -376,11 +385,15 @@ export class Devtools {
   }
 
   async readFile(sessionId: string | undefined, root: string, path: string): Promise<FsReadResult> {
-    this.requireCapability("files");
+    // 自己发的附件落在 state/uploads 下：不开「文件浏览」也该能点开预览，否则只能拿到一句
+    // 「文件浏览未开启」。只免这一个目录的开关，其它路径照旧先要开关，
+    // 免得未开启的设备拿 fs.read 探测项目里有什么。
+    const attachment = this.insideUploadsPath(resolve(root, path));
+    if (!attachment) this.requireCapability("files");
     const scoped = await this.scope(sessionId, root);
-    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
-    this.requireCapability("files");
     const real = this.resolveInside(scoped, path, true);
+    // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
+    if (!attachment || !this.insideUploads(real)) this.requireCapability("files");
     let stats;
     try {
       stats = statSync(real);
