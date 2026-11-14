@@ -148,6 +148,7 @@ export const METHODS = [
   // 待办存在 Bridge 自己的库里，与具体会话无关。
   "todo.list",
   "todo.add",
+  "todo.update",
   "todo.check",
   "todo.remove",
 ] as const;

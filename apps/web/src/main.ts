@@ -1679,8 +1679,9 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
   restoreDockFocus(focus);
 }
 
-/** dock 里正在编辑的输入框（目前只有待办）：整页重建后要还原焦点，否则打字被打断。 */
+/** dock 里正在编辑的输入框（新增待办 / 就地编辑）：整页重建后要还原焦点，否则打字被打断。 */
 interface DockFocus {
+  target: "new" | "edit";
   value: string;
   start: number | null;
   end: number | null;
@@ -1689,16 +1690,23 @@ interface DockFocus {
 function captureDockFocus(): DockFocus | null {
   const active = document.activeElement;
   if (!(active instanceof HTMLInputElement)) return null;
-  if (!active.classList.contains("todo-input")) return null;
-  return { value: active.value, start: active.selectionStart, end: active.selectionEnd };
+  const target = active.classList.contains("todo-input")
+    ? "new"
+    : active.classList.contains("todo-edit-input")
+      ? "edit"
+      : null;
+  if (!target) return null;
+  return { target, value: active.value, start: active.selectionStart, end: active.selectionEnd };
 }
 
 function restoreDockFocus(saved: DockFocus | null): void {
   if (!saved) return;
-  const input = document.querySelector<HTMLInputElement>(".dock-todos .todo-input");
+  const selector = saved.target === "new" ? ".dock-todos .todo-input" : ".dock-todos .todo-edit-input";
+  const input = document.querySelector<HTMLInputElement>(selector);
   if (!input || input.disabled) return;
   input.value = saved.value;
-  todoDraft.title = saved.value;
+  if (saved.target === "new") todoDraft.title = saved.value;
+  else todoEditDraft.title = saved.value;
   // preventScroll：重绘发生在输入框上方时别把页面拉过去。
   input.focus({ preventScroll: true });
   if (saved.start !== null && saved.end !== null) input.setSelectionRange(saved.start, saved.end);
@@ -1891,6 +1899,9 @@ function dockHistory(): HTMLElement {
 let todoDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
 let todoCache: TodoListResult | null = null;
 let todoError = "";
+/** 正在就地编辑的待办；重绘后靠它回到编辑态。 */
+let editingTodoId: string | null = null;
+let todoEditDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
 
 /** 当前聊天页的输入框：点待办时往这里填文字，不发送。 */
 let composerRef: HTMLTextAreaElement | null = null;
@@ -2011,23 +2022,99 @@ function dockTodos(): HTMLElement {
 
   const row = (item: TodoItem): HTMLElement => {
     const done = item.checkedAt !== null;
+    if (item.todoId === editingTodoId) return editRow(item, done);
     const main = el("button", { className: "todo-main", attrs: { type: "button", title: "填到输入框" } }, [
       el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
       el("span", { className: "todo-title", text: item.title }),
     ]);
     main.addEventListener("click", () => void use(item));
-    const tail = el(
-      "button",
-      {
-        className: "todo-tail",
-        attrs: { type: "button", "aria-label": done ? "标记未完成" : "删除待办", title: done ? "标记未完成" : "删除待办" },
-      },
-      [icon(done ? "refresh" : "trash")],
-    );
-    tail.addEventListener("click", () => {
-      void (done ? setChecked(item, false) : remove(item));
+    const action = (name: "refresh" | "pencil" | "trash", label: string, run: () => void): HTMLElement => {
+      const node = el(
+        "button",
+        { className: "todo-action", attrs: { type: "button", "aria-label": label, title: label } },
+        [icon(name)],
+      );
+      node.addEventListener("click", run);
+      return node;
+    };
+    const actions = el("div", { className: "todo-actions" }, [
+      ...(done ? [action("refresh", "标记未完成", () => void setChecked(item, false))] : []),
+      action("pencil", "编辑", () => startEdit(item)),
+      action("trash", "删除待办", () => void remove(item)),
+    ]);
+    return el("div", { className: `todo-item${done ? " is-done" : ""}` }, [main, actions]);
+  };
+
+  /** 就地编辑：标题、分类都能改，改完才发 RPC。 */
+  const editRow = (item: TodoItem, done: boolean): HTMLElement => {
+    const select = el("select", { className: "todo-kind", attrs: { "aria-label": "待办分类" } });
+    for (const [value, label] of [["feature", "功能"], ["bug", "bug"], ["other", "其他"]] as const) {
+      const option = el("option", { text: label, attrs: { value } });
+      if (todoEditDraft.kind === value) option.selected = true;
+      select.append(option);
+    }
+    select.addEventListener("change", () => {
+      todoEditDraft.kind = select.value as TodoKind;
     });
-    return el("div", { className: `todo-item${done ? " is-done" : ""}` }, [main, tail]);
+
+    const input = el("input", {
+      className: "todo-edit-input",
+      attrs: { type: "text", maxlength: "500", "aria-label": "待办内容" },
+    });
+    input.value = todoEditDraft.title;
+    input.addEventListener("input", () => {
+      todoEditDraft.title = input.value;
+    });
+
+    const cancel = (): void => {
+      editingTodoId = null;
+      paintList();
+    };
+
+    const save = async (): Promise<void> => {
+      const title = input.value.trim();
+      if (!title) {
+        input.focus();
+        return;
+      }
+      try {
+        await call("todo.update", { todoId: item.todoId, title, kind: select.value });
+        editingTodoId = null;
+        await refresh();
+      } catch (error) {
+        todoError = messageOf(error);
+        paintList();
+      }
+    };
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void save();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+    });
+
+    const form = el("div", { className: `todo-edit${done ? " is-done" : ""}` }, [
+      select,
+      input,
+      button("保存", () => void save(), "btn primary todo-save"),
+      button("取消", cancel, "btn ghost todo-save"),
+    ]);
+    // 刚插进 DOM 后再聚焦，光标放到末尾。
+    window.setTimeout(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 0);
+    return form;
+  };
+
+  const startEdit = (item: TodoItem): void => {
+    editingTodoId = item.todoId;
+    todoEditDraft = { title: item.title, kind: item.kind };
+    paintList();
   };
 
   const paintList = (): void => {
