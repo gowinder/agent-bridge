@@ -83,3 +83,32 @@ test("重开同一个库仍能读到待办（换前端不丢）", () => {
   assert.equal(list.open[0].title, "重启后还在");
   second.close();
 });
+
+test("编辑只改传进来的字段，状态保持不动", () => {
+  const store = harness();
+  const item = store.addTodo("原标题", "bug");
+
+  const renamed = store.updateTodo(item.todoId, { title: "新标题" });
+  assert.equal(renamed.title, "新标题");
+  assert.equal(renamed.kind, "bug");
+  assert.equal(renamed.createdAt, item.createdAt);
+
+  const retagged = store.updateTodo(item.todoId, { kind: "feature" });
+  assert.equal(retagged.title, "新标题");
+  assert.equal(retagged.kind, "feature");
+  assert.equal(store.updateTodo("no-such-id", { title: "x" }), null);
+  store.close();
+});
+
+test("编辑已完成的待办不会把它变回未完成", () => {
+  const store = harness();
+  const item = store.addTodo("已完成", "other");
+  store.setTodoChecked(item.todoId, true);
+
+  const edited = store.updateTodo(item.todoId, { title: "改过的已完成" });
+  assert.equal(typeof edited.checkedAt, "number");
+  const list = store.listTodos();
+  assert.equal(list.open.length, 0);
+  assert.equal(list.done[0].title, "改过的已完成");
+  store.close();
+});

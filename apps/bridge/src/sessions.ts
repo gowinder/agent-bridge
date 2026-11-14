@@ -613,6 +613,24 @@ export class DeviceSession implements ChannelSession {
         if (!item) throw new RpcError("not_found", "待办不存在");
         return item;
       }
+      case "todo.update": {
+        const todoId = stringParam(params, "todoId");
+        if (!todoId) throw new RpcError("invalid_params", "todoId required");
+        const patch: { title?: string; kind?: TodoKind } = {};
+        if (params["title"] !== undefined) {
+          const title = (stringParam(params, "title") ?? "").trim();
+          if (!title) throw new RpcError("invalid_params", "待办内容不能为空");
+          if (title.length > 500) throw new RpcError("invalid_params", "待办内容最多 500 字");
+          patch.title = title;
+        }
+        if (params["kind"] !== undefined) patch.kind = todoKindParam(stringParam(params, "kind"));
+        if (patch.title === undefined && patch.kind === undefined) {
+          throw new RpcError("invalid_params", "没有要修改的字段");
+        }
+        const item = this.options.store.updateTodo(todoId, patch);
+        if (!item) throw new RpcError("not_found", "待办不存在");
+        return item;
+      }
       case "todo.remove": {
         const todoId = stringParam(params, "todoId");
         if (!todoId) throw new RpcError("invalid_params", "todoId required");

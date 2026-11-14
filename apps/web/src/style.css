@@ -900,8 +900,19 @@ details[open] > .dock-project-head::before {
   text-decoration: line-through;
 }
 
-.todo-tail {
+.todo-actions {
   flex: none;
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+.todo-item:hover .todo-actions,
+.todo-item:focus-within .todo-actions {
+  opacity: 1;
+}
+
+.todo-action {
   width: 24px;
   height: 24px;
   display: grid;
@@ -911,18 +922,40 @@ details[open] > .dock-project-head::before {
   background: transparent;
   color: var(--muted);
   cursor: pointer;
-  opacity: 0;
 }
 
-.todo-item:hover .todo-tail {
-  opacity: 1;
-}
-
-.todo-tail:hover {
+.todo-action:hover {
   background: var(--surface-2);
   color: var(--text);
 }
 
+/* 就地编辑一行：分类 + 输入框 + 保存/取消。 */
+.todo-edit {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 2px;
+  min-width: 0;
+}
+
+.todo-edit-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12.5px;
+}
+
+.todo-save {
+  flex: none;
+  height: 26px;
+  padding: 0 8px;
+  font-size: 12px;
+}
 .todo-hidden {
   margin: 0;
   font-size: 11px;

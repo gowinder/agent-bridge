@@ -182,6 +182,18 @@ export class Store {
     return Boolean(before);
   }
 
+  /** 只改传进来的字段；找不到这条待办时返回 null。 */
+  updateTodo(todoId: string, patch: { title?: string; kind?: TodoKind }): TodoItem | null {
+    const row = this.db
+      .prepare("SELECT todo_id, title, kind, created_at, checked_at FROM todos WHERE todo_id = ?")
+      .get(todoId);
+    if (!row) return null;
+    const title = patch.title ?? String(row["title"]);
+    const kind = patch.kind ?? (String(row["kind"]) as TodoKind);
+    this.db.prepare("UPDATE todos SET title = ?, kind = ? WHERE todo_id = ?").run(title, kind, todoId);
+    return todoRow({ ...row, title, kind });
+  }
+
   meta(key: string): string | null {
     const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key);
     return row ? String(row["value"]) : null;
