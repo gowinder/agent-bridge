@@ -69,6 +69,8 @@ const TRANSCRIPT_TAIL_BYTES = 262_144;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$/;
 /** pi 的思考等级（`pi --thinking` 与 pi-subagents 的 `thinking` 同一套，从低到高）。 */
 const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
+const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
 const MAX_EXTRA_ARGS = 24;
 const MAX_EXTRA_ARG_CHARS = 200;
@@ -193,6 +195,8 @@ interface HostedRecord {
   thinking?: string;
   /** pi 会话：新派生的子代理的思考等级（settings.json 的 `subagents.defaultThinking`）。 */
   subagentThinking?: string;
+  /** pi 会话：自动压缩阈值（settings.json 的 `compaction.reserveTokens`）；缺省跟随 pi 设置。 */
+  compactionReserveTokens?: number;
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
@@ -579,6 +583,13 @@ export class HostedSessionManager {
               { label: "思考等级", value: record.thinking ?? "跟随 pi 设置" },
               { label: "子代理模型", value: record.subagentModel ?? "跟随 pi 设置" },
               { label: "子代理思考等级", value: record.subagentThinking ?? "跟随 pi 设置" },
+              {
+                label: "自动压缩",
+                value:
+                  record.compactionReserveTokens !== undefined
+                    ? `剩 ${record.compactionReserveTokens.toLocaleString("en-US")} tokens 时压缩`
+                    : "跟随 pi 设置（默认剩 16384）",
+              },
             ]
           : []),
         ...(record.args?.length ? [{ label: "启动参数", value: record.args.join(" ") }] : []),
@@ -806,9 +817,15 @@ export class HostedSessionManager {
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    // 只改模型时思考等级沿用记录里的值；两个都没设才把目录清掉。
-    if (model || record.subagentThinking) {
-      if (!preparePiAgentDir(agentDir, { model, thinking: record.subagentThinking })) {
+    // 只改模型时思考等级与压缩阈值沿用记录里的值；都没设才把目录清掉。
+    if (model || record.subagentThinking || record.compactionReserveTokens !== undefined) {
+      if (
+        !preparePiAgentDir(agentDir, {
+          model,
+          thinking: record.subagentThinking,
+          reserveTokens: record.compactionReserveTokens,
+        })
+      ) {
         throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理模型没有生效`);
       }
     } else {
@@ -818,6 +835,51 @@ export class HostedSessionManager {
     await this.stopInSessiond(record.id, true);
     if (model) record.subagentModel = model;
     else delete record.subagentModel;
+    this.touch(record);
+    return this.summary(record);
+  }
+
+  /**
+   * 改这个会话的自动压缩阈值（pi 的 `compaction.reserveTokens`，只对 pi 有效）：
+   * 上下文到达「窗口 − reserveTokens」时 pi 自己压缩。
+   * pi 只在启动时读 settings.json，所以空闲进程要先停掉，下一条消息按新阈值重新打开会话。
+   * `value` 传 null 表示改回跟随 pi 自己的设置。
+   */
+  async setCompactionReserveTokens(sessionId: string, value: number | null): Promise<SessionSummary> {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    if (record.agent !== "pi") {
+      throw new RpcError("unsupported", "只有 pi 托管会话可以设置自动压缩阈值");
+    }
+    if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > MAX_COMPACTION_RESERVE_TOKENS)) {
+      throw new RpcError(
+        "invalid_params",
+        `自动压缩阈值必须是 0 到 ${MAX_COMPACTION_RESERVE_TOKENS} 之间的整数（单位 token）`,
+      );
+    }
+    const live = this.live.get(record.id);
+    if (live?.busy || live?.pending || live?.piPending) {
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再改自动压缩阈值");
+    }
+    // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
+    const agentDir = this.piAgentDirOf(record.id);
+    if (record.subagentModel || record.subagentThinking || value !== null) {
+      if (
+        !preparePiAgentDir(agentDir, {
+          model: record.subagentModel,
+          thinking: record.subagentThinking,
+          reserveTokens: value ?? undefined,
+        })
+      ) {
+        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），自动压缩阈值没有生效`);
+      }
+    } else {
+      removePiAgentDir(agentDir);
+    }
+    if (live) this.kill(record.id);
+    await this.stopInSessiond(record.id, true);
+    if (value !== null) record.compactionReserveTokens = value;
+    else delete record.compactionReserveTokens;
     this.touch(record);
     return this.summary(record);
   }
@@ -1162,6 +1224,7 @@ export class HostedSessionManager {
     const agentDir = preparePiAgentDir(this.piAgentDirOf(record.id), {
       model: record.subagentModel,
       thinking: record.subagentThinking,
+      reserveTokens: record.compactionReserveTokens,
     });
     const child = this.spawnProcess(
       binary,
@@ -1725,6 +1788,9 @@ export class HostedSessionManager {
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
       ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
+      ...(record.compactionReserveTokens !== undefined
+        ? { compactionReserveTokens: record.compactionReserveTokens }
+        : {}),
       cwd: record.cwd,
     };
     if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
@@ -1931,6 +1997,12 @@ export class HostedSessionManager {
           ...(typeof item["subagentThinking"] === "string" && PI_THINKING_LEVELS.includes(item["subagentThinking"])
             ? { subagentThinking: item["subagentThinking"] }
             : {}),
+          ...(typeof item["compactionReserveTokens"] === "number" &&
+          Number.isSafeInteger(item["compactionReserveTokens"]) &&
+          item["compactionReserveTokens"] >= 0 &&
+          item["compactionReserveTokens"] <= MAX_COMPACTION_RESERVE_TOKENS
+            ? { compactionReserveTokens: item["compactionReserveTokens"] }
+            : {}),
           ...(Array.isArray(item["args"]) ? { args: sanitizeExtraArgs(item["args"]) } : {}),
           ...(typeof item["observedModel"] === "string" && MODEL_PATTERN.test(item["observedModel"])
             ? { observedModel: item["observedModel"] }
@@ -1992,6 +2064,9 @@ export class HostedSessionManager {
               ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
               ...(record.thinking ? { thinking: record.thinking } : {}),
               ...(record.subagentThinking ? { subagentThinking: record.subagentThinking } : {}),
+              ...(record.compactionReserveTokens !== undefined
+                ? { compactionReserveTokens: record.compactionReserveTokens }
+                : {}),
               ...(record.args?.length ? { args: record.args } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),

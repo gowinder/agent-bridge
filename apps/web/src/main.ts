@@ -3637,6 +3637,8 @@ interface ChatState {
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
   compactSince?: number;
+  /** 改自动压缩阈值的状态；与 compact 分开，避免互相覆盖提示。 */
+  compaction?: { pending: boolean; error?: string; note?: string };
   /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
   answers?: Map<string, string[]>;
   contextButton: HTMLButtonElement;
@@ -5534,6 +5536,7 @@ function paintContext(state: ChatState): void {
         ]))]
       : []),
     ...(percent >= 50 ? [contextCompactActions(state)] : []),
+    ...(state.session.hostedAgent === "pi" ? [contextCompactionSetting(state)] : []),
   );
 }
 
@@ -5590,6 +5593,90 @@ function contextCompactActions(state: ChatState): HTMLElement {
   });
   row.append(btn, hint);
   return row;
+}
+
+/**
+ * pi 托管会话的自动压缩阈值：pi 只在上下文剩这么多 token 时触发压缩，
+ * 默认 16384。阈值只能写在会话语义目录的 settings.json 里，改完会重启 pi 进程。
+ */
+function contextCompactionSetting(state: ChatState): HTMLElement {
+  const row = el("div", { className: "context-actions" });
+  const pending = state.compaction?.pending === true;
+  const current = state.session.compactionReserveTokens;
+  const input = el("input", {
+    className: "context-input",
+    attrs: { type: "number", min: "0", step: "1024", inputmode: "numeric", placeholder: "16384" },
+  });
+  if (typeof current === "number") input.value = String(current);
+  input.disabled = pending;
+  input.setAttribute("aria-label", "自动压缩阈值（剩余 tokens）");
+  const save = el("button", {
+    className: "context-action",
+    text: pending ? "保存中…" : "保存阈值",
+    attrs: { type: "button" },
+  });
+  save.disabled = pending;
+  const follow = el("button", {
+    className: "context-action",
+    text: "跟随 pi",
+    attrs: { type: "button" },
+  });
+  follow.disabled = pending;
+  const hint = el("p", { className: "context-hint" });
+  if (state.compaction?.error) {
+    hint.textContent = state.compaction.error;
+    hint.classList.add("is-error");
+  } else if (state.compaction?.note) {
+    hint.textContent = state.compaction.note;
+  } else {
+    hint.textContent =
+      typeof current === "number"
+        ? `当前剩 ${current} tokens 时压缩；改完重启 pi 进程，下一条消息生效。`
+        : "当前跟随 pi 设置（默认剩 16384 tokens 时压缩）；改完重启 pi 进程，下一条消息生效。";
+  }
+  save.addEventListener("click", () => {
+    const raw = input.value.trim();
+    const tokens = Number(raw);
+    if (!raw || !Number.isSafeInteger(tokens) || tokens < 0) {
+      hint.textContent = "填一个不小于 0 的整数（tokens）";
+      hint.classList.add("is-error");
+      return;
+    }
+    void runSetCompaction(state, tokens);
+  });
+  follow.addEventListener("click", () => {
+    void runSetCompaction(state, null);
+  });
+  row.append(
+    el("p", { className: "context-label", text: "自动压缩阈值" }),
+    el("div", { className: "context-compaction-row" }, [input, save, follow]),
+    hint,
+  );
+  return row;
+}
+
+async function runSetCompaction(state: ChatState, tokens: number | null): Promise<void> {
+  if (state.compaction?.pending) return;
+  state.compaction = { pending: true };
+  paintContext(state);
+  try {
+    const result = await call<SessionGetResult>(
+      "hosted.setCompaction",
+      { sessionId: state.session.sessionId, reserveTokens: tokens },
+      60_000,
+    );
+    state.session = result.session;
+    state.compaction = {
+      pending: false,
+      note:
+        tokens === null
+          ? "已改回跟随 pi 设置，下一条消息生效。"
+          : `已设为剩 ${tokens} tokens 时压缩，下一条消息生效。`,
+    };
+  } catch (error) {
+    state.compaction = { pending: false, error: messageOf(error) };
+  }
+  paintContext(state);
 }
 
 async function runCompact(state: ChatState): Promise<void> {

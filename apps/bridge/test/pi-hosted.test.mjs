@@ -408,6 +408,99 @@ test("subagent model is refused for claude sessions and while a turn is running"
   assert.deepEqual(child.signals, []);
 });
 
+test("pi compaction threshold goes into the session's settings and outlives the process", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  // 用户自己已经配了别的压缩项，改阈值只能覆盖 reserveTokens。
+  writeFileSync(
+    join(source, "settings.json"),
+    JSON.stringify({
+      packages: ["npm:pi-subagents"],
+      subagents: { defaultModel: "a/b" },
+      compaction: { enabled: true, keepRecentTokens: 20_000 },
+    }),
+  );
+  withAgentDir(t, source);
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  // 没设压缩阈值时直接用用户自己的 agent 目录，不另建。
+  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+
+  const updated = await h.manager.setCompactionReserveTokens(session.sessionId, 40_000);
+  assert.equal(updated.compactionReserveTokens, 40_000);
+  // 阈值没有 RPC 热改，只能停掉旧进程，下一条消息按新 settings 重启。
+  assert.deepEqual(h.spawns[0].child.signals, ["SIGTERM"]);
+  const before = h.spawns.length;
+  await h.manager.send(session.sessionId, "继续");
+  assert.equal(h.spawns.length, before + 1);
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  assert.equal(dir, join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", "")));
+  const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction.reserveTokens, 40_000);
+  assert.equal(settings.compaction.enabled, true);
+  assert.equal(settings.compaction.keepRecentTokens, 20_000);
+  assert.equal(settings.subagents.defaultModel, "a/b");
+
+  const rail = h.manager.rail(session.sessionId).environment;
+  assert.equal(rail.find((row) => row.label === "自动压缩")?.value, "剩 40,000 tokens 时压缩");
+  // 登记表里留着，Bridge 重启后还在。
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.compactionReserveTokens, 40_000);
+
+  // 改回跟随 pi 设置：压缩项不再写进会话目录，rail 也回到默认文案。
+  h.spawns.at(-1).child.kill("SIGTERM");
+  const cleared = await h.manager.setCompactionReserveTokens(session.sessionId, null);
+  assert.equal(cleared.compactionReserveTokens, undefined);
+  // 没有其它要覆盖的项，会话专属目录整个清掉，回到用户自己的 settings.json。
+  assert.equal(existsSync(dir), false);
+  const after = h.manager.rail(session.sessionId).environment;
+  assert.equal(after.find((row) => row.label === "自动压缩")?.value, "跟随 pi 设置（默认剩 16384）");
+});
+
+test("compaction threshold and subagent model share the same agent dir", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const session = h.manager.create({ path: h.repo, agent: "pi", subagentModel: "group/dsgroup" });
+  await h.manager.setCompactionReserveTokens(session.sessionId, 32_000);
+  const dir = join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", ""));
+  let settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction.reserveTokens, 32_000);
+  assert.equal(settings.subagents.defaultModel, "group/dsgroup");
+
+  // 清掉阈值不能连带把子代理模型一起清掉。
+  await h.manager.setCompactionReserveTokens(session.sessionId, null);
+  settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction, undefined);
+  assert.equal(settings.subagents.defaultModel, "group/dsgroup");
+
+  // 反过来，换子代理模型也要保留已设的阈值。
+  await h.manager.setCompactionReserveTokens(session.sessionId, 24_000);
+  await h.manager.setSubagentModel(session.sessionId, "other/model");
+  settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.compaction.reserveTokens, 24_000);
+  assert.equal(settings.subagents.defaultModel, "other/model");
+});
+
+test("compaction threshold is refused for non-pi sessions, bad values and while a turn runs", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const claude = h.manager.create({ path: h.repo });
+  await assert.rejects(h.manager.setCompactionReserveTokens(claude.sessionId, 20_000), /只有 pi/);
+
+  const pi = h.manager.create({ path: h.repo, agent: "pi" });
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, 1024.5), /整数/);
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, -1), /整数/);
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, 5_000_000), /整数/);
+
+  const child = h.spawns.at(-1).child;
+  child.emitJson({ type: "agent_start" });
+  await assert.rejects(h.manager.setCompactionReserveTokens(pi.sessionId, 20_000), /还在跑/);
+  assert.deepEqual(child.signals, []);
+});
+
 test("pi model catalog comes from pi's own config files", (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());

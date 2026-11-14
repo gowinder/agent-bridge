@@ -113,6 +113,7 @@ const ACTIVITY_METHODS = new Set([
   "hosted.interrupt",
   "hosted.setModel",
   "hosted.setSubagentModel",
+  "hosted.setCompaction",
   "hosted.archive",
   "hosted.delete",
   "session.compact",
@@ -147,6 +148,11 @@ function describeActivity(request: RequestMessage): string | null {
   if (request.method === "hosted.setSubagentModel") {
     const model = (stringParam(params, "model") ?? "").trim();
     return `${model ? `把托管会话的子代理模型换成「${model}」` : "把托管会话的子代理模型改回跟随 pi 设置"}${suffix}`;
+  }
+  if (request.method === "hosted.setCompaction") {
+    const raw = params["reserveTokens"];
+    if (raw === null || raw === undefined) return `把自动压缩阈值改回跟随 pi 设置${suffix}`;
+    return `把自动压缩阈值改成剩 ${String(raw)} tokens${suffix}`;
   }
   if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
     const path = (stringParam(params, "path") ?? "").trim();
@@ -608,6 +614,15 @@ export class DeviceSession implements ChannelSession {
           throw new RpcError("invalid_params", "model 必须是字符串或 null");
         }
         return this.options.adapters.hostedSetSubagentModel(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setCompaction": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["reserveTokens"];
+        if (raw !== null && raw !== undefined && typeof raw !== "number") {
+          throw new RpcError("invalid_params", "reserveTokens 必须是数字或 null");
+        }
+        return this.options.adapters.hostedSetCompactionReserveTokens(sessionId, typeof raw === "number" ? raw : null);
       }
       case "push.info": {
         const info: PushInfoResult = {

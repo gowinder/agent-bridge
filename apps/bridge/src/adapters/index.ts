@@ -144,6 +144,10 @@ export class SessionAdapters {
     return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
   }
 
+  async hostedSetCompactionReserveTokens(sessionId: string, tokens: number | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setCompactionReserveTokens(sessionId, tokens) };
+  }
+
   hostedResume(sessionId: string): HostedResumeResult {
     return { session: this.hostedManager.resume(sessionId) };
   }
