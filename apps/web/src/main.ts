@@ -583,6 +583,7 @@ async function watchSessions(): Promise<void> {
 }
 
 let watchTimer: number | null = null;
+let dockRenderDeferred = false;
 
 /** Every page watches completions, including while the tab is hidden or showing another route. */
 function startSessionWatch(): void {
@@ -1666,6 +1667,8 @@ function crumbsFor(route: Route): Crumb[] {
 }
 
 function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
+  // 整页重绘会把 dock 里的待办输入框整个换掉：先记下焦点与光标，画完再放回去。
+  const focus = captureDockFocus();
   app.replaceChildren(
     renderTopbar(crumbs),
     el("div", { className: "shell" }, [
@@ -1673,6 +1676,32 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
       el("div", { className: "shell-main" }, [content]),
     ]),
   );
+  restoreDockFocus(focus);
+}
+
+/** dock 里正在编辑的输入框（目前只有待办）：整页重建后要还原焦点，否则打字被打断。 */
+interface DockFocus {
+  value: string;
+  start: number | null;
+  end: number | null;
+}
+
+function captureDockFocus(): DockFocus | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement)) return null;
+  if (!active.classList.contains("todo-input")) return null;
+  return { value: active.value, start: active.selectionStart, end: active.selectionEnd };
+}
+
+function restoreDockFocus(saved: DockFocus | null): void {
+  if (!saved) return;
+  const input = document.querySelector<HTMLInputElement>(".dock-todos .todo-input");
+  if (!input || input.disabled) return;
+  input.value = saved.value;
+  todoDraft.title = saved.value;
+  // preventScroll：重绘发生在输入框上方时别把页面拉过去。
+  input.focus({ preventScroll: true });
+  if (saved.start !== null && saved.end !== null) input.setSelectionRange(saved.start, saved.end);
 }
 
 const DOCK_TAB_KEY = "ab.dockTab";
@@ -2660,7 +2689,34 @@ async function refreshSnapshot(token: number): Promise<void> {
  * 列表数据变了就重绘。新建托管会话的表单是就地展开的，整页重绘会清掉正在输入的标题，
  * 所以表单打开期间先记下来，等它从页面上消失后再补画一次。
  */
+/**
+ * dock 里正在编辑时把整页重绘推迟到失焦之后。列表轮询每 5 秒一次，
+ * 直接 renderRoute() 会把待办输入框和光标一起换掉，看起来就是「输入没完就被刷新」。
+ * 返回 true 表示这次先不画。
+ */
+function deferForDockFocus(): boolean {
+  if (!captureDockFocus()) return false;
+  if (dockRenderDeferred) return true;
+  dockRenderDeferred = true;
+  document.activeElement?.addEventListener(
+    "blur",
+    () => {
+      if (!dockRenderDeferred) return;
+      dockRenderDeferred = false;
+      // 失焦后立刻重绘可能赶不上用户点回输入框，稍等一下再确认。
+      window.setTimeout(() => {
+        if (captureDockFocus()) return;
+        void renderRoute();
+      }, 300);
+    },
+    { once: true },
+  );
+  return true;
+}
+
 function repaintList(): void {
+  // 待办输入框正在打字：先别整页重绘，等失焦了再补一次。
+  if (deferForDockFocus()) return;
   const host = document.querySelector(".hosted-create-host");
   if (!host || host.childElementCount === 0) {
     void renderRoute();
