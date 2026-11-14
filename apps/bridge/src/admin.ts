@@ -10,6 +10,71 @@ import { isDevtoolsCapability } from "./devtools.js";
 
 export const ADMIN_HOST = "127.0.0.1";
 export const DEFAULT_ADMIN_PORT = 47825;
+/** preview 实例的默认端口：与生产错开，两份 Bridge 可以同时运行。 */
+export const PREVIEW_ADMIN_PORT = 47826;
+/** 每个状态目录各自保存管理端口，preview 与生产实例才能同时运行。 */
+export const ADMIN_PORT_FILE = "admin-port";
+
+function validPort(value: number): number | null {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535 ? value : null;
+}
+
+/** 中继地址或 AGENT_BRIDGE_ENV 指向 preview 时用 preview 默认端口。 */
+export function isPreviewDeployment(relayUrl?: string | null): boolean {
+  const env = process.env["AGENT_BRIDGE_ENV"]?.trim().toLowerCase();
+  if (env === "preview" || env === "dev" || env === "development") return true;
+  if (env === "production" || env === "prod") return false;
+  if (!relayUrl) return false;
+  let host = relayUrl;
+  try {
+    host = new URL(relayUrl).hostname;
+  } catch {
+    // 不是完整 URL 时按原字符串判断
+  }
+  return /preview|staging/i.test(host);
+}
+
+/** `${dir}/admin-port` 里的端口；文件缺失或内容不合法时返回 null。 */
+export function readAdminPortFile(dir: string): number | null {
+  try {
+    const raw = readFileSync(join(dir, ADMIN_PORT_FILE), "utf8").trim();
+    return raw === "" ? null : validPort(Number(raw));
+  } catch {
+    return null;
+  }
+}
+
+/** 写入管理端口文件；菜单栏和 CLI 共用这一份。 */
+export function writeAdminPortFile(dir: string, port: number): void {
+  const value = validPort(port);
+  if (value === null) throw new Error(`端口不合法：${port}（1–65535）`);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, ADMIN_PORT_FILE);
+  writeFileSync(path, `${value}\n`, { mode: 0o600 });
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    // best effort
+  }
+}
+
+/**
+ * 端口优先级：`AGENT_BRIDGE_ADMIN_PORT` > `admin-port` 文件 > 旧版 meta >
+ * 按部署环境取默认（preview 47826、生产 47825）。
+ * 环境变量支持临时覆盖；文件让 preview/生产各用各的端口。
+ */
+export function resolveAdminPort(
+  dir: string,
+  options: { relayUrl?: string | null; legacyMeta?: string | null } = {},
+): number {
+  const fromEnv = validPort(Number(process.env["AGENT_BRIDGE_ADMIN_PORT"]));
+  if (fromEnv !== null) return fromEnv;
+  const fromFile = readAdminPortFile(dir);
+  if (fromFile !== null) return fromFile;
+  const fromMeta = validPort(Number(options.legacyMeta));
+  if (fromMeta !== null) return fromMeta;
+  return isPreviewDeployment(options.relayUrl) ? PREVIEW_ADMIN_PORT : DEFAULT_ADMIN_PORT;
+}
 
 export interface AdminDevice {
   deviceId: string;
@@ -19,6 +84,8 @@ export interface AdminDevice {
   revokedAt: number | null;
   lastSeenAt: number | null;
   online: boolean;
+  /** 最近操作日志，最新的在最前面。 */
+  log: string[];
 }
 
 export interface AdminConnection {
@@ -34,6 +101,29 @@ export interface AdminPairing {
   /** Null until the browser's handshake finishes. */
   code: string | null;
   since: number;
+}
+
+/** 最近收到的用户输入，菜单栏的日志页和气泡用。 */
+export interface AdminMessage {
+  at: number;
+  deviceId: string;
+  deviceName: string;
+  sessionId: string;
+  /** 会话标题。 */
+  title?: string;
+  /** 工程目录。 */
+  project?: string;
+  /** 处理这条消息的 agent：claude-c、hosted、codex 等。 */
+  agent?: string;
+  /** 消息正文；超过上限时截断。 */
+  text: string;
+}
+
+/** 设置界面要看的托管配置，对应状态目录里的 hosted.json。 */
+export interface AdminHostedConfig {
+  allowBypassPermissions: boolean;
+  dirs: string[];
+  idleTimeoutMs: number;
 }
 
 export interface AdminSnapshot {
@@ -56,12 +146,20 @@ export interface AdminActions {
   snapshot(): Promise<AdminSnapshot>;
   disconnectDevice(deviceId: string): Promise<{ closed: number }>;
   revokeDevice(deviceId: string): Promise<{ closed: number }>;
+  disconnectAll(): Promise<{ closed: number }>;
+  revokeAll(): Promise<{ revoked: number; closed: number; failed: string[] }>;
   createInvite(ttlSeconds: number): Promise<{ url: string; expiresAt: number }>;
   setDevtools(
     capability: DevtoolsCapabilityName,
     enabled: boolean,
     ttlSeconds: number | null,
   ): Promise<DevtoolsStatus>;
+  /** 比 `since` 新的用户输入消息，最旧的在前；`since` 为 0 时给最近一批。 */
+  recentMessages(since: number): AdminMessage[];
+  /** 删除已作废设备的记录：中继那边也要删，否则菜单栏还会把它们列出来。 */
+  purgeRevokedDevices(): Promise<{ purged: number; failed: string[] }>;
+  hostedConfig(): AdminHostedConfig;
+  setHostedConfig(patch: { allowBypassPermissions?: boolean }): AdminHostedConfig;
 }
 
 export interface AdminServerOptions {
@@ -76,7 +174,15 @@ export function ensureAdminToken(dir: string): string {
   const path = join(dir, "admin-token");
   try {
     const existing = readFileSync(path, "utf8").trim();
-    if (existing) return existing;
+    if (existing) {
+      // 老版本可能写出 0644，读到就顺手收紧。
+      try {
+        chmodSync(path, 0o600);
+      } catch {
+        // best effort
+      }
+      return existing;
+    }
   } catch {
     // create below
   }
@@ -173,6 +279,36 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           const enabled = body["enabled"] === true;
           const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : null;
           send(response, 200, await actions.setDevtools(capability, enabled, ttl));
+          return;
+        }
+        if (path === "/messages" && request.method === "GET") {
+          const since = Number(url.searchParams.get("since") ?? "0");
+          send(response, 200, { messages: actions.recentMessages(Number.isFinite(since) ? since : 0) });
+          return;
+        }
+        if (path === "/hosted" && request.method === "GET") {
+          send(response, 200, actions.hostedConfig());
+          return;
+        }
+        if (path === "/hosted" && request.method === "POST") {
+          const body = await readBody(request);
+          const patch: { allowBypassPermissions?: boolean } = {};
+          if (typeof body["allowBypassPermissions"] === "boolean") {
+            patch.allowBypassPermissions = body["allowBypassPermissions"];
+          }
+          send(response, 200, actions.setHostedConfig(patch));
+          return;
+        }
+        if (path === "/devices/purge-revoked" && request.method === "POST") {
+          send(response, 200, await actions.purgeRevokedDevices());
+          return;
+        }
+        if (path === "/devices/disconnect-all" && request.method === "POST") {
+          send(response, 200, await actions.disconnectAll());
+          return;
+        }
+        if (path === "/devices/revoke-all" && request.method === "POST") {
+          send(response, 200, await actions.revokeAll());
           return;
         }
         const action = /^\/devices\/([A-Za-z0-9_-]{8,64})\/(disconnect|revoke)$/.exec(path);

@@ -1,9 +1,8 @@
-import { execFile, execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { promisify } from "node:util";
 import type {
   AppInfo,
   Completeness,
@@ -58,11 +57,7 @@ const SILENT_STEPS = new Set([
   "CORTEX_STEP_TYPE_SEND_COMMAND_INPUT",
 ]);
 
-const execFileAsync = promisify(execFile) as (
-  file: string,
-  args: string[],
-  options: { encoding: "utf8"; timeout: number; maxBuffer: number },
-) => Promise<{ stdout: string; stderr: string }>;
+const MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 interface ProtoField {
   wire: number;
@@ -611,27 +606,70 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
   }
 
   private call(endpoint: Endpoint, method: string, body: unknown, timeoutSec: number): Promise<string> {
-    return execFileAsync(
-      CURL_BIN,
-      curlArgs(endpoint, method, JSON.stringify(body), timeoutSec, csrfConfig(endpoint.token)),
-      { encoding: "utf8", timeout: (timeoutSec + 2) * 1000, maxBuffer: 64 * 1024 * 1024 },
-    ).then(
-      (result) => result.stdout,
-      (cause: unknown) => {
+    const payload = JSON.stringify(body);
+    // 请求体走 stdin：既不出现在 argv 里，也不依赖 execFile 那套用不了的 input 选项。
+    return new Promise((resolve, reject) => {
+      const fail = (cause: unknown): void => {
         const message = (cause instanceof Error ? cause.message : String(cause)).replaceAll(
           endpoint.token,
           "***",
         );
-        throw new RpcError("adapter_unavailable", `无法调用 Antigravity 桌面版接口：${message}`);
-      },
-    );
+        reject(new RpcError("adapter_unavailable", `无法调用 Antigravity 桌面版接口：${message}`));
+      };
+
+      const child = spawn(CURL_BIN, curlArgs(endpoint, method, timeoutSec, csrfConfig(endpoint.token)), {
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let stderr = "";
+      let settled = false;
+      let timer: NodeJS.Timeout | undefined;
+
+      const finish = (error: Error | null, stdout?: string): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (error) fail(error);
+        else resolve(stdout ?? "");
+      };
+
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        finish(new Error(`请求超时（${timeoutSec} 秒）`));
+      }, timeoutSec * 1000);
+      timer.unref?.();
+
+      child.stdout?.on("data", (chunk: Buffer) => {
+        size += chunk.length;
+        if (size > MAX_RESPONSE_BYTES) {
+          child.kill("SIGKILL");
+          finish(new Error("响应超过 64MB 上限"));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      child.stderr?.on("data", (chunk: Buffer) => {
+        if (stderr.length < 4096) stderr += chunk.toString("utf8");
+      });
+      child.on("error", (error) => finish(error));
+      child.on("close", (code, signal) => {
+        if (code !== 0) {
+          finish(new Error(stderr.trim() || signal || `curl 退出码 ${code}`));
+          return;
+        }
+        finish(null, Buffer.concat(chunks).toString("utf8"));
+      });
+      // curl 提前退出时写 stdin 可能 EPIPE；没有监听会变成未捕获异常，直接带崩 Bridge。
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(payload);
+    });
   }
 }
 
 function curlArgs(
   endpoint: Endpoint,
   method: string,
-  body: string,
   timeoutSec: number,
   configFile: string,
 ): string[] {
@@ -651,8 +689,8 @@ function curlArgs(
     "Content-Type: application/json",
     "-H",
     "Connect-Protocol-Version: 1",
-    "-d",
-    body,
+    "--data-binary",
+    "@-",
   ];
 }
 
@@ -721,11 +759,15 @@ function probe(port: number, token: string): { ok: boolean; current: Set<string>
       curlArgs(
         { pid: 0, port, token },
         "GetAllCascadeTrajectories",
-        "{}",
         PROBE_TIMEOUT_SEC,
         csrfConfig(token),
       ),
-      { encoding: "utf8", timeout: (PROBE_TIMEOUT_SEC + 1) * 1000, maxBuffer: 8 * 1024 * 1024 },
+      {
+        encoding: "utf8",
+        timeout: (PROBE_TIMEOUT_SEC + 1) * 1000,
+        maxBuffer: 8 * 1024 * 1024,
+        input: "{}",
+      },
     );
     const parsed: unknown = JSON.parse(output);
     if (!isRecord(parsed) || !isRecord(parsed["trajectorySummaries"])) return { ok: false, current };
@@ -800,11 +842,15 @@ function readLiveSummaries(endpoint: Endpoint, current: Set<string>): Map<string
       curlArgs(
         endpoint,
         "GetAllCascadeTrajectories",
-        "{}",
         PROBE_TIMEOUT_SEC + 1,
         csrfConfig(endpoint.token),
       ),
-      { encoding: "utf8", timeout: (PROBE_TIMEOUT_SEC + 2) * 1000, maxBuffer: 16 * 1024 * 1024 },
+      {
+        encoding: "utf8",
+        timeout: (PROBE_TIMEOUT_SEC + 2) * 1000,
+        maxBuffer: 16 * 1024 * 1024,
+        input: "{}",
+      },
     );
   } catch {
     return map;

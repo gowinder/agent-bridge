@@ -1,5 +1,15 @@
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  closeSync,
+  createReadStream,
+  existsSync,
+  fstatSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { createZstdDecompress, zstdDecompressSync } from "node:zlib";
@@ -26,8 +36,16 @@ const MAX_RAIL_TASKS = 20;
 const HEAD_BYTES = 256 * 1024;
 const HEAD_CONCURRENCY = 32;
 const SEND_WAIT_MS = 8_000;
+const CREATE_WAIT_MS = 30_000;
+const CREATE_INDEX_WAIT_MS = 6_000;
 const MAX_STDERR_CHARS = 4_000;
 const TITLE_CHARS = 120;
+/** 判断是否还在跑一轮时，从日志尾部读取的字节窗口。 */
+const TAIL_BYTES = 128 * 1024;
+const TAIL_FALLBACK_BYTES = 1024 * 1024;
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+/** 超过这个时间没写入的会话不再做尾部检查，避免每次列表都对全量历史做 IO。 */
+const BUSY_WINDOW_MS = 30 * 60_000;
 
 interface SessionHeader {
   type?: string;
@@ -287,6 +305,85 @@ function parseLog(path: string, sessionId: string): ParsedLog {
   return { messages, firstTime, lastTime, lastTurnReason, busy: openTurn, texts };
 }
 
+/**
+ * 从日志尾部读若干字节，判断最后一轮是否已结束：最后一条 turn 级事件是 turn/start 就是还在跑。
+ * 返回 true/false 表示找到了 turn 事件；窗口内没有 turn 事件时返回 null。
+ */
+function tailTurnState(path: string, window: number): boolean | null {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, "r");
+    const size = fstatSync(fd).size;
+    const length = Math.min(window, size);
+    if (length <= 0) return null;
+    const buffer = Buffer.alloc(length);
+    let read = 0;
+    while (read < length) {
+      const count = readSync(fd, buffer, read, length - read, size - length + read);
+      if (count <= 0) break;
+      read += count;
+    }
+    const tail = buffer.subarray(0, read);
+    const stateOf = (chunk: Buffer): boolean | null => {
+      const raw = zstdDecompressSync(chunk);
+      let state: boolean | null = null;
+      for (const line of raw.toString("utf8").split("\n")) {
+        if (!line) continue;
+        let event: JsonEvent;
+        try {
+          event = JSON.parse(line) as JsonEvent;
+        } catch {
+          continue;
+        }
+        if (event.type === "turn/start") state = true;
+        else if (event.type === "turn/end") state = false;
+      }
+      return state;
+    };
+    // 日志是每帧一个事件拼接的 zstd，窗口起点可能落在一帧中间，从第一个 magic 开始解。
+    let from = tail.indexOf(ZSTD_MAGIC);
+    while (from !== -1) {
+      try {
+        const state = stateOf(tail.subarray(from));
+        if (state !== null) return state;
+        break;
+      } catch {
+        // 日志正在写时尾部可能停在半帧里，先丢掉最后一个 magic 之后的部分再试。
+        const last = tail.lastIndexOf(ZSTD_MAGIC);
+        if (last > from) {
+          try {
+            const state = stateOf(tail.subarray(from, last));
+            if (state !== null) return state;
+            break;
+          } catch {
+            // 丢掉尾帧后仍然解不开，继续换起点。
+          }
+        }
+        from = tail.indexOf(ZSTD_MAGIC, from + 1);
+      }
+    }
+    return null;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // 关闭失败不影响判断结果。
+      }
+    }
+  }
+}
+
+function tailOpenTurn(path: string): boolean {
+  try {
+    const state = tailTurnState(path, TAIL_BYTES);
+    if (state !== null) return state;
+    return tailTurnState(path, TAIL_FALLBACK_BYTES) ?? false;
+  } catch {
+    return false;
+  }
+}
+
 function findBinary(): string | null {
   const candidates = [join(homedir(), ".local", "bin", "dsh"), "/opt/homebrew/bin/dsh", "/usr/local/bin/dsh"];
   for (const path of candidates) {
@@ -303,6 +400,7 @@ export class DshAdapter implements SessionAdapter {
   readonly key = "dsh";
   private headCache = new Map<string, { stamp: string; head: HeadInfo | null }>();
   private logCache = new Map<string, { stamp: string; parsed: ParsedLog }>();
+  private busyCache = new Map<string, { stamp: string; busy: boolean }>();
   private sendQueues = new Map<string, Promise<unknown>>();
   private binaryCache: { at: number; path: string | null } | null = null;
 
@@ -322,8 +420,11 @@ export class DshAdapter implements SessionAdapter {
         send: available && binary !== null,
         sendDetail:
           "发送会用 `dsh --profile headless --session-id <id>` 续写该会话；会话由桌面版正在运行时会被拒绝，且要求会话的预设与工作目录在该 profile 中可复现。",
-        create: false,
-        createDetail: "尚未接入 dsh 的新建会话；先在桌面版里新建会话，再从这里发送。",
+        create: available && binary !== null,
+        createDetail:
+          available && binary !== null
+            ? "新建会话会在该工程目录里启动一次 `dsh --profile headless`，第一条消息随创建一起发出。"
+            : undefined,
         reason: available ? undefined : "未找到 dsh 会话目录（~/.dsh/sessions）",
       },
     };
@@ -419,6 +520,41 @@ export class DshAdapter implements SessionAdapter {
     return { environment, servers: [], tasks };
   }
 
+  async create(params: { projectId: string; text: string }): Promise<SessionSummary> {
+    const binary = this.binary();
+    if (!binary) throw new RpcError("adapter_unavailable", "未找到 dsh 可执行文件");
+    const cwd = this.cwdOf(params.projectId);
+    if (!cwd) throw new RpcError("invalid_params", "这个工程没有目录，无法新建 dsh 会话");
+    if (!existsSync(cwd)) throw new RpcError("invalid_params", `目录不存在：${cwd}`);
+    const text = params.text.trim();
+    if (!text) throw new RpcError("invalid_params", "第一条消息不能为空");
+    // 只允许在已有会话的工程目录里新建，避免网页端指定任意目录启动 dsh。
+    const entries = await this.index();
+    if (!entries.some((item) => item.cwd === cwd)) throw new RpcError("not_found", "未知工程");
+    const id = await this.spawnSession(binary, cwd, text);
+    const entry = await this.waitForEntry(id, CREATE_INDEX_WAIT_MS);
+    if (entry) {
+      const summary = this.summaryOf(entry);
+      // 会话文件刚落盘时还没有用户消息，先用第一条消息当标题，列表刷新后会用真实标题覆盖。
+      if (!entry.title && !entry.label) summary.title = (collapse(text) || "未命名会话").slice(0, TITLE_CHARS);
+      return summary;
+    }
+    // 会话文件还没落盘：先按已知信息给出一份，列表下次轮询会补上真实标题。
+    const now = Date.now();
+    return {
+      sessionId: `${this.key}:${id}`,
+      appId: this.key,
+      projectId: this.projectIdFor(cwd),
+      kind: "dsh",
+      title: (collapse(text) || "新会话").slice(0, TITLE_CHARS),
+      createdAt: now,
+      updatedAt: now,
+      archived: false,
+      live: false,
+      canSend: true,
+    };
+  }
+
   async send(sessionId: string, text: string): Promise<MessageSendResult> {
     const previous = this.sendQueues.get(sessionId) ?? Promise.resolve();
     const run = async (): Promise<MessageSendResult> => {
@@ -454,6 +590,84 @@ export class DshAdapter implements SessionAdapter {
     if (parsed.lastTurnReason === "interrupted") result.interrupted = true;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
+  }
+
+  /** `headless --json` 的第一行事件带着新会话的 id；拿到就把管道放开，让这一轮在后台跑完。 */
+  private spawnSession(binary: string, cwd: string, text: string): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const child = spawn(binary, ["--profile", "headless", "--json", "-"], {
+        cwd,
+        env: process.env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      // dsh 起不来时 stdin 会 EPIPE，别让未处理的 error 把 Bridge 带崩。
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(`${text}\n`);
+      let buffer = "";
+      let stderr = "";
+      let settled = false;
+      let timer: NodeJS.Timeout | null = null;
+      const settle = (id: string | null, message?: string): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (id) {
+          child.stdout?.resume();
+          child.stderr?.resume();
+          child.unref();
+          resolve(id);
+          return;
+        }
+        child.kill();
+        reject(new RpcError("adapter_unavailable", message ?? "dsh 没有创建会话"));
+      };
+      const finish = (message?: string): void => {
+        const detail = stderr.trim().split("\n").slice(-4).join("\n");
+        settle(null, `${message ?? "dsh 没有创建会话"}${detail ? `：${detail}` : ""}`);
+      };
+      timer = setTimeout(() => settle(null, "dsh 没有在 30 秒内创建会话"), CREATE_WAIT_MS);
+      child.stderr?.setEncoding("utf8");
+      child.stderr?.on("data", (chunk: string) => {
+        if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
+      });
+      child.stdout?.setEncoding("utf8");
+      child.stdout?.on("data", (chunk: string) => {
+        if (settled) return;
+        buffer += chunk;
+        let end = buffer.indexOf("\n");
+        while (end !== -1) {
+          const line = buffer.slice(0, end).trim();
+          buffer = buffer.slice(end + 1);
+          end = buffer.indexOf("\n");
+          if (!line) continue;
+          let event: unknown;
+          try {
+            event = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (!event || typeof event !== "object") continue;
+          const { type, sessionId } = event as { type?: unknown; sessionId?: unknown };
+          if (type !== "session") continue;
+          if (typeof sessionId === "string" && sessionId) settle(sessionId);
+          else finish("dsh 返回的会话事件缺少 id");
+          return;
+        }
+      });
+      child.on("error", (error) => finish(`无法启动 dsh（${error.message}）`));
+      child.on("exit", (code) => finish(`dsh 退出码 ${String(code)}`));
+    });
+  }
+
+  /** 会话文件由 dsh 自己写，刚建好时要等它落盘才能读到标题与更新时间。 */
+  private async waitForEntry(id: string, budgetMs: number): Promise<Entry | null> {
+    const deadline = Date.now() + budgetMs;
+    for (;;) {
+      const entry = (await this.index()).find((item) => item.id === id);
+      if (entry) return entry;
+      if (Date.now() >= deadline) return null;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
   }
 
   private spawnTurn(binary: string, entry: Entry, text: string): Promise<MessageSendResult> {
@@ -526,11 +740,33 @@ export class DshAdapter implements SessionAdapter {
       live: false,
       canSend: binary !== null,
       sendBlockedReason: binary ? undefined : "未找到 dsh 可执行文件",
+      ...(this.recentBusy(entry) ? { busy: true } : {}),
     };
+  }
+
+  /** 只有近期还在写入的会话才读日志尾部，判断最后一轮是否没结束。 */
+  private recentBusy(entry: Entry): boolean {
+    const cached = this.busyCache.get(entry.path);
+    if (cached && cached.stamp === entry.stamp) return cached.busy;
+    let busy = false;
+    if (entry.updatedAt && Date.now() - entry.updatedAt <= BUSY_WINDOW_MS) {
+      busy = tailOpenTurn(entry.path);
+    }
+    if (this.busyCache.size > 4000) this.busyCache.clear();
+    this.busyCache.set(entry.path, { stamp: entry.stamp, busy });
+    return busy;
   }
 
   private projectIdFor(cwd: string): string {
     return `${this.key}:${cwd || "ungrouped"}`;
+  }
+
+  /** projectId 是 `dsh:<目录>` 拼出来的，新建会话靠它决定在哪个目录启动 dsh。 */
+  private cwdOf(projectId: string): string | null {
+    const prefix = `${this.key}:`;
+    if (!projectId.startsWith(prefix)) return null;
+    const cwd = projectId.slice(prefix.length);
+    return cwd && cwd !== "ungrouped" ? cwd : null;
   }
 
   private bareId(sessionId: string): string {

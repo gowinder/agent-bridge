@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import type { Server } from "node:http";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@craftstead/crypto";
@@ -9,13 +10,22 @@ import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from 
 import { SessionAdapters } from "./adapters/index.js";
 import {
   ADMIN_HOST,
-  DEFAULT_ADMIN_PORT,
   ensureAdminToken,
+  isPreviewDeployment,
+  readAdminPortFile,
+  resolveAdminPort,
   startAdminServer,
+  writeAdminPortFile,
   type AdminActions,
   type AdminDevice,
+  type AdminMessage,
 } from "./admin.js";
 import { Devtools, isDevtoolsCapability } from "./devtools.js";
+import {
+  SESSIOND_ALREADY_RUNNING,
+  startSessiondServer,
+  type SessiondServer,
+} from "./hosted/sessiond/server.js";
 import { SessionNotifier } from "./notify.js";
 import { Pusher } from "./push.js";
 import {
@@ -55,6 +65,7 @@ function usage(): void {
   agent-bridge devices [ttl <manual|1h|24h|7d|30d>]   (默认 30d)
   agent-bridge revoke <deviceId>
   agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]
+  agent-bridge port [<端口>]   (管理接口端口；preview 默认 47826，生产默认 47825)
   agent-bridge status
   agent-bridge info
 
@@ -69,10 +80,19 @@ function flag(args: string[], name: string): string | undefined {
 
 function normalizeUrl(value: string): string {
   const url = new URL(value);
+  // 中继承载设备凭据和消息，必须走加密通道；本地回环保留 http 方便开发。
+  if (url.protocol !== "https:" && !isLoopbackHost(url.hostname)) {
+    throw new Error(`relay 地址必须是 https（本地回环地址除外）：${value}`);
+  }
   url.pathname = url.pathname.replace(/\/+$/, "");
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  const name = hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  return name === "localhost" || name === "127.0.0.1" || name === "::1";
 }
 
 function requireConfig(store: Store): {
@@ -263,8 +283,10 @@ async function setDevtoolsOnBridge(
     return null;
   }
   if (!token) return null;
-  const configured = process.env["AGENT_BRIDGE_ADMIN_PORT"] ?? store.meta("admin_port");
-  const port = Number(configured) || DEFAULT_ADMIN_PORT;
+  const port = resolveAdminPort(store.dir, {
+    relayUrl: store.meta("relay_url"),
+    legacyMeta: store.meta("admin_port"),
+  });
   try {
     const response = await fetch(`http://${ADMIN_HOST}:${port}/devtools`, {
       method: "POST",
@@ -294,7 +316,7 @@ async function commandDevtools(args: string[]): Promise<void> {
   try {
     let local: Devtools | null = null;
     const localDevtools = (): Devtools => {
-      local ??= new Devtools(store, new SessionAdapters(), (line) => console.log(line));
+      local ??= new Devtools(store, new SessionAdapters(store), (line) => console.log(line));
       return local;
     };
     const first = args[0];
@@ -323,6 +345,32 @@ async function commandDevtools(args: string[]): Promise<void> {
       throw new Error("用法：agent-bridge devtools [files|terminal] [on|off|status] [--ttl 3600]");
     }
     printDevtools(next ?? localDevtools().status());
+  } finally {
+    store.close();
+  }
+}
+
+/** 查看或设置本状态目录的管理接口端口；文件与菜单栏共用同一份。 */
+async function commandPort(args: string[]): Promise<void> {
+  const store = new Store();
+  try {
+    const relayUrl = store.meta("relay_url");
+    if (args.length === 0) {
+      const port = resolveAdminPort(store.dir, { relayUrl, legacyMeta: store.meta("admin_port") });
+      const source = process.env["AGENT_BRIDGE_ADMIN_PORT"]
+        ? "环境变量 AGENT_BRIDGE_ADMIN_PORT"
+        : readAdminPortFile(store.dir) !== null
+          ? join(store.dir, "admin-port")
+          : isPreviewDeployment(relayUrl)
+            ? "preview 默认值"
+            : "生产默认值";
+      console.log(`${port}（${source}）`);
+      return;
+    }
+    if (args.length > 1) throw new Error("用法：agent-bridge port [<端口>]");
+    const port = Number(args[0]);
+    writeAdminPortFile(store.dir, port);
+    console.log(`已保存 ${port}：${join(store.dir, "admin-port")}；运行中的 Bridge 重启后生效`);
   } finally {
     store.close();
   }
@@ -368,13 +416,25 @@ function log(line: string): void {
   console.log(`[${new Date().toLocaleTimeString()}] ${line}`);
 }
 
+/** 菜单栏里的一天以内只显示时分，跨天的补上日期。 */
+function formatDeviceEvent(at: number, line: string): string {
+  const date = new Date(at);
+  const now = new Date();
+  const time = date.toLocaleTimeString("zh-CN", { hour12: false });
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  return sameDay ? `[${time}] ${line}` : `[${date.getMonth() + 1}-${date.getDate()} ${time}] ${line}`;
+}
+
 async function commandServe(): Promise<void> {
   const store = new Store();
   const config = requireConfig(store);
   const noise: Noise = await loadNoiseNode();
   const api = new RelayApi(config.relayUrl, config.roomId, config.bridgeToken);
   store.clearExpiredInvites();
-  const adapters = new SessionAdapters();
+  const adapters = new SessionAdapters(store);
   const uploads = new UploadStore(store.dir);
   const devtools = new Devtools(store, adapters, log);
   const pusher = new Pusher(store, log);
@@ -408,6 +468,46 @@ async function commandServe(): Promise<void> {
     return closed;
   };
 
+  // 设备过期/撤销平时只在建立通道时检查一次；长期在线的通道要定期复核，否则吊销后仍然能用。
+  const deviceCheckTimer = setInterval(() => {
+    for (const [channel, entry] of [...sessions.entries()]) {
+      if (!entry.deviceId) continue;
+      const device = store.device(entry.deviceId);
+      const reason = !device
+        ? "设备已不存在"
+        : device.revokedAt !== null
+          ? "设备已撤销"
+          : device.expiresAt !== null && device.expiresAt < Date.now()
+            ? "设备已过期"
+            : null;
+      if (!reason) continue;
+      log(`断开设备「${entry.name ?? entry.deviceId}」：${reason}`);
+      entry.session.dispose();
+      if (sessions.get(channel) === entry) sessions.delete(channel);
+    }
+  }, 60_000);
+  deviceCheckTimer.unref();
+
+  /** 菜单栏的每设备操作日志；存在本地库里，Bridge 重启后还在。 */
+  const recordEvent = (deviceId: string, line: string): void => {
+    try {
+      store.recordDeviceEvent(deviceId, line);
+    } catch (error) {
+      // 写日志失败不能连累设备通道本身。
+      log(`操作日志写入失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+  };
+
+  /** 菜单栏的日志页与气泡：最近收到的用户输入，内存里留这么多条。 */
+  const recentMessages: AdminMessage[] = [];
+  const MAX_RECENT_MESSAGES = 200;
+  const recordMessage = (message: AdminMessage): void => {
+    recentMessages.push(message);
+    if (recentMessages.length > MAX_RECENT_MESSAGES) {
+      recentMessages.splice(0, recentMessages.length - MAX_RECENT_MESSAGES);
+    }
+  };
+
   const adminActions: AdminActions = {
     async snapshot() {
       const devtoolsStatus = devtools.status();
@@ -427,6 +527,9 @@ async function commandServe(): Promise<void> {
           revokedAt: device.revokedAt,
           lastSeenAt: device.lastSeenAt,
           online: online.has(device.deviceId),
+          log: store
+            .deviceEvents(device.deviceId)
+            .map((event) => formatDeviceEvent(event.at, event.line)),
         }));
       } catch (cause) {
         error = cause instanceof Error ? cause.message : String(cause);
@@ -454,18 +557,102 @@ async function commandServe(): Promise<void> {
       };
     },
     async disconnectDevice(deviceId: string) {
-      return { closed: dropDevice(deviceId) };
+      const closed = dropDevice(deviceId);
+      if (closed > 0) recordEvent(deviceId, "已从菜单断开连接");
+      return { closed };
     },
     async revokeDevice(deviceId: string) {
       await api.revokeDevice(deviceId);
       store.revokeDevice(deviceId);
+      recordEvent(deviceId, "证书已作废（从菜单）");
       return { closed: dropDevice(deviceId) };
+    },
+    async disconnectAll() {
+      let closed = 0;
+      for (const entry of [...sessions.values()]) {
+        if (entry.deviceId) recordEvent(entry.deviceId, "已断开全部连接（从菜单）");
+        entry.session.dispose();
+        closed += 1;
+      }
+      return { closed };
+    },
+    async revokeAll() {
+      const pending = store.devices().filter((device) => device.revokedAt === null);
+      const failed: string[] = [];
+      let revoked = 0;
+      let closed = 0;
+      for (const device of pending) {
+        try {
+          await api.revokeDevice(device.id);
+          store.revokeDevice(device.id);
+          recordEvent(device.id, "证书已作废（从菜单全部作废）");
+          closed += dropDevice(device.id);
+          revoked += 1;
+        } catch (error) {
+          failed.push(`${device.name}：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      return { revoked, closed, failed };
     },
     async createInvite(ttlSeconds: number) {
       return mintInvite(api, store, config, ttlSeconds);
     },
     async setDevtools(capability: DevtoolsCapabilityName, enabled: boolean, ttlSeconds: number | null) {
       return devtools.setEnabled(capability, enabled, ttlSeconds);
+    },
+    recentMessages(since: number) {
+      // since=0 是初次加载：给最近一批，不要 200 条全倒给菜单栏。
+      return since > 0
+        ? recentMessages.filter((item) => item.at > since)
+        : recentMessages.slice(-50);
+    },
+    async purgeRevokedDevices() {
+      const failed: string[] = [];
+      // 菜单栏列的是中继那份设备清单，所以先以它为准，再补上本地还留着的作废记录。
+      const candidates = new Map<string, string>();
+      try {
+        for (const device of (await api.devices()).devices) {
+          if (device.revokedAt !== null) candidates.set(device.deviceId, device.name);
+        }
+      } catch (error) {
+        failed.push(`读取中继设备列表失败：${error instanceof Error ? error.message : String(error)}`);
+      }
+      for (const device of store.devices()) {
+        if (device.revokedAt !== null) candidates.set(device.id, device.name);
+      }
+      const purged = new Set<string>();
+      for (const [deviceId, name] of candidates) {
+        try {
+          await api.purgeDevice(deviceId);
+          store.purgeDevice(deviceId);
+          purged.add(deviceId);
+        } catch (error) {
+          failed.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      // 中继还没升级到支持彻底删除时，DELETE 照样回 200，实际只是重新标记作废。
+      // 复查一遍清单，把还在的算失败，别在菜单里报一个假的成功数。
+      if (purged.size > 0) {
+        try {
+          const remaining = new Set((await api.devices()).devices.map((device) => device.deviceId));
+          for (const deviceId of [...purged]) {
+            if (!remaining.has(deviceId)) continue;
+            purged.delete(deviceId);
+            failed.push(`${candidates.get(deviceId) ?? deviceId}：中继上仍然存在（中继尚未支持彻底删除）`);
+          }
+        } catch (error) {
+          failed.push(`复查设备列表失败：${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      return { purged: purged.size, failed };
+    },
+    hostedConfig() {
+      return adapters.hostedConfig();
+    },
+    setHostedConfig(patch) {
+      return typeof patch.allowBypassPermissions === "boolean"
+        ? adapters.setHostedAllowBypass(patch.allowBypassPermissions)
+        : adapters.hostedConfig();
     },
   };
 
@@ -496,7 +683,7 @@ async function commandServe(): Promise<void> {
           return;
         }
         log(`收到配对连接，邀请 ${invite.id}`);
-        sessions.set(message.channel, {
+        const entry = {
           channel: message.channel,
           session: new PairingSession({
             noise,
@@ -510,6 +697,7 @@ async function commandServe(): Promise<void> {
             api,
             store,
             hostName: config.hostName,
+            version: VERSION,
             // 默认 30 天：长期有效的设备凭据一旦丢失就再也不会自己失效，需要用户显式改回 manual。
             deviceTtlSeconds: DEVICE_TTL_OPTIONS[store.meta("device_ttl") ?? "30d"] ?? null,
             onConfirmCode: (code) => {
@@ -517,9 +705,17 @@ async function commandServe(): Promise<void> {
               if (entry) entry.code = code;
             },
           }),
-          kind: "pair",
+          kind: "pair" as const,
           since: Date.now(),
-        });
+        };
+        sessions.set(message.channel, entry);
+        // 邀请过期后这条配对通道就没用了；中继在 Bridge 断线时发不出 channel.close，
+        // 不主动清理的话它会一直挂在 sessions 里，菜单栏窗口就会显示早已作废的确认码。
+        const timer = setTimeout(() => {
+          if (sessions.get(message.channel) !== entry) return;
+          entry.session.dispose();
+        }, Math.max(0, invite.expiresAt - Date.now()));
+        timer.unref?.();
         return;
       }
 
@@ -548,16 +744,22 @@ async function commandServe(): Promise<void> {
           roomId: config.roomId,
           channel: message.channel,
           send,
-          log,
+          log: (line) => {
+            log(line);
+            recordEvent(device.id, line);
+          },
+          activity: (line) => recordEvent(device.id, line),
           close,
           device,
           api,
           store,
           hostName: config.hostName,
+          version: VERSION,
           adapters,
           uploads,
           devtools,
           pusher,
+          onMessage: recordMessage,
         }),
         kind: "device",
         deviceId: device.id,
@@ -566,7 +768,10 @@ async function commandServe(): Promise<void> {
       });
     },
     onChannelClose(channel) {
-      sessions.get(channel)?.session.dispose();
+      const entry = sessions.get(channel);
+      if (!entry) return;
+      if (entry.deviceId) recordEvent(entry.deviceId, "连接断开");
+      entry.session.dispose();
       sessions.delete(channel);
     },
     onPeerState() {
@@ -577,14 +782,23 @@ async function commandServe(): Promise<void> {
     },
   };
 
+  // 管理接口的 HTTP server 会一直占着事件循环，退出时必须主动关掉，否则 SIGTERM 之后
+  // 进程会一直挂着（数据库已关，接口只剩 "database is not open"）。
+  let adminServer: Server | null = null;
   const shutdown = (): void => {
     if (stopping) return;
     stopping = true;
     log("正在退出…");
+    clearInterval(deviceCheckTimer);
     notifier.stop();
     for (const entry of sessions.values()) entry.session.dispose();
     sessions.clear();
     relay?.close(1000, "shutdown");
+    adminServer?.close();
+    adminServer?.closeAllConnections();
+    // 事件循环里还剩中继 WebSocket 的关闭握手、适配器持有的 UDS、子进程计时器等句柄，
+    // 关不干净时进程会一直停在“正在退出…”。给收尾一点时间后强制退出。
+    setTimeout(() => process.exit(0), 500).unref();
   };
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
@@ -596,23 +810,21 @@ async function commandServe(): Promise<void> {
     log(`发送不可用（${app.name}）：${app.capabilities.sendDetail ?? app.capabilities.reason ?? "原因未知"}`);
   }
 
-  const configuredPort = process.env["AGENT_BRIDGE_ADMIN_PORT"] ?? store.meta("admin_port");
-  const adminPort = configuredPort ? Number(configuredPort) : DEFAULT_ADMIN_PORT;
-  if (!Number.isInteger(adminPort) || adminPort < 1 || adminPort > 65_535) {
-    log(`本地管理接口端口无效：${configuredPort}，已跳过`);
-  } else {
-    try {
-      const server = await startAdminServer({
-        port: adminPort,
-        token: ensureAdminToken(store.dir),
-        actions: adminActions,
-        log,
-      });
-      log(`本地管理接口 http://${ADMIN_HOST}:${adminPort}（令牌 ${join(store.dir, "admin-token")}）`);
-      process.on("exit", () => server.close());
-    } catch (error) {
-      log(`本地管理接口启动失败：${error instanceof Error ? error.message : String(error)}`);
-    }
+  const adminPort = resolveAdminPort(store.dir, {
+    relayUrl: config.relayUrl,
+    legacyMeta: store.meta("admin_port"),
+  });
+  try {
+    adminServer = await startAdminServer({
+      port: adminPort,
+      token: ensureAdminToken(store.dir),
+      actions: adminActions,
+      log,
+    });
+    log(`本地管理接口 http://${ADMIN_HOST}:${adminPort}（令牌 ${join(store.dir, "admin-token")}）`);
+    process.on("exit", () => adminServer?.close());
+  } catch (error) {
+    log(`本地管理接口启动失败：${error instanceof Error ? error.message : String(error)}`);
   }
 
   let backoff = 1_000;
@@ -647,6 +859,34 @@ async function commandServe(): Promise<void> {
   store.close();
 }
 
+/**
+ * 隐藏子命令：常驻的 sessiond，持有托管会话子进程的 stdio。
+ * Bridge 重启只断开这条 UDS 连接，正在跑的那一轮不受影响。
+ */
+async function commandServeSessiond(): Promise<void> {
+  let server: SessiondServer;
+  try {
+    server = await startSessiondServer({
+      stateDir: defaultStateDir(),
+      log: (line) => console.log(line),
+    });
+  } catch (error) {
+    // 已有实例在跑时安静退出，避免拉起第二份守护进程。
+    if (error instanceof Error && error.message === SESSIOND_ALREADY_RUNNING) return;
+    throw error;
+  }
+  console.log(`sessiond 监听 ${server.socketPath}`);
+  const shutdown = (): void => {
+    // close 里先给所有子进程发 SIGTERM，再留一点收尾时间退出。
+    void server.close().finally(() => process.exit(0));
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  await new Promise<void>(() => {
+    // 常驻，直到信号触发。
+  });
+}
+
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
@@ -659,6 +899,9 @@ async function main(): Promise<void> {
     case "serve":
       await commandServe();
       return;
+    case "serve-sessiond":
+      await commandServeSessiond();
+      return;
     case "devices":
       await commandDevices(args);
       return;
@@ -667,6 +910,9 @@ async function main(): Promise<void> {
       return;
     case "devtools":
       await commandDevtools(args);
+      return;
+    case "port":
+      await commandPort(args);
       return;
     case "status":
       await commandStatus();

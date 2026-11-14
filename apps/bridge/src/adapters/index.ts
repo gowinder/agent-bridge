@@ -3,10 +3,19 @@ import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
+  HostedCreateParams,
+  HostedDirsResult,
+  HostedInterruptResult,
+  HostedOptionsResult,
+  HostedPermissionMode,
+  HostedResumeResult,
+  HostedStopResult,
   MessageListResult,
   MessageSendResult,
   ProjectInfo,
   ProjectListResult,
+  SessionCreateParams,
+  SessionCreateResult,
   SessionGetResult,
   SessionListParams,
   SessionListResult,
@@ -17,11 +26,17 @@ import type {
   TransferCommitResult,
   TransferPrepareResult,
 } from "@craftstead/protocol";
+import { HostedSessionManager, MAX_TITLE_CHARS } from "../hosted/manager.js";
+import type { Store } from "../store.js";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
+import { ClaudeCodeCliAdapter } from "./claude-code-cli.js";
 import { CodexAdapter } from "./codex.js";
+import { CodexCliAdapter } from "./codex-cli.js";
 import { DshAdapter } from "./dsh.js";
+import { HostedAdapter } from "./hosted.js";
+import { PiAdapter } from "./pi.js";
 import { RpcError, type SessionAdapter } from "./types.js";
 
 const DEFAULT_SESSION_LIMIT = 200;
@@ -38,14 +53,104 @@ interface PreparedTransfer {
 }
 
 export class SessionAdapters {
-  private readonly adapters: SessionAdapter[] = [
-    new ClaudeCodeAdapter(),
-    new CodexAdapter(),
-    new AntigravityAdapter(),
-    new AntigravityDesktopAdapter(),
-    new DshAdapter(),
-  ];
+  private readonly hostedManager = new HostedSessionManager({ log: (line) => console.log(line) });
+  private readonly store: Store;
+  private readonly adapters: SessionAdapter[];
   private readonly transfers = new Map<string, PreparedTransfer>();
+
+  constructor(store: Store) {
+    this.store = store;
+    this.adapters = [
+      new ClaudeCodeAdapter(),
+      new ClaudeCodeCliAdapter(),
+      new CodexAdapter(),
+      new CodexCliAdapter(),
+      new AntigravityAdapter(),
+      new AntigravityDesktopAdapter(),
+      new DshAdapter(),
+      new PiAdapter(),
+      new HostedAdapter(this.hostedManager),
+    ];
+  }
+
+  /** 桌面应用的新建会话：由 Bridge 代它起一次无界面运行，第一条消息随创建发出。 */
+  async createSession(params: SessionCreateParams): Promise<SessionCreateResult> {
+    const adapter = this.adapters.find((item) => item.key === params.appId);
+    if (!adapter) throw new RpcError("invalid_params", `未知客户端：${params.appId}`);
+    if (!adapter.create || !adapter.app().capabilities.create) {
+      throw new RpcError("unsupported", "这个客户端还不支持从网页新建会话");
+    }
+    const text = params.text.trim();
+    if (!text) throw new RpcError("invalid_params", "第一条消息不能为空");
+    return { session: await adapter.create({ projectId: params.projectId, text }) };
+  }
+
+  hostedDirs(): HostedDirsResult {
+    return this.hostedManager.configForClient();
+  }
+
+  hostedModes(): HostedPermissionMode[] {
+    return this.hostedManager.remotePermissionModes();
+  }
+
+  /** 设置界面看到的托管配置，对应状态目录里的 hosted.json。 */
+  hostedConfig(): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
+    const info = this.hostedManager.configForClient();
+    return {
+      allowBypassPermissions: info.allowBypassPermissions,
+      dirs: info.dirs.map((dir) => dir.path),
+      idleTimeoutMs: info.idleTimeoutMs,
+    };
+  }
+
+  setHostedAllowBypass(enabled: boolean): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
+    const info = this.hostedManager.setAllowBypassPermissions(enabled);
+    return {
+      allowBypassPermissions: info.allowBypassPermissions,
+      dirs: info.dirs.map((dir) => dir.path),
+      idleTimeoutMs: info.idleTimeoutMs,
+    };
+  }
+
+  hostedAddDir(path: string): HostedDirsResult {
+    return this.hostedManager.addDir(path);
+  }
+
+  hostedRemoveDir(path: string): HostedDirsResult {
+    return this.hostedManager.removeDir(path);
+  }
+
+  hostedOptions(): HostedOptionsResult {
+    return this.hostedManager.options();
+  }
+
+  hostedInterrupt(sessionId: string): HostedInterruptResult {
+    return this.hostedManager.interrupt(sessionId);
+  }
+
+  hostedCreate(params: HostedCreateParams): SessionGetResult {
+    return { session: this.hostedManager.create(params) };
+  }
+
+  hostedStop(sessionId: string): Promise<HostedStopResult> {
+    return this.hostedManager.stop(sessionId);
+  }
+
+  async hostedSetModel(sessionId: string, model: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setModel(sessionId, model) };
+  }
+
+  async hostedSetSubagentModel(sessionId: string, model: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
+  }
+
+  async hostedSetCompactionReserveTokens(sessionId: string, tokens: number | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setCompactionReserveTokens(sessionId, tokens) };
+  }
+
+  hostedResume(sessionId: string): HostedResumeResult {
+    return { session: this.hostedManager.resume(sessionId) };
+  }
 
   hostAdapters(): Array<{ id: string; status: "ready" | "unavailable" | "needs_permission"; label: string; detail?: string }> {
     return this.adapters.map((adapter) => {
@@ -96,9 +201,13 @@ export class SessionAdapters {
       if (app.capabilities.enumerate !== "complete") {
         completeness = demote(completeness, app.capabilities.enumerate === "unknown" ? "unknown" : "partial");
       }
-      collected.push(...sessions);
+      collected.push(...sessions.map((session) => this.decorate(session, adapter.key)));
     }
-    collected.sort((a, b) => b.updatedAt - a.updatedAt);
+    // 置顶的排最前，其余按更新时间；两组内部都是新的在前。
+    collected.sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+      return b.updatedAt - a.updatedAt;
+    });
     const result: SessionListResult = {
       sessions: collected.slice(0, limit),
       completeness,
@@ -115,7 +224,54 @@ export class SessionAdapters {
     const adapter = this.adapterFor(sessionId);
     const session = await adapter.session(sessionId);
     if (!session) throw new RpcError("not_found", "未知会话");
-    return { session };
+    return { session: this.decorate(session, adapter.key) };
+  }
+
+  /**
+   * 改显示名。Bridge 托管的会话直接改托管记录；其它来源只保存 Bridge 侧覆盖，
+   * 不动源应用里的标题，返回值同时带上原名。
+   */
+  async rename(sessionId: string, rawTitle: string | null): Promise<SessionGetResult> {
+    const adapter = this.adapterFor(sessionId);
+    const session = await adapter.session(sessionId);
+    if (!session) throw new RpcError("not_found", "未知会话");
+    const title = (rawTitle ?? "").trim().slice(0, MAX_TITLE_CHARS);
+    if (adapter.key === "hosted") {
+      if (!title) throw new RpcError("invalid_params", "标题不能为空");
+      return { session: this.hostedManager.rename(sessionId, title) };
+    }
+    if (!title) this.store.clearSessionTitle(adapter.key, sessionId);
+    else this.store.setSessionTitle(adapter.key, sessionId, title);
+    return { session: this.decorate(session, adapter.key) };
+  }
+
+  /** 置顶只是 Bridge 侧的书签：任何来源的会话都能置顶，不动源应用。 */
+  async pin(sessionId: string, pinned: boolean): Promise<SessionGetResult> {
+    const adapter = this.adapterFor(sessionId);
+    const session = await adapter.session(sessionId);
+    if (!session) throw new RpcError("not_found", "未知会话");
+    this.store.setSessionPin(adapter.key, sessionId, pinned);
+    return { session: this.decorate(session, adapter.key) };
+  }
+
+  /** 归档：只有 Bridge 托管的会话归 Bridge 管，桌面会话请在原应用里归档。 */
+  archive(sessionId: string, archived: boolean): SessionGetResult {
+    const adapter = this.adapterFor(sessionId);
+    if (adapter.key !== "hosted") {
+      throw new RpcError("unsupported", "只有 Bridge 托管会话能在这里归档；桌面会话请在原应用里归档");
+    }
+    return { session: this.hostedManager.archive(sessionId, archived) };
+  }
+
+  /** 删除托管会话：停进程、删记录与 Bridge 这边的聊天记录，不动 CLI 自己的转录。 */
+  async deleteSession(sessionId: string): Promise<{ deleted: boolean }> {
+    const adapter = this.adapterFor(sessionId);
+    if (adapter.key !== "hosted") {
+      throw new RpcError("unsupported", "只有 Bridge 托管会话能在这里删除；桌面会话请在原应用里删除");
+    }
+    await this.hostedManager.remove(sessionId);
+    this.store.setSessionPin(adapter.key, sessionId, false);
+    return { deleted: true };
   }
 
   async messages(sessionId: string, params: { limit?: number; before?: string }): Promise<MessageListResult> {
@@ -284,6 +440,18 @@ export class SessionAdapters {
     const adapter = this.adapters.find((item) => item.key === key);
     if (!adapter) throw new RpcError("not_found", "未知会话来源");
     return adapter;
+  }
+
+  /**
+   * 叠上 Bridge 侧的覆盖名与置顶标记。
+   * 两者都按 adapter key 存（写入时用的也是它），读也必须用同一把 key。
+   */
+  private decorate(session: SessionSummary, adapterKey: string): SessionSummary {
+    const override = this.store.sessionTitle(adapterKey, session.sessionId);
+    const pinned = this.store.sessionPinned(adapterKey, session.sessionId);
+    const next = pinned ? { ...session, pinned: true } : session;
+    if (override === null) return next;
+    return { ...next, title: override, originalTitle: session.title };
   }
 }
 

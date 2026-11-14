@@ -13,6 +13,11 @@ import type {
   FsReadResult,
   FsRoot,
   FsRootsResult,
+  HostedAgent,
+  HostedDirsResult,
+  HostedInterruptResult,
+  HostedOptionsResult,
+  HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
   MessageBlock,
@@ -21,6 +26,7 @@ import type {
   MessageRecord,
   MessageSendResult,
   Method,
+  ModelOption,
   NextStepAction,
   ProjectInfo,
   ProjectListResult,
@@ -29,13 +35,19 @@ import type {
   RailRow,
   RailTask,
   SessionCompactResult,
+  SessionCreateResult,
+  SessionGetResult,
   SessionListResult,
   SessionModelsResult,
   SessionRailResult,
+  SessionRenameResult,
   SessionSummary,
   ShellCancelResult,
   ShellEventData,
   ShellExecResult,
+  TodoItem,
+  TodoKind,
+  TodoListResult,
   TransferCommitResult,
   TransferPrepareResult,
 } from "@craftstead/protocol";
@@ -105,6 +117,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 3.5 5 8l4.5 4.5"/></svg>',
   share:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v8"/><path d="m4.8 5.2 3.2-3.2 3.2 3.2"/><path d="M3 9.5v3.1c0 .8.6 1.4 1.4 1.4h7.2c.8 0 1.4-.6 1.4-1.4V9.5"/></svg>',
+  copy:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5.4" y="5.4" width="7.6" height="7.6" rx="1.4"/><path d="M10.6 5.4v-1A1.4 1.4 0 0 0 9.2 3H4.4A1.4 1.4 0 0 0 3 4.4v4.8a1.4 1.4 0 0 0 1.4 1.4h1"/></svg>',
   close:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="m4 4 8 8M12 4l-8 8"/></svg>',
   device:
@@ -139,6 +153,18 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
+  more:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.4" cy="8" r="1.25"/></svg>',
+  pin:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.2 1.9h5.6"/><path d="M6.4 1.9v3.3L4.5 7.5a.9.9 0 0 0-.45.78v.42h7.9v-.42a.9.9 0 0 0-.45-.78L9.6 5.2V1.9"/><path d="M8 8.7v5.4"/></svg>',
+  pinOff:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5.2 1.9h5.6"/><path d="M6.4 1.9v3.3L4.5 7.5a.9.9 0 0 0-.45.78v.42h7.9v-.42a.9.9 0 0 0-.45-.78L9.6 5.2V1.9"/><path d="M8 8.7v5.4"/><path d="m2.4 2.4 11.2 11.2"/></svg>',
+  archive:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3" width="11.2" height="3" rx="1"/><path d="M3.6 6v6.4c0 .6.4 1 1 1h6.8c.6 0 1-.4 1-1V6"/><path d="M6.4 8.6h3.2"/></svg>',
+  unarchive:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.4" y="3" width="11.2" height="3" rx="1"/><path d="M3.6 6v6.4c0 .6.4 1 1 1h6.8c.6 0 1-.4 1-1V6"/><path d="M8 12.4V8.4"/><path d="m6.4 9.8 1.6-1.6 1.6 1.6"/></svg>',
+  trash:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 4.6h10"/><path d="M6.2 4.6V3.2c0-.5.4-.9.9-.9h1.8c.5 0 .9.4.9.9v1.4"/><path d="M4.4 4.6l.6 8.2c0 .6.5 1 1 1h4c.5 0 1-.4 1-1l.6-8.2"/><path d="M6.8 7v4M9.2 7v4"/></svg>',
 } as const;
 
 function backButton(onClick: () => void): HTMLButtonElement {
@@ -215,6 +241,27 @@ let justPaired = false;
 let retryTimer: number | null = null;
 let pollTimer: number | null = null;
 let renderToken = 0;
+let deferredListRender = false;
+/** 新建托管会话表单的草稿：中途重连重绘时把已填内容还回去，不打断输入。 */
+let hostedDraft: {
+  projectId: string;
+  title: string;
+  model: string;
+  /** pi 会话的主模型，和 Claude Code 的 `model` 分开存：两份清单不通用。 */
+  piModel: string;
+  effort: string;
+  mode: string;
+  agent: HostedAgent;
+  subagentModel: string;
+  /** pi 的思考等级（`--thinking`）；空串表示跟随 pi 设置。 */
+  piThinking: string;
+  /** 子代理的思考等级（`subagents.defaultThinking`）；空串表示跟随 pi 设置。 */
+  subagentThinking: string;
+} | null = null;
+/** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
+let showArchived = false;
+/** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
+let desktopDraft: { projectId: string; text: string } | null = null;
 /** Lets a soft reconnect refresh the open chat in place instead of re-rendering it. */
 let chatResumeKey: string | null = null;
 let chatResume: (() => void) | null = null;
@@ -513,7 +560,9 @@ async function watchSessions(): Promise<void> {
   const apps = snapshot.apps;
   try {
     const pages = await Promise.all(
-      apps.map((app) => call<SessionListResult>("session.list", { appId: app.appId, limit: 500 })),
+      apps.map((app) =>
+        call<SessionListResult>("session.list", { appId: app.appId, includeArchived: true, limit: 500 }),
+      ),
     );
     const sessions = pages.flatMap((page) => page.sessions);
     if (!snapshot) return;
@@ -527,13 +576,14 @@ async function watchSessions(): Promise<void> {
     if (document.visibilityState !== "visible") return;
     const route = parseRoute();
     if (route.level !== "clients" && route.level !== "projects" && route.level !== "sessions") return;
-    if (snapshotSignature() !== before) void renderRoute();
+    if (snapshotSignature() !== before) repaintList();
   } catch {
     // The connection layer already reports disconnects; the next tick retries.
   }
 }
 
 let watchTimer: number | null = null;
+let dockRenderDeferred = false;
 
 /** Every page watches completions, including while the tab is hidden or showing another route. */
 function startSessionWatch(): void {
@@ -781,6 +831,9 @@ function renderDeviceRow(device: DeviceMeta): HTMLElement {
         });
       }, "btn small"),
       button("移除", () => {
+        if (!window.confirm(`移除「${device.bridge?.name ?? device.name}」？这台设备的配对凭据会从浏览器里删掉，要连回来得重新配对。`)) {
+          return;
+        }
         void removeDevice(device.relayUrl, device.roomId).then(() => showHome());
       }, "btn ghost small"),
     ]),
@@ -813,10 +866,18 @@ async function beginPairing(link: PairingLink): Promise<void> {
 }
 
 function showConfirm(challenge: PairingChallenge): void {
+  const remembered = rememberedDeviceName();
+  const initial = remembered || defaultDeviceName();
   const nameInput = el("input", {
     className: "input",
-    attrs: { type: "text", value: defaultDeviceName(), maxlength: "64" },
+    attrs: { type: "text", value: initial, maxlength: "64" },
   });
+  // UA-CH 的高熵值要异步取，拿到更具体的机型／系统版本后再补；用户已经动过输入框就不覆盖。
+  if (!remembered) {
+    void suggestedDeviceName().then((suggested) => {
+      if (nameInput.value === initial) nameInput.value = suggested;
+    });
+  }
   const error = el("p", { className: "notice error hidden" });
   const confirm = button("确认码一致，完成配对", () => {
     const name = nameInput.value.trim();
@@ -832,6 +893,7 @@ function showConfirm(challenge: PairingChallenge): void {
       await finishPairing(challenge, name);
     })()
       .then(() => {
+        rememberDeviceName(name);
         justPaired = true;
         showHome();
       })
@@ -852,8 +914,9 @@ function showConfirm(challenge: PairingChallenge): void {
       el("h1", { className: "display", text: "核对确认码" }),
       el("p", { className: "lede", text: "Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。" }),
       el("div", { className: "code", text: challenge.confirmCode }),
+      el("p", { className: "hint", text: relayTargetText(challenge.link.relayUrl) }),
       el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
-      el("p", { className: "hint", text: "浏览器读不到电脑名称和机型，默认值只能按系统、浏览器和屏幕区分；两台设备看起来一样时，改成你认得出的名字。" }),
+      el("p", { className: "hint", text: "浏览器拿不到电脑名称，默认值只能取设备类型、系统版本和浏览器；改成你认得出的名字，Mac 菜单栏和其它设备都会按它显示，之后也能随时改。" }),
       error,
       el("div", { className: "actions" }, [confirm, cancel]),
     ]),
@@ -861,22 +924,121 @@ function showConfirm(challenge: PairingChallenge): void {
 }
 
 /**
- * 默认名称取设备类型 + 浏览器 + 屏幕逻辑分辨率。浏览器拿不到机型和主机名，
- * 但同品牌两台设备往往浏览器或屏幕不同，这样列表里至少能分辨。
+ * 配对链接把人连到哪个中继，必须在确认码旁边说清楚：确认码只能证明信道一致，
+ * 看不出中继是不是用户以为的那个站点。
  */
-function defaultDeviceName(): string {
+function relayTargetText(relayUrl: string): string {
+  let url: URL;
+  try {
+    url = new URL(relayUrl);
+  } catch {
+    return `中继：${relayUrl}，注意：不是你当前所在的站点`;
+  }
+  if (url.origin === location.origin) return `中继：${url.host}（本站）`;
+  return `中继：${url.host}，注意：不是你当前所在的站点`;
+}
+
+const DEVICE_NAME_KEY = "ab.deviceName";
+
+/** 上一次给这台浏览器起的名字，下次配对时直接沿用。 */
+function rememberedDeviceName(): string {
+  try {
+    return (localStorage.getItem(DEVICE_NAME_KEY) ?? "").trim().slice(0, 64);
+  } catch {
+    return "";
+  }
+}
+
+function rememberDeviceName(name: string): void {
+  try {
+    localStorage.setItem(DEVICE_NAME_KEY, name);
+  } catch {
+    // 隐私模式下写不了本地存储，只影响下次的默认值。
+  }
+}
+
+interface NameParts {
+  kind: string;
+  os: string;
+  browser: string;
+}
+
+/**
+ * 浏览器读不到电脑名称和主机名（隐私限制），能拿到的只有设备类型、系统版本和浏览器。
+ * Android / ChromeOS 的 UA-CH 高熵值还能给出具体机型，桌面端和 Safari 没有。
+ */
+function nameParts(): NameParts {
   const ua = navigator.userAgent;
   const touch = navigator.maxTouchPoints > 1;
-  let kind: string;
+  let kind = "浏览器";
   if (/iPhone/.test(ua)) kind = "iPhone";
   else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) kind = "iPad";
   else if (/Android/.test(ua)) kind = "Android 设备";
   else if (/Macintosh|Mac OS X/.test(ua)) kind = "Mac";
   else if (/Windows/.test(ua)) kind = "Windows";
   else if (/Linux/.test(ua)) kind = "Linux";
-  else kind = "浏览器";
-  const screenSize = `${Math.round(screen.width)}×${Math.round(screen.height)}`;
-  return [kind, browserLabel(), screenSize].filter(Boolean).join(" · ");
+
+  let os = "";
+  const ios = /(?:iPhone|CPU) OS (\d+)[._](\d+)/.exec(ua);
+  const android = /Android (\d+)/.exec(ua);
+  const mac = /Mac OS X (\d+)[._](\d+)/.exec(ua);
+  if (ios) os = `iOS ${ios[1]}.${ios[2]}`;
+  else if (android) os = `Android ${android[1]}`;
+  else if (kind === "Mac" && mac) os = `macOS ${mac[1]}.${mac[2]}`;
+  return { kind, os, browser: browserLabel() };
+}
+
+function composeDeviceName(parts: NameParts): string {
+  return [parts.kind, parts.os, parts.browser].filter(Boolean).join(" · ").slice(0, 64);
+}
+
+function defaultDeviceName(): string {
+  return composeDeviceName(nameParts());
+}
+
+interface UaHints {
+  model: string;
+  platform: string;
+  platformVersion: string;
+}
+
+async function highEntropyHints(): Promise<UaHints | null> {
+  const data = (navigator as unknown as {
+    userAgentData?: { getHighEntropyValues?: (hints: string[]) => Promise<Record<string, unknown>> };
+  }).userAgentData;
+  if (!data?.getHighEntropyValues) return null;
+  try {
+    const values = await data.getHighEntropyValues(["model", "platform", "platformVersion"]);
+    const text = (key: string): string => (typeof values[key] === "string" ? (values[key] as string).trim() : "");
+    return { model: text("model"), platform: text("platform"), platformVersion: text("platformVersion") };
+  } catch {
+    return null;
+  }
+}
+
+/** UA-CH 报的是 Windows 的平台版本号：13 起是 Windows 11，之前是 Windows 10。 */
+function osLabel(platform: string, version: string): string {
+  const major = Number.parseInt(version, 10);
+  if (!Number.isFinite(major)) return "";
+  const minor = version.split(".")[1];
+  const withMinor = minor && minor !== "0" ? `.${minor}` : "";
+  if (platform === "macOS") return `macOS ${major}${withMinor}`;
+  if (platform === "iOS") return `iOS ${major}${withMinor}`;
+  if (platform === "Android") return `Android ${major}`;
+  if (platform === "Windows") return major >= 13 ? "Windows 11" : "Windows 10";
+  if (platform === "Chrome OS") return `ChromeOS ${major}`;
+  return "";
+}
+
+/** UA-CH 是异步的，能拿到具体机型和系统版本时用它盖掉 UA 里的粗粒度信息。 */
+async function suggestedDeviceName(): Promise<string> {
+  const parts = nameParts();
+  const hints = await highEntropyHints();
+  if (!hints) return composeDeviceName(parts);
+  if (hints.model) parts.kind = hints.model;
+  const os = osLabel(hints.platform, hints.platformVersion);
+  if (os) parts.os = os;
+  return composeDeviceName(parts);
 }
 
 /** Chromium 的 UA 里 Chrome/Safari 互相嵌套，顺序不能换。 */
@@ -1054,6 +1216,174 @@ function passwordDialog(options: {
     document.body.append(mask);
     input.focus();
   });
+}
+
+/** 列表行上的小操作按钮（置顶、归档、删除）。 */
+function rowAction(content: HTMLElement, label: string, onClick: () => void, extra = ""): HTMLButtonElement {
+  const node = button("", onClick, `row-action ${extra}`.trim());
+  node.append(content);
+  node.title = label;
+  node.setAttribute("aria-label", label);
+  return node;
+}
+
+/** 列表排序口径：置顶的在前，其余按更新时间；两段内部都是新的在前。 */
+function sortSessions(sessions: SessionSummary[]): SessionSummary[] {
+  return [...sessions].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
+/** 已归档的会话默认不出现，除非列表页打开了「显示已归档」。 */
+function visibleSessions(sessions: SessionSummary[], includeArchived = false): SessionSummary[] {
+  return sortSessions(includeArchived ? sessions : sessions.filter((item) => !item.archived));
+}
+
+/** 会话状态变了就地更新快照，不用重拉整份列表。 */
+function patchSession(session: SessionSummary): void {
+  if (!snapshot) return;
+  snapshot = {
+    ...snapshot,
+    sessions: snapshot.sessions.map((item) => (item.sessionId === session.sessionId ? session : item)),
+  };
+}
+
+function dropSession(sessionId: string): void {
+  if (!snapshot) return;
+  snapshot = { ...snapshot, sessions: snapshot.sessions.filter((item) => item.sessionId !== sessionId) };
+}
+
+async function setSessionPinned(session: SessionSummary, pinned: boolean): Promise<void> {
+  try {
+    const result = await call<SessionGetResult>("session.pin", { sessionId: session.sessionId, pinned });
+    patchSession(result.session);
+    await renderRoute();
+    flashNotice(pinned ? "已置顶，排在列表最前面" : "已取消置顶");
+  } catch (error) {
+    flashNotice(`置顶失败：${messageOf(error)}`);
+  }
+}
+
+async function setSessionArchived(session: SessionSummary, archived: boolean): Promise<void> {
+  try {
+    const result = await call<SessionGetResult>("hosted.archive", {
+      sessionId: session.sessionId,
+      archived,
+    });
+    patchSession(result.session);
+    const route = parseRoute();
+    if (archived && route.level === "chat" && route.sessionId === session.sessionId) {
+      navigate({ level: "sessions", appId: session.appId, projectId: session.projectId });
+      flashNotice("已归档，可在「显示已归档」里找回");
+      return;
+    }
+    await renderRoute();
+    flashNotice(archived ? "已归档，可在「显示已归档」里找回" : "已取消归档");
+  } catch (error) {
+    flashNotice(`归档失败：${messageOf(error)}`);
+  }
+}
+
+async function deleteHostedSession(session: SessionSummary): Promise<void> {
+  if (!window.confirm(`删除「${session.title}」？进程会停掉，Bridge 这边的聊天记录也会删掉，无法恢复。`)) return;
+  try {
+    await call("hosted.delete", { sessionId: session.sessionId });
+    dropSession(session.sessionId);
+    const route = parseRoute();
+    if (route.level === "chat" && route.sessionId === session.sessionId) {
+      navigate({ level: "sessions", appId: session.appId, projectId: session.projectId });
+      flashNotice("已删除");
+      return;
+    }
+    await renderRoute();
+    flashNotice("已删除");
+  } catch (error) {
+    flashNotice(`删除失败：${messageOf(error)}`);
+  }
+}
+
+/**
+ * 重命名会话：Bridge 托管的会话直接改标题，其它来源只保存 Bridge 侧覆盖名，
+ * 因此弹层会同时展示源应用里的原名。
+ */
+function renameSessionSheet(summary: SessionSummary, onSaved: (session: SessionSummary) => void): void {
+  const input = el("input", {
+    className: "input",
+    attrs: { type: "text", maxlength: "60", placeholder: "会话名称" },
+  }) as HTMLInputElement;
+  input.value = summary.title;
+  const error = el("p", { className: "notice error hidden" });
+  const mask = el("div", { className: "sheet-mask" });
+  let busy = false;
+
+  const finish = (): void => {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") finish();
+  };
+  const fail = (message: string): void => {
+    error.textContent = message;
+    error.classList.remove("hidden");
+    busy = false;
+    save.disabled = false;
+  };
+  const submit = async (title: string | null): Promise<void> => {
+    if (busy) return;
+    busy = true;
+    save.disabled = true;
+    try {
+      const result = await call<SessionRenameResult>("session.rename", {
+        sessionId: summary.sessionId,
+        title,
+      });
+      finish();
+      onSaved(result.session);
+    } catch (failure) {
+      fail(messageOf(failure));
+    }
+  };
+  const save = button("保存", () => {
+    void submit(input.value.trim() || null);
+  }, "btn primary");
+  const reset = summary.originalTitle
+    ? button("恢复原名", () => {
+        void submit(null);
+      }, "btn ghost")
+    : null;
+  const cancel = button("取消", finish, "btn secondary");
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") void submit(input.value.trim() || null);
+  });
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask) finish();
+  });
+
+  mask.append(
+    el(
+      "aside",
+      { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": "重命名会话" } },
+      [
+        el("header", { className: "sheet-head" }, [el("h2", { className: "sheet-title", text: "重命名会话" })]),
+        el("label", { className: "field" }, [el("span", { text: "显示名称" }), input]),
+        ...(summary.originalTitle
+          ? [el("p", { className: "sheet-note", text: `原名：${summary.originalTitle}` })]
+          : []),
+        error,
+        el("footer", { className: "sheet-foot" }, [
+          ...(reset ? [el("div", {}, [reset])] : []),
+          el("div", { className: "actions" }, [cancel, save]),
+        ]),
+      ],
+    ),
+  );
+  document.body.append(mask);
+  input.focus();
+  input.select();
 }
 
 function showLocked(device: DeviceMeta): void {
@@ -1286,7 +1616,7 @@ async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot 
   const [projects, ...sessionPages] = await Promise.all([
     call<ProjectListResult>("project.list"),
     ...apps.apps.map((app) =>
-      call<SessionListResult>("session.list", { appId: app.appId, limit: 500 }),
+      call<SessionListResult>("session.list", { appId: app.appId, includeArchived: true, limit: 500 }),
     ),
   ]);
   const notes = sessionPages.flatMap((page) => (page.note ? [page.note] : []));
@@ -1337,26 +1667,578 @@ function crumbsFor(route: Route): Crumb[] {
 }
 
 function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
-  app.replaceChildren(renderTopbar(crumbs), content);
+  // 整页重绘会把 dock 里的待办输入框整个换掉：先记下焦点与光标，画完再放回去。
+  const focus = captureDockFocus();
+  app.replaceChildren(
+    renderTopbar(crumbs),
+    el("div", { className: "shell" }, [
+      dockSidebar(parseRoute()),
+      el("div", { className: "shell-main" }, [content]),
+    ]),
+  );
+  restoreDockFocus(focus);
+}
+
+/** dock 里正在编辑的输入框（新增待办 / 就地编辑）：整页重建后要还原焦点，否则打字被打断。 */
+interface DockFocus {
+  target: "new" | "edit";
+  value: string;
+  start: number | null;
+  end: number | null;
+}
+
+function captureDockFocus(): DockFocus | null {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement)) return null;
+  const target = active.classList.contains("todo-input")
+    ? "new"
+    : active.classList.contains("todo-edit-input")
+      ? "edit"
+      : null;
+  if (!target) return null;
+  return { target, value: active.value, start: active.selectionStart, end: active.selectionEnd };
+}
+
+function restoreDockFocus(saved: DockFocus | null): void {
+  if (!saved) return;
+  const selector = saved.target === "new" ? ".dock-todos .todo-input" : ".dock-todos .todo-edit-input";
+  const input = document.querySelector<HTMLInputElement>(selector);
+  if (!input || input.disabled) return;
+  input.value = saved.value;
+  if (saved.target === "new") todoDraft.title = saved.value;
+  else todoEditDraft.title = saved.value;
+  // preventScroll：重绘发生在输入框上方时别把页面拉过去。
+  input.focus({ preventScroll: true });
+  if (saved.start !== null && saved.end !== null) input.setSelectionRange(saved.start, saved.end);
+}
+
+const DOCK_TAB_KEY = "ab.dockTab";
+const DOCK_SESSIONS_PER_PROJECT = 8;
+const DOCK_HISTORY_LIMIT = 30;
+type DockTab = "tree" | "history" | "todo";
+
+function readDockTab(): DockTab {
+  try {
+    const value = localStorage.getItem(DOCK_TAB_KEY);
+    return value === "history" || value === "todo" ? value : "tree";
+  } catch {
+    return "tree";
+  }
+}
+
+function writeDockTab(tab: DockTab): void {
+  try {
+    localStorage.setItem(DOCK_TAB_KEY, tab);
+  } catch {
+    // storage unavailable; the chosen tab just won't be remembered
+  }
+}
+
+function agentLabel(kind: string): string {
+  if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "ChatGPT";
+  if (kind === "antigravity" || kind === "antigravity-desktop") return "Antigravity";
+  if (kind === "dsh") return "DeepSeek";
+  if (kind === "pi") return "pi";
+  if (kind === "hosted") return "托管";
+  return "Claude";
+}
+
+/** 当前路由落在 dock 的哪一层，用来展开并高亮对应条目。 */
+function dockActive(route: Route): { appId?: string; projectId?: string; sessionId?: string } {
+  if (route.level === "clients" || route.level === "devices") return {};
+  return {
+    appId: route.appId,
+    ...("projectId" in route ? { projectId: route.projectId } : {}),
+    ...(route.level === "chat" ? { sessionId: route.sessionId } : {}),
+  };
+}
+
+/**
+ * 侧栏行上的状态：正在跑、等用户回答、有你没看过的新回复，
+ * 与会话列表页的口径保持一致，免得左栏看起来「都一样」。
+ */
+function dockStatePills(session: SessionSummary): HTMLElement[] {
+  const pills: HTMLElement[] = [];
+  if (session.busy) {
+    pills.push(
+      el("span", { className: "pill tiny busy" }, [el("span", { className: "spinner" }), document.createTextNode("运行中")]),
+    );
+  } else if (session.needsDecision) {
+    pills.push(el("span", { className: "pill tiny warn", text: "待回答" }));
+  }
+  if (unreadAt(session.sessionId) !== undefined) {
+    pills.push(el("span", { className: "pill tiny unread", text: "未读" }));
+  }
+  return pills;
+}
+
+function dockSessionButton(session: SessionSummary, active: boolean): HTMLButtonElement {
+  const pills = dockStatePills(session);
+  const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
+    el("span", {
+      className: `mark ${session.busy ? "busy" : session.live ? "live" : ""}`,
+      text: agentMark(session.kind),
+    }),
+    el("span", { className: "dock-session-title", text: session.title }),
+    ...(pills.length > 0 ? [el("span", { className: "dock-session-pills" }, pills)] : []),
+  ]);
+  node.title = session.title;
+  if (active) node.setAttribute("aria-current", "page");
+  node.addEventListener("click", () => {
+    navigate({
+      level: "chat",
+      appId: session.appId,
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+    });
+  });
+  return node;
+}
+
+/** 第一个 tab：agent → project → session 的树，当前路径默认展开。 */
+function dockTree(route: Route): HTMLElement {
+  const wrap = el("div", { className: "dock-list" });
+  const data = snapshot;
+  if (!data) {
+    wrap.append(el("p", { className: "hint", text: "正在读取会话…" }));
+    return wrap;
+  }
+  const active = dockActive(route);
+  let rendered = 0;
+  for (const appInfo of data.apps) {
+    const projects = data.projects.filter((item) => item.appId === appInfo.appId);
+    const sessionsOf = (projectId: string): SessionSummary[] =>
+      visibleSessions(data.sessions.filter((item) => item.projectId === projectId));
+    const rows = projects.map((project) => ({ project, sessions: sessionsOf(project.projectId) }));
+    const visible = rows.filter((row) => row.sessions.length > 0);
+    if (visible.length === 0) continue;
+    const total = visible.reduce((sum, row) => sum + row.project.sessionCount, 0);
+
+    const appNode = el("details", { className: "dock-app" });
+    appNode.open = rendered === 0 || active.appId === appInfo.appId;
+    appNode.append(
+      el("summary", { className: "dock-app-head" }, [
+        el("span", { className: "dock-app-name", text: shortAgentName(appInfo) }),
+        el("span", { className: "dock-count", text: String(total) }),
+      ]),
+    );
+    for (const { project, sessions } of visible) {
+      const projectNode = el("details", { className: "dock-project" });
+      projectNode.open = active.projectId === project.projectId;
+      const head = el("summary", { className: "dock-project-head" }, [
+        el("span", { className: "dock-project-name", text: project.name }),
+        el("span", { className: "dock-count", text: String(project.sessionCount) }),
+      ]);
+      if (active.projectId === project.projectId) head.classList.add("is-active");
+      projectNode.append(head);
+      for (const session of sessions.slice(0, DOCK_SESSIONS_PER_PROJECT)) {
+        projectNode.append(dockSessionButton(session, active.sessionId === session.sessionId));
+      }
+      const rest = sessions.length - DOCK_SESSIONS_PER_PROJECT;
+      if (rest > 0) {
+        projectNode.append(
+          button(`还有 ${rest} 条…`, () => {
+            navigate({ level: "sessions", appId: project.appId, projectId: project.projectId });
+          }, "dock-more"),
+        );
+      }
+      appNode.append(projectNode);
+    }
+    wrap.append(appNode);
+    rendered += 1;
+  }
+  if (rendered === 0) wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
+  return wrap;
+}
+
+/** 第二个 tab：所有会话按最近更新排序。 */
+function dockHistory(): HTMLElement {
+  const wrap = el("div", { className: "dock-list" });
+  const data = snapshot;
+  if (!data) {
+    wrap.append(el("p", { className: "hint", text: "正在读取会话…" }));
+    return wrap;
+  }
+  const active = dockActive(parseRoute());
+  const sessions = visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
+  if (sessions.length === 0) {
+    wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
+    return wrap;
+  }
+  for (const session of sessions) {
+    const current = active.sessionId === session.sessionId;
+    const node = el("button", { className: `dock-history-row${current ? " is-active" : ""}`, attrs: { type: "button" } }, [
+      el("span", { className: "dock-history-title" }, [
+        ...(session.pinned ? [icon("pin", "icon pin-mark")] : []),
+        document.createTextNode(session.title),
+      ]),
+      el("span", { className: "dock-history-facts" }, [
+        el("span", {
+          className: "dock-history-meta",
+          text: `${agentLabel(session.kind)} · ${recentTime(session.updatedAt)}`,
+        }),
+        ...dockStatePills(session),
+      ]),
+    ]);
+    node.title = `${session.title}\n${session.projectId}`;
+    if (current) node.setAttribute("aria-current", "page");
+    node.addEventListener("click", () => {
+      navigate({
+        level: "chat",
+        appId: session.appId,
+        projectId: session.projectId,
+        sessionId: session.sessionId,
+      });
+    });
+    wrap.append(node);
+  }
+  return wrap;
+}
+
+/** 待办面板的本地状态：切换 tab 会重绘，草稿与上次数据留着。 */
+let todoDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
+let todoCache: TodoListResult | null = null;
+let todoError = "";
+/** 正在就地编辑的待办；重绘后靠它回到编辑态。 */
+let editingTodoId: string | null = null;
+let todoEditDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
+
+/** 当前聊天页的输入框：点待办时往这里填文字，不发送。 */
+let composerRef: HTMLTextAreaElement | null = null;
+
+function todoKindLabel(kind: TodoKind): string {
+  if (kind === "bug") return "bug";
+  if (kind === "feature") return "功能";
+  return "其他";
+}
+
+/** 待办写进输入框的文案：分类放在前面，跟手写的时候一样的习惯。 */
+function todoPrompt(item: TodoItem): string {
+  if (item.kind === "other") return item.title;
+  return `${todoKindLabel(item.kind)}: ${item.title}`;
+}
+
+/** 把文字接在输入框末尾（不发送）；没有打开的会话时提示一下。 */
+function fillComposer(text: string): boolean {
+  const input = composerRef;
+  if (!input || !input.isConnected) {
+    flashNotice("先打开一个会话，再把待办填进输入框");
+    return false;
+  }
+  const current = input.value.trimEnd();
+  input.value = current ? `${current}\n${text}` : text;
+  // 走一次 input 事件：草稿、高度和发送按钮状态都靠它更新。
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  return true;
+}
+
+/** 左侧 dock 的待办：未完成的在上面，最近完成的在下面。 */
+function dockTodos(): HTMLElement {
+  const wrap = el("div", { className: "dock-todos" });
+  const select = el("select", { className: "todo-kind", attrs: { "aria-label": "待办分类" } });
+  for (const [value, label] of [["feature", "功能"], ["bug", "bug"], ["other", "其他"]] as const) {
+    const option = el("option", { text: label, attrs: { value } });
+    if (todoDraft.kind === value) option.selected = true;
+    select.append(option);
+  }
+  select.addEventListener("change", () => {
+    todoDraft.kind = select.value as TodoKind;
+  });
+
+  const input = el("input", {
+    className: "todo-input",
+    attrs: { type: "text", placeholder: "记一条待办…", maxlength: "500" },
+  });
+  input.value = todoDraft.title;
+  input.addEventListener("input", () => {
+    todoDraft.title = input.value;
+  });
+
+  const list = el("div", { className: "todo-list" });
+  const addButton = button("添加", () => void add(), "btn primary todo-add");
+
+  const refresh = async (): Promise<void> => {
+    try {
+      const result = await call<TodoListResult>("todo.list");
+      if (!result || !Array.isArray(result.open) || !Array.isArray(result.done)) {
+        throw new Error("这个 Bridge 还不支持待办，需要更新 App");
+      }
+      todoCache = result;
+      todoError = "";
+    } catch (error) {
+      todoError = messageOf(error);
+    }
+    paintList();
+  };
+
+  const add = async (): Promise<void> => {
+    const title = input.value.trim();
+    if (!title) {
+      input.focus();
+      return;
+    }
+    addButton.disabled = true;
+    try {
+      await call("todo.add", { title, kind: select.value });
+      todoDraft = { title: "", kind: select.value as TodoKind };
+      input.value = "";
+      await refresh();
+    } catch (error) {
+      todoError = messageOf(error);
+      paintList();
+    } finally {
+      addButton.disabled = false;
+    }
+  };
+
+  const setChecked = async (item: TodoItem, checked: boolean): Promise<void> => {
+    try {
+      await call("todo.check", { todoId: item.todoId, checked });
+      await refresh();
+    } catch (error) {
+      todoError = messageOf(error);
+      paintList();
+    }
+  };
+
+  const remove = async (item: TodoItem): Promise<void> => {
+    if (!window.confirm(`删除待办「${item.title}」？`)) return;
+    try {
+      await call("todo.remove", { todoId: item.todoId });
+      await refresh();
+    } catch (error) {
+      todoError = messageOf(error);
+      paintList();
+    }
+  };
+
+  /** 点条目：先填进输入框，填成功才标记完成——没会话时不能白白勾掉。 */
+  const use = async (item: TodoItem): Promise<void> => {
+    if (!fillComposer(todoPrompt(item))) return;
+    if (item.checkedAt === null) await setChecked(item, true);
+  };
+
+  const row = (item: TodoItem): HTMLElement => {
+    const done = item.checkedAt !== null;
+    if (item.todoId === editingTodoId) return editRow(item, done);
+    const main = el("button", { className: "todo-main", attrs: { type: "button", title: "填到输入框" } }, [
+      el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
+      el("span", { className: "todo-title", text: item.title }),
+    ]);
+    main.addEventListener("click", () => void use(item));
+    const action = (name: "refresh" | "pencil" | "trash", label: string, run: () => void): HTMLElement => {
+      const node = el(
+        "button",
+        { className: "todo-action", attrs: { type: "button", "aria-label": label, title: label } },
+        [icon(name)],
+      );
+      node.addEventListener("click", run);
+      return node;
+    };
+    const actions = el("div", { className: "todo-actions" }, [
+      ...(done ? [action("refresh", "标记未完成", () => void setChecked(item, false))] : []),
+      action("pencil", "编辑", () => startEdit(item)),
+      action("trash", "删除待办", () => void remove(item)),
+    ]);
+    return el("div", { className: `todo-item${done ? " is-done" : ""}` }, [main, actions]);
+  };
+
+  /** 就地编辑：标题、分类都能改，改完才发 RPC。 */
+  const editRow = (item: TodoItem, done: boolean): HTMLElement => {
+    const select = el("select", { className: "todo-kind", attrs: { "aria-label": "待办分类" } });
+    for (const [value, label] of [["feature", "功能"], ["bug", "bug"], ["other", "其他"]] as const) {
+      const option = el("option", { text: label, attrs: { value } });
+      if (todoEditDraft.kind === value) option.selected = true;
+      select.append(option);
+    }
+    select.addEventListener("change", () => {
+      todoEditDraft.kind = select.value as TodoKind;
+    });
+
+    const input = el("input", {
+      className: "todo-edit-input",
+      attrs: { type: "text", maxlength: "500", "aria-label": "待办内容" },
+    });
+    input.value = todoEditDraft.title;
+    input.addEventListener("input", () => {
+      todoEditDraft.title = input.value;
+    });
+
+    const cancel = (): void => {
+      editingTodoId = null;
+      paintList();
+    };
+
+    const save = async (): Promise<void> => {
+      const title = input.value.trim();
+      if (!title) {
+        input.focus();
+        return;
+      }
+      try {
+        await call("todo.update", { todoId: item.todoId, title, kind: select.value });
+        editingTodoId = null;
+        await refresh();
+      } catch (error) {
+        todoError = messageOf(error);
+        paintList();
+      }
+    };
+
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        void save();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        cancel();
+      }
+    });
+
+    const form = el("div", { className: `todo-edit${done ? " is-done" : ""}` }, [
+      select,
+      input,
+      button("保存", () => void save(), "btn primary todo-save"),
+      button("取消", cancel, "btn ghost todo-save"),
+    ]);
+    // 刚插进 DOM 后再聚焦，光标放到末尾。
+    window.setTimeout(() => {
+      input.focus();
+      input.setSelectionRange(input.value.length, input.value.length);
+    }, 0);
+    return form;
+  };
+
+  const startEdit = (item: TodoItem): void => {
+    editingTodoId = item.todoId;
+    todoEditDraft = { title: item.title, kind: item.kind };
+    paintList();
+  };
+
+  const paintList = (): void => {
+    const parts: HTMLElement[] = [];
+    if (todoError) parts.push(el("p", { className: "hint warn", text: todoError }));
+    const data = todoCache;
+    if (!data) {
+      if (!todoError) parts.push(el("p", { className: "hint", text: "正在读取待办…" }));
+    } else {
+      if (data.open.length === 0) {
+        parts.push(el("p", { className: "hint", text: "没有待办。" }));
+      } else {
+        parts.push(el("div", { className: "todo-group" }, data.open.map(row)));
+      }
+      if (data.done.length > 0) {
+        parts.push(el("p", { className: "todo-heading", text: "最近完成" }));
+        parts.push(el("div", { className: "todo-group" }, data.done.map(row)));
+        const hidden = data.doneTotal - data.done.length;
+        if (hidden > 0) parts.push(el("p", { className: "hint todo-hidden", text: `还有 ${hidden} 条已完成` }));
+      }
+    }
+    list.replaceChildren(...parts);
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void add();
+  });
+
+  paintList();
+  void refresh();
+  wrap.append(el("div", { className: "todo-form" }, [select, input, addButton]), list);
+  return wrap;
+}
+
+/** 桌面宽屏左侧的 dock：结构树、历史与待办三个 tab，选中的 tab 记在 localStorage。 */
+function dockSidebar(route: Route): HTMLElement {
+  let tab = readDockTab();
+  const nav = el("nav", { className: "dock", attrs: { "aria-label": "会话导航" } });
+  const tabs = el("div", { className: "dock-tabs", attrs: { role: "tablist" } });
+  const body = el("div", { className: "dock-body" });
+  const makeTab = (id: DockTab, label: string): HTMLButtonElement => {
+    const node = el("button", { className: "dock-tab", text: label, attrs: { type: "button", role: "tab" } });
+    node.addEventListener("click", () => {
+      if (tab === id) return;
+      tab = id;
+      writeDockTab(id);
+      paint();
+    });
+    return node;
+  };
+  const treeTab = makeTab("tree", "结构");
+  const historyTab = makeTab("history", "历史");
+  const todoTab = makeTab("todo", "待办");
+  tabs.append(treeTab, historyTab, todoTab);
+  const paint = (): void => {
+    for (const [id, node] of [
+      ["tree", treeTab],
+      ["history", historyTab],
+      ["todo", todoTab],
+    ] as const) {
+      node.classList.toggle("is-active", tab === id);
+      node.setAttribute("aria-selected", String(tab === id));
+    }
+    body.replaceChildren(
+      tab === "tree" ? dockTree(route) : tab === "history" ? dockHistory() : dockTodos(),
+    );
+  };
+  paint();
+  nav.append(tabs, body);
+  return nav;
 }
 
 function shortAgentName(app: AppInfo): string {
   if (app.kind === "claude-code") return "Claude";
+  if (app.kind === "claude-code-cli") return "Claude CLI";
   if (app.kind === "codex") return "ChatGPT";
+  if (app.kind === "codex-cli") return "Codex CLI";
   if (app.kind === "antigravity" || app.kind === "antigravity-desktop") return "Antigravity";
   if (app.kind === "dsh") return "DeepSeek";
+  if (app.kind === "pi") return "pi";
   return app.name.split(/[·\s]/)[0] ?? app.name;
 }
 
 function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
-  if (kind === "codex" || kind === "codex-thread") return "CX";
+  if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "CX";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "AG";
   if (kind === "dsh") return "DS";
+  if (kind === "pi") return "PI";
   return "CC";
 }
 
 const RECENT_SESSIONS_KEY = "ab.recentSessions";
 const RECENT_LIMIT = 20;
+
+const TRAIL_LIMIT = 10;
+let trail: Array<{ hash: string; title: string }> = [];
+let trailIndex = -1;
+
+/**
+ * 记住看过的会话，顶部「上一个对话」靠它在两条会话之间来回切换。
+ * 用指针而不是简单出栈：点按钮先把指针回退再跳转，来回切换不会把轨迹撑满。
+ */
+function noteSessionTrail(hash: string, title: string): void {
+  const current = trail[trailIndex];
+  if (current?.hash === hash) {
+    current.title = title;
+    return;
+  }
+  trail = trail.slice(0, trailIndex + 1);
+  trail.push({ hash, title });
+  if (trail.length > TRAIL_LIMIT) trail.shift();
+  trailIndex = trail.length - 1;
+}
+
+function previousTrailEntry(): { hash: string; title: string; step: "back" | "forward" } | null {
+  const prev = trailIndex > 0 ? trail[trailIndex - 1] : undefined;
+  if (prev) return { ...prev, step: "back" };
+  // 刚通过按钮退到轨迹起点时，上一步就在后面：再点一下回到刚才那条会话。
+  const next = trail[trailIndex + 1];
+  if (trailIndex >= 0 && next) return { ...next, step: "forward" };
+  return null;
+}
 
 interface RecentSession {
   sessionId: string;
@@ -1526,6 +2408,31 @@ function recentSessionsButton(): HTMLElement | null {
   return wrap;
 }
 
+/**
+ * 顶栏会话切换键：先回上一条会话，再点就回到刚才那条，
+ * 两条会话之间可以一直这样来回切。
+ */
+function previousSessionButton(): HTMLElement | null {
+  const prev = previousTrailEntry();
+  if (!prev) return null;
+  const label = prev.step === "back" ? "上一个对话" : "回到刚才";
+  const node = button(
+    "",
+    () => {
+      const target = previousTrailEntry();
+      if (!target) return;
+      // 先把指针挪到目标上：那一页渲染时轨迹命中同一项，不会再往后追加。
+      trailIndex += target.step === "back" ? -1 : 1;
+      location.hash = target.hash;
+    },
+    "btn ghost small prev-session-btn",
+  );
+  node.append(icon("swap"), el("span", { className: "prev-session-label", text: label }));
+  node.setAttribute("aria-label", `${label}：${prev.title}`);
+  node.title = `${label}：${prev.title}`;
+  return node;
+}
+
 function agentSwitcher(route: Route): HTMLElement | null {
   const apps = snapshot?.apps ?? [];
   if (apps.length === 0) return null;
@@ -1595,17 +2502,20 @@ function agentSwitcher(route: Route): HTMLElement | null {
 }
 
 /**
- * 落地页地址。预览客户端在 workers.dev 上，写不到 pages.dev 的 cookie，
+ * 落地页地址。预览客户端在自有预览域（旧部署仍在 workers.dev）上，写不到 pages.dev 的 cookie，
  * 所以回链用非敏感的 ?ab_paired=1 标记让落地页切到已配对状态；生产仍只靠 cookie。
  */
 function craftsteadLanding(paired: boolean): string {
-  if (!location.hostname.endsWith(".workers.dev")) return "https://craftstead.app/agent-bridge";
+  const preview =
+    location.hostname === "agent-bridge-preview.craftstead.app" ||
+    location.hostname.endsWith(".workers.dev");
+  if (!preview) return "https://craftstead.app/agent-bridge";
   const base = "https://develop.craftstead.pages.dev/agent-bridge";
   return paired ? base + "?ab_paired=1" : base;
 }
 
 function renderTopbar(crumbs: Crumb[]): HTMLElement {
-  // 预览部署在 workers.dev 上，回链也停在预览官网，别把试用的人送去生产。
+  // 预览部署在预览域上，回链也停在预览官网，别把试用的人送去生产。
   const landing = craftsteadLanding(true);
   const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
   crumbs.forEach((crumb, index) => {
@@ -1626,20 +2536,28 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     right.append(chip);
   }
   if (connected) {
+    if (parseRoute().level === "chat") {
+      const previous = previousSessionButton();
+      if (previous) right.append(previous);
+    }
     const recents = recentSessionsButton();
     if (recents) right.append(recents);
     const switcher = agentSwitcher(parseRoute());
     if (switcher) right.append(switcher);
+    // 桌面上直接平铺；手机上这几个按钮会把顶栏撑出屏宽，折进「更多」菜单。
+    const secondary = el("div", { className: "topbar-secondary" });
     const notify = notifyButton();
-    if (notify) right.append(notify);
-    right.append(
-      el("span", { className: "conn" }, [
+    if (notify) secondary.append(notify);
+    secondary.append(
+      el("span", { className: "conn", attrs: { title: `Bridge ${connected.info.version}` } }, [
         el("span", { className: "dot" }),
         el("span", { text: connected.info.name }),
+        el("span", { className: "conn-version", text: `v${connected.info.version}` }),
       ]),
       button("设备", () => navigate({ level: "devices" }), "btn ghost small"),
       button("断开", showHome, "btn ghost small"),
     );
+    right.append(topbarOverflow(secondary));
   }
   return el("header", { className: "topbar" }, [
     el("a", { className: "brand", attrs: { href: hashFor({ level: "clients" }) } }, [
@@ -1664,6 +2582,38 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
     nav,
     right,
   ]);
+}
+
+/**
+ * 窄屏顶栏放不下「提醒 / 设备 / 断开」，收进一个下拉；宽屏用 CSS 把面板展开平铺，
+ * 同一批按钮在两种布局里共用，状态（提醒开没开）不用维护两份。
+ */
+function topbarOverflow(panel: HTMLElement): HTMLElement {
+  const toggle = button("", () => setOpen(!panel.classList.contains("is-open")), "btn ghost small topbar-more");
+  toggle.append(icon("more"));
+  toggle.setAttribute("aria-haspopup", "true");
+  toggle.setAttribute("aria-expanded", "false");
+  toggle.setAttribute("aria-label", "更多操作");
+
+  const wrap = el("div", { className: "topbar-more-wrap" }, [toggle, panel]);
+
+  function onOutside(event: MouseEvent): void {
+    if (!wrap.isConnected) {
+      document.removeEventListener("click", onOutside);
+      return;
+    }
+    if (event.target instanceof Node && wrap.contains(event.target)) return;
+    setOpen(false);
+  }
+
+  function setOpen(open: boolean): void {
+    panel.classList.toggle("is-open", open);
+    toggle.setAttribute("aria-expanded", String(open));
+    if (open) document.addEventListener("click", onOutside);
+    else document.removeEventListener("click", onOutside);
+  }
+
+  return wrap;
 }
 
 /**
@@ -1741,6 +2691,14 @@ async function renderRoute(soft = false): Promise<void> {
     return;
   }
   const route = parseRoute();
+  // 整页重绘后旧表单容器已经不在页面上，之前挂起的延迟重绘也就没有意义了。
+  deferredListRender = false;
+  if (hostedDraft && (route.level !== "sessions" || route.projectId !== hostedDraft.projectId)) {
+    hostedDraft = null;
+  }
+  if (desktopDraft && (route.level !== "sessions" || route.projectId !== desktopDraft.projectId)) {
+    desktopDraft = null;
+  }
   if (soft && chatResume && chatResumeKey === hashFor(route)) {
     chatResume();
     // 重连会清空快照；这里补拉一次，分享等依赖全局数据的操作才不会静默失效。
@@ -1811,7 +2769,57 @@ async function refreshSnapshot(token: number): Promise<void> {
   // 这里再 renderRoute() 会把正在编辑的输入区整个重建掉。
   if (token !== renderToken) return;
   if (snapshotSignature() === before) return;
-  void renderRoute();
+  repaintList();
+}
+
+/**
+ * 列表数据变了就重绘。新建托管会话的表单是就地展开的，整页重绘会清掉正在输入的标题，
+ * 所以表单打开期间先记下来，等它从页面上消失后再补画一次。
+ */
+/**
+ * dock 里正在编辑时把整页重绘推迟到失焦之后。列表轮询每 5 秒一次，
+ * 直接 renderRoute() 会把待办输入框和光标一起换掉，看起来就是「输入没完就被刷新」。
+ * 返回 true 表示这次先不画。
+ */
+function deferForDockFocus(): boolean {
+  if (!captureDockFocus()) return false;
+  if (dockRenderDeferred) return true;
+  dockRenderDeferred = true;
+  document.activeElement?.addEventListener(
+    "blur",
+    () => {
+      if (!dockRenderDeferred) return;
+      dockRenderDeferred = false;
+      // 失焦后立刻重绘可能赶不上用户点回输入框，稍等一下再确认。
+      window.setTimeout(() => {
+        if (captureDockFocus()) return;
+        void renderRoute();
+      }, 300);
+    },
+    { once: true },
+  );
+  return true;
+}
+
+function repaintList(): void {
+  // 待办输入框正在打字：先别整页重绘，等失焦了再补一次。
+  if (deferForDockFocus()) return;
+  const host = document.querySelector(".hosted-create-host");
+  if (!host || host.childElementCount === 0) {
+    void renderRoute();
+    return;
+  }
+  if (deferredListRender) return;
+  deferredListRender = true;
+  const observer = new MutationObserver(() => {
+    if (host.childElementCount > 0) return;
+    observer.disconnect();
+    const pending = deferredListRender;
+    deferredListRender = false;
+    // 表单被整页替换（提交后跳到聊天页）时那次导航已经画过了，不要再画一遍。
+    if (pending && host.isConnected) void renderRoute();
+  });
+  observer.observe(host, { childList: true });
 }
 
 function viewHead(eyebrow: string, title: string, meta: string, extra?: HTMLElement): HTMLElement {
@@ -1862,6 +2870,7 @@ function renderClients(): void {
   renderShell(
     el("main", { className: "main" }, [
       viewHead("客户端", "已连接的客户端", `${data.apps.length} 个客户端 · ${totalProjects} 个工程 · ${totalSessions} 个会话`),
+      ...(connected ? [selfDeviceCard()] : []),
       list,
       button("刷新列表", () => {
         snapshot = null;
@@ -1901,6 +2910,13 @@ function renderProjects(route: Route & { level: "projects" }): void {
     list.append(el("li", {}, [row]));
   }
 
+  const isHosted = route.appId === "hosted";
+  const addForm = isHosted
+    ? hostedAddDirForm(() => {
+        snapshot = null;
+        void renderRoute();
+      })
+    : null;
   renderShell(
     el("main", { className: "main" }, [
       el("section", { className: "view-head" }, [
@@ -1908,8 +2924,23 @@ function renderProjects(route: Route & { level: "projects" }): void {
         el("div", { className: "view-head-main" }, [
           el("p", { className: "eyebrow", text: appInfo?.name ?? "客户端" }),
           el("h1", { className: "display", text: "工程" }),
-          el("p", { className: "meta", text: `${projects.length} 个工程，按会话数量排列` }),
+          el("p", {
+            className: "meta",
+            text: `${projects.length} 个工程，按会话数量排列${isHosted ? "；托管目录可在本页添加" : ""}`,
+          }),
         ]),
+        ...(addForm
+          ? [
+              button(
+                "添加目录",
+                () => {
+                  addForm.hidden = !addForm.hidden;
+                  if (!addForm.hidden) addForm.querySelector("input")?.focus();
+                },
+                "btn ghost small",
+              ),
+            ]
+          : []),
         button(
           "刷新",
           () => {
@@ -1919,10 +2950,45 @@ function renderProjects(route: Route & { level: "projects" }): void {
           "btn ghost small",
         ),
       ]),
+      ...(addForm ? [addForm] : []),
       list,
     ]),
     crumbsFor(route),
   );
+}
+
+/** 把本机目录加入托管白名单：必须是已存在的绝对路径，添加后立刻出现在工程列表里。 */
+function hostedAddDirForm(onAdded: () => void): HTMLElement {
+  const input = el("input", {
+    className: "input mono",
+    attrs: { type: "text", placeholder: "/Users/you/code/project", spellcheck: "false", autocomplete: "off" },
+  });
+  const status = el("p", { className: "hint", text: "填这台 Mac 上已存在的绝对路径，添加后即可从这里新建托管会话。" });
+  const form = el("div", { className: "add-dir" }, [input, button("添加", () => void submitPath(), "btn primary small"), status]);
+  form.hidden = true;
+  const submitPath = async (): Promise<void> => {
+    const path = input.value.trim();
+    if (!path) {
+      status.classList.add("error");
+      status.textContent = "先填目录路径。";
+      return;
+    }
+    status.classList.remove("error");
+    status.textContent = "正在添加…";
+    try {
+      await call<HostedDirsResult>("hosted.addDir", { path });
+      onAdded();
+    } catch (error) {
+      status.classList.add("error");
+      status.textContent = messageOf(error);
+    }
+  };
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void submitPath();
+  });
+  return form;
 }
 
 function renderSessions(route: Route & { level: "sessions" }): void {
@@ -1930,18 +2996,76 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const project = data.projects.find((item) => item.projectId === route.projectId);
   const appInfo = data.apps.find((item) => item.appId === route.appId);
   document.title = `${project?.name ?? "工程"} · Agent Bridge`;
-  const sessions = data.sessions
-    .filter((session) => session.projectId === route.projectId)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  const projectSessions = data.sessions.filter((session) => session.projectId === route.projectId);
+  const archivedCount = projectSessions.filter((session) => session.archived).length;
+  const sessions = visibleSessions(projectSessions, showArchived);
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
+  const isHosted = appInfo?.appId === "hosted";
+  const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
+  // 桌面客户端（例如 dsh）也能从网页新建：Bridge 代它起一次无界面运行，第一条消息随创建发出。
+  const canCreateDesktop = !isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
+  const panelHost = canCreateHosted || canCreateDesktop ? el("div", { className: "hosted-create-host" }) : null;
+  const draft = project && hostedDraft?.projectId === project.projectId ? hostedDraft : null;
+  if (panelHost && project && draft) panelHost.append(hostedCreatePanel(project, draft));
+  const desktopPanelDraft = project && desktopDraft?.projectId === project.projectId ? desktopDraft : null;
+  if (panelHost && project && appInfo && desktopPanelDraft) {
+    panelHost.append(desktopCreatePanel(project, appInfo, desktopPanelDraft));
+  }
+  const openCreate = (): void => {
+    if (!panelHost || !project || !appInfo) return;
+    if (canCreateDesktop) {
+      desktopDraft = { projectId: project.projectId, text: "" };
+      panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
+    } else {
+      hostedDraft = {
+        projectId: project.projectId,
+        title: "",
+        model: "",
+        piModel: "",
+        effort: "",
+        mode: "manual",
+        agent: "claude",
+        subagentModel: "",
+        piThinking: "",
+        subagentThinking: "",
+      };
+      panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
+    }
+    panelHost.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
 
   const list = el("ul", { className: "list" });
   if (sessions.length === 0) {
-    list.append(el("li", {}, [emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。")]));
+    list.append(
+      el("li", {}, [
+        isHosted
+          ? emptyState("还没有托管会话", "点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 或 pi 进程。")
+          : canCreateDesktop
+            ? emptyState("这个工程还没有会话", `点「新对话」，由这台 Mac 上的 Bridge 启动一次 ${appInfo?.name ?? "桌面客户端"}。`)
+            : emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。"),
+      ]),
+    );
   }
   for (const session of sessions) {
     const busy = session.busy === true;
     const unread = unreadAt(session.sessionId) !== undefined;
+    const state = busy
+      ? "正在执行"
+      : session.hosted
+        ? session.canSend
+          ? session.live
+            ? "Bridge 托管进程运行中"
+            : "Bridge 托管，发送时自动恢复"
+          : (session.sendBlockedReason ?? "只读")
+        : session.canSend
+          ? session.live
+            ? "桌面运行中，可发送"
+            : sendStateLabel(session)
+          : (session.sendBlockedReason ?? "只读");
+    // 托管会话的模型和权限模式在列表里也常驻显示，不必点进侧栏才知道。
+    const hostedFacts = session.hosted
+      ? ` · 模型 ${hostedModelLabel(session.model)} · ${hostedModeFact(session)}`
+      : "";
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
       el(
         "span",
@@ -1951,12 +3075,16 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           : [document.createTextNode(agentMark(session.kind))],
       ),
       el("span", { className: "row-main" }, [
-        el("strong", { className: "row-title", text: session.title }),
+        el("strong", { className: "row-title" }, [
+          ...(session.pinned ? [icon("pin", "icon pin-mark")] : []),
+          document.createTextNode(session.title),
+        ]),
+        ...(session.originalTitle
+          ? [el("span", { className: "row-original", text: `原名：${session.originalTitle}` })]
+          : []),
         el("span", {
           className: "meta",
-          text: busy
-            ? `${timeLabel(session.updatedAt)} · 正在执行`
-            : `${timeLabel(session.updatedAt)} · ${session.canSend ? (session.live ? "桌面运行中，可发送" : sendStateLabel(session)) : (session.sendBlockedReason ?? "只读")}`,
+          text: `${timeLabel(session.updatedAt)} · ${state}${hostedFacts}`,
         }),
       ]),
       busy
@@ -1966,12 +3094,42 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           ])
         : el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
       ...(unread ? [el("span", { className: "pill unread", text: "未读" })] : []),
+      ...(session.archived ? [el("span", { className: "pill", text: "已归档" })] : []),
       icon("chevron", "icon chev"),
     ]);
     row.addEventListener("click", () =>
       navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
     );
-    list.append(el("li", {}, [row]));
+    // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
+    const actions = el("div", { className: "row-menu" }, [
+      rowAction(
+        session.pinned ? icon("pinOff") : icon("pin"),
+        session.pinned ? "取消置顶" : "置顶",
+        () => void setSessionPinned(session, !session.pinned),
+      ),
+      ...(session.hosted
+        ? [
+            rowAction(
+              session.archived ? icon("unarchive") : icon("archive"),
+              session.archived ? "取消归档" : "归档",
+              () => void setSessionArchived(session, !session.archived),
+            ),
+            rowAction(icon("trash"), "删除", () => void deleteHostedSession(session), "danger"),
+          ]
+        : []),
+    ]);
+    list.append(el("li", { className: session.archived ? "row-item is-archived" : "row-item" }, [row, actions]));
+  }
+
+  const createHosted = canCreateHosted || canCreateDesktop ? button("", openCreate, "btn small create-btn") : null;
+  if (createHosted) {
+    createHosted.append(
+      el("span", {
+        className: "create-label-full",
+        text: canCreateHosted ? "新建托管会话" : "新对话",
+      }),
+      el("span", { className: "create-label-short", text: "新建" }),
+    );
   }
 
   renderShell(
@@ -1983,10 +3141,25 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           el("h1", { className: "display", text: project?.name ?? "会话" }),
           el("p", {
             className: "meta",
-            text: `${sessions.length} 个会话 · 最近更新在前${createDetail ? " · 无法新建对话" : ""}`,
+            text: isHosted
+              ? `${sessions.length} 个会话 · 由这台 Mac 上的 Bridge 托管，不出现在桌面应用`
+              : `${sessions.length} 个会话 · 置顶在前，其余按最近更新${createDetail ? " · 无法新建对话" : ""}`,
           }),
         ]),
-        ...(createDetail
+        ...(archivedCount > 0
+          ? [
+              button(
+                showArchived ? `隐藏已归档（${archivedCount}）` : `显示已归档（${archivedCount}）`,
+                () => {
+                  showArchived = !showArchived;
+                  void renderRoute();
+                },
+                `btn ghost small${showArchived ? " is-on" : ""}`,
+              ),
+            ]
+          : []),
+        ...(createHosted ? [createHosted] : []),
+        ...(createDetail && !isHosted && !canCreateDesktop
           ? [
               el("button", {
                 className: "btn ghost small create-btn",
@@ -2005,10 +3178,605 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         ),
       ]),
       ...(data.note ? [el("p", { className: "hint", text: data.note })] : []),
+      ...(panelHost ? [panelHost] : []),
       list,
     ]),
     crumbsFor(route),
   );
+}
+
+/** 权限模式的说明文案；bridge 只下发部分模式，未知值不显示说明。 */
+const HOSTED_MODE_HELP: Record<string, { short: string; detail: string }> = {
+  manual: {
+    short: "每次操作都要确认",
+    detail: "文件编辑、shell 命令、联网访问都会停下来等你确认。最安全的日常模式。",
+  },
+  acceptEdits: {
+    short: "工作目录内编辑免确认",
+    detail: "工作目录内的文件编辑，以及 mkdir/rm/mv/cp/sed 等常见文件命令自动放行；目录外路径、受保护路径（.git/.claude 等）和其它 shell 命令仍要确认。",
+  },
+  plan: {
+    short: "先出计划不动手",
+    detail: "只读代码并给出计划，不修改源码；计划批准后才按选定方式执行。不是完全只读。",
+  },
+  dontAsk: {
+    short: "不问，需要确认的直接拒绝",
+    detail: "不会弹出确认：凡是需要确认的操作一律自动拒绝，只运行只读命令和已预先授权的操作。无人值守时最安全，但联网、写文件常被拒。",
+  },
+  auto: {
+    short: "分类器自动判定",
+    detail: "由分类器逐个审查动作：明显危险的被拦下并说明原因，其余自动放行；只有少数情况仍会询问。",
+  },
+  bypassPermissions: {
+    short: "跳过权限检查",
+    detail: "不再询问、跳过安全检查，deny 规则和 sandbox（文件/网络隔离）仍然生效。只应在隔离环境里用。",
+  },
+};
+
+/** 会话列表与聊天页顶部用：权限模式的中文短名，未知值原样显示。 */
+function hostedModeShort(mode: string | undefined): string {
+  if (!mode) return "manual";
+  return HOSTED_MODE_HELP[mode]?.short ?? mode;
+}
+
+/** 托管会话的权限事实：pi 没有权限模式，写引擎名，免得显示一个不生效的 manual。 */
+function hostedModeFact(session: SessionSummary): string {
+  return session.hostedAgent === "pi" ? "pi 托管" : `权限 ${hostedModeShort(session.permissionMode)}`;
+}
+
+/** 托管会话的模型：记录过就用记录值，否则说明沿用 CLI 默认。 */
+function hostedModelLabel(model: string | undefined): string {
+  return model ? model : "CLI 默认";
+}
+
+function effortLabel(level: string): string {
+  const known: Record<string, string> = {
+    off: "关闭",
+    minimal: "最少",
+    low: "低",
+    medium: "中",
+    high: "高",
+    xhigh: "更高",
+    max: "最高",
+  };
+  return known[level] ? `${known[level]}（${level}）` : level;
+}
+
+/** pi 的思考等级：`pi --thinking` 与子代理的 `defaultThinking` 共用这一套取值。 */
+const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** 新建托管会话时加的启动参数：列表与勾选状态都记在浏览器本地。 */
+interface HostedArgPref {
+  value: string;
+  enabled: boolean;
+}
+
+const HOSTED_ARGS_KEY = "ab.hostedArgs";
+const MAX_HOSTED_ARGS = 24;
+let hostedArgPrefs: HostedArgPref[] | null = null;
+
+function loadHostedArgPrefs(): HostedArgPref[] {
+  if (hostedArgPrefs) return hostedArgPrefs;
+  let items: HostedArgPref[] = [];
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(HOSTED_ARGS_KEY) ?? "[]");
+    if (Array.isArray(raw)) {
+      items = raw
+        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+        .map((item) => ({
+          value: String(item["value"] ?? "").trim(),
+          enabled: item["enabled"] !== false,
+        }))
+        .filter((item) => item.value !== "")
+        .slice(0, MAX_HOSTED_ARGS);
+    }
+  } catch {
+    items = [];
+  }
+  hostedArgPrefs = items;
+  return items;
+}
+
+function saveHostedArgPrefs(): void {
+  if (!hostedArgPrefs) return;
+  try {
+    localStorage.setItem(HOSTED_ARGS_KEY, JSON.stringify(hostedArgPrefs));
+  } catch {
+    // 隐私模式下写不进去：这一次照样生效，只是下次不再记住。
+  }
+}
+
+function hostedCreatePanel(
+  project: ProjectInfo,
+  draft: {
+    title: string;
+    model: string;
+    piModel: string;
+    effort: string;
+    mode: string;
+    agent: HostedAgent;
+    subagentModel: string;
+    piThinking: string;
+    subagentThinking: string;
+  },
+): HTMLElement {
+  const form = el("form", { className: "panel hosted-create" });
+  const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
+  const agent = el("select", { className: "input", attrs: { "aria-label": "托管引擎" } });
+  agent.append(el("option", { text: "Claude Code", attrs: { value: "claude" } }));
+  const mode = el("select", { className: "input" });
+  const modeHint = el("p", { className: "hint" });
+  const model = el("select", { className: "input", attrs: { "aria-label": "模型" } });
+  model.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
+  const effort = el("select", { className: "input", attrs: { "aria-label": "思考程度" } });
+  effort.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
+  // pi 的主模型：清单来自 pi 自己的模型配置（hosted.options 的 piModels）。
+  const piModel = el("select", { className: "input", attrs: { "aria-label": "pi 模型" } });
+  piModel.append(el("option", { text: "pi 默认", attrs: { value: "" } }));
+  piModel.addEventListener("change", () => {
+    draft.piModel = piModel.value;
+  });
+  // 子代理模型只认 pi 认识的模型名：清单来自 hosted.options 的 piModels，读不到才手填。
+  const subagentSelect = el("select", { className: "input", attrs: { "aria-label": "子代理模型" } });
+  subagentSelect.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  subagentSelect.hidden = true;
+  subagentSelect.addEventListener("change", () => {
+    draft.subagentModel = subagentSelect.value;
+  });
+  const subagentModel = el("input", {
+    className: "input mono",
+    attrs: {
+      type: "text",
+      placeholder: "例如 group/dsgroup；留空跟随 pi 设置",
+      spellcheck: "false",
+      autocomplete: "off",
+      "aria-label": "子代理模型",
+    },
+  });
+  subagentModel.value = draft.subagentModel;
+  subagentModel.addEventListener("input", () => {
+    draft.subagentModel = subagentModel.value;
+  });
+  // pi 的思考等级：主模型用 `--thinking`，子代理写进 settings.json 的 defaultThinking。
+  const piThinking = el("select", { className: "input", attrs: { "aria-label": "pi 思考等级" } });
+  piThinking.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  piThinking.append(
+    ...PI_THINKING_LEVELS.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })),
+  );
+  piThinking.value = draft.piThinking;
+  piThinking.addEventListener("change", () => {
+    draft.piThinking = piThinking.value;
+  });
+  const subagentThinking = el("select", { className: "input", attrs: { "aria-label": "子代理思考等级" } });
+  subagentThinking.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  subagentThinking.append(
+    ...PI_THINKING_LEVELS.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })),
+  );
+  subagentThinking.value = draft.subagentThinking;
+  subagentThinking.addEventListener("change", () => {
+    draft.subagentThinking = subagentThinking.value;
+  });
+  let piModelList: ModelOption[] = [];
+  const optionsHint = el("p", { className: "hint", text: "正在读取本机 CLI 支持的模型与思考程度…" });
+  const effortHint = el("p", { className: "hint", text: "思考程度越高，回答更细致，但更慢也更费额度。" });
+  const title = el("input", {
+    className: "input",
+    attrs: { type: "text", placeholder: "标题（可选）", maxlength: "60" },
+  });
+  model.addEventListener("change", () => {
+    draft.model = model.value;
+  });
+  effort.addEventListener("change", () => {
+    draft.effort = effort.value;
+  });
+  title.value = draft.title;
+  title.addEventListener("input", () => {
+    draft.title = title.value;
+  });
+  const argsInput = el("input", {
+    className: "input",
+    attrs: { type: "text", placeholder: "例如 --agent mix-agent，回车添加", "aria-label": "启动参数" },
+  });
+  const argsList = el("div", { className: "arg-list" });
+  const renderArgs = (): void => {
+    const prefs = loadHostedArgPrefs();
+    if (prefs.length === 0) {
+      argsList.replaceChildren(el("p", { className: "hint", text: "还没有保存过启动参数。" }));
+      return;
+    }
+    argsList.replaceChildren(
+      ...prefs.map((pref) => {
+        const box = el("input", { attrs: { type: "checkbox" } });
+        box.checked = pref.enabled;
+        box.addEventListener("change", () => {
+          pref.enabled = box.checked;
+          saveHostedArgPrefs();
+        });
+        const remove = button("×", () => {
+          const list = loadHostedArgPrefs();
+          const at = list.indexOf(pref);
+          if (at >= 0) list.splice(at, 1);
+          saveHostedArgPrefs();
+          renderArgs();
+        }, "arg-remove");
+        remove.title = "删除这个参数";
+        remove.setAttribute("aria-label", `删除 ${pref.value}`);
+        return el("div", { className: "arg-row" }, [
+          el("label", { className: "arg-check" }, [box, el("span", { className: "arg-value", text: pref.value })]),
+          remove,
+        ]);
+      }),
+    );
+  };
+  const addArg = (raw: string): void => {
+    const value = raw.trim();
+    if (!value) return;
+    const prefs = loadHostedArgPrefs();
+    const existing = prefs.find((item) => item.value === value);
+    if (existing) {
+      existing.enabled = true;
+    } else if (prefs.length < MAX_HOSTED_ARGS) {
+      prefs.push({ value, enabled: true });
+    }
+    saveHostedArgPrefs();
+    renderArgs();
+  };
+  argsInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    // 回车只加参数，不提交表单。
+    event.preventDefault();
+    addArg(argsInput.value);
+    argsInput.value = "";
+  });
+  renderArgs();
+  const submit = button("创建", () => {
+    const cwd = project.cwd;
+    if (!cwd) return;
+    submit.disabled = true;
+    status.classList.remove("error");
+    const piSelected = draft.agent === "pi";
+    status.textContent = `正在启动 ${piSelected ? "pi" : "Claude Code"}…`;
+    const permissionMode = (mode.value || "manual") as HostedPermissionMode;
+    const extraArgs = loadHostedArgPrefs().filter((item) => item.enabled).map((item) => item.value);
+    const chosenModel = piSelected ? draft.piModel.trim() : model.value.trim();
+    void call<SessionGetResult>("hosted.create", {
+      path: cwd,
+      agent: draft.agent,
+      permissionMode,
+      ...(chosenModel ? { model: chosenModel } : {}),
+      ...(!piSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(piSelected && draft.piThinking.trim() ? { thinking: draft.piThinking.trim() } : {}),
+      ...(piSelected && draft.subagentModel.trim() ? { subagentModel: draft.subagentModel.trim() } : {}),
+      ...(piSelected && draft.subagentThinking.trim() ? { subagentThinking: draft.subagentThinking.trim() } : {}),
+      ...(extraArgs.length > 0 ? { args: extraArgs } : {}),
+      ...(title.value.trim() ? { title: title.value.trim() } : {}),
+    }, 30_000)
+      .then((result) => {
+        hostedDraft = null;
+        // Chat pages read the cached snapshot, so the new session must be in it
+        // before navigating; otherwise the page reports it as missing.
+        if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
+          snapshot = { ...snapshot, sessions: [result.session, ...snapshot.sessions] };
+        }
+        navigate({
+          level: "chat",
+          appId: "hosted",
+          projectId: result.session.projectId,
+          sessionId: result.session.sessionId,
+        });
+      })
+      .catch((error) => {
+        submit.disabled = false;
+        status.classList.add("error");
+        status.textContent = messageOf(error);
+      });
+  }, "btn small");
+  form.addEventListener("submit", (event) => event.preventDefault());
+  const syncModeHint = (): void => {
+    const help = HOSTED_MODE_HELP[mode.value];
+    modeHint.textContent = help ? help.detail : "";
+  };
+  mode.addEventListener("change", () => {
+    draft.mode = mode.value;
+    syncModeHint();
+  });
+  const modeField = el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]);
+  const modelField = el("label", { className: "field" }, [el("span", { text: "模型" }), model]);
+  const piModelField = el("label", { className: "field" }, [el("span", { text: "模型" }), piModel]);
+  const piThinkingField = el("label", { className: "field" }, [el("span", { text: "思考等级" }), piThinking]);
+  const effortField = el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]);
+  const subagentField = el("label", { className: "field" }, [
+    el("span", { text: "子代理模型（可选）" }),
+    subagentSelect,
+    subagentModel,
+  ]);
+  const subagentThinkingField = el("label", { className: "field" }, [
+    el("span", { text: "子代理思考等级（可选）" }),
+    subagentThinking,
+  ]);
+  const subagentHint = el("p", { className: "hint" });
+  const argsHint = el("p", { className: "hint" });
+  const agentHint = el("p", { className: "hint" });
+  const syncAgent = (): void => {
+    const pi = draft.agent === "pi";
+    // pi 没有权限模式与思考程度；模型清单也要等它跑过一次才拿得到，选 pi 时一并收起。
+    for (const node of [modeField, modeHint, modelField, effortField, effortHint, optionsHint]) node.hidden = pi;
+    piModelField.hidden = !pi;
+    piThinkingField.hidden = !pi;
+    subagentField.hidden = !pi;
+    subagentThinkingField.hidden = !pi;
+    subagentHint.hidden = !pi;
+    const useSelect = piModelList.length > 0;
+    subagentSelect.hidden = !useSelect;
+    subagentModel.hidden = useSelect;
+    argsHint.textContent = pi
+      ? "打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。"
+      : "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。";
+    agentHint.textContent = pi
+      ? "pi 用 `pi --mode rpc` 常驻，斜杠命令、扩展提问与换模型都能在网页里用。"
+      : "";
+    agentHint.hidden = !pi;
+  };
+  agent.addEventListener("change", () => {
+    draft.agent = agent.value === "pi" ? "pi" : "claude";
+    syncAgent();
+  });
+  form.append(
+    el("p", { className: "panel-title", text: "新建 Bridge 托管会话" }),
+    el("label", { className: "field" }, [
+      el("span", { text: "工作目录（仅限 Mac 上的允许列表）" }),
+      el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
+    ]),
+    el("label", { className: "field" }, [el("span", { text: "托管引擎" }), agent]),
+    agentHint,
+    modeField,
+    modeHint,
+    modelField,
+    piModelField,
+    piThinkingField,
+    effortField,
+    effortHint,
+    optionsHint,
+    subagentField,
+    subagentThinkingField,
+    subagentHint,
+    el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
+    argsHint,
+    el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
+    status,
+    el("div", { className: "row-actions" }, [submit]),
+  );
+  syncAgent();
+  void call<HostedOptionsResult>("hosted.options")
+    .then((info) => {
+      const groups: Array<[string, ModelOption[]]> = [
+        ["自定义", info.models.filter((item) => item.section === "custom")],
+        ["常用", info.models.filter((item) => (item.section ?? "main") === "main")],
+        ["更多", info.models.filter((item) => item.section === "overflow")],
+      ];
+      const modelNodes: Array<Node | string> = [el("option", { text: "CLI 默认", attrs: { value: "" } })];
+      // 之前选过、这次清单里没有的模型（换了 CLI 版本）也留着，别把草稿静默改掉。
+      if (draft.model && !info.models.some((item) => item.id === draft.model)) {
+        modelNodes.push(el("option", { text: `${draft.model}（清单里没有）`, attrs: { value: draft.model } }));
+      }
+      for (const [label, group] of groups) {
+        if (group.length === 0) continue;
+        modelNodes.push(
+          el("optgroup", { attrs: { label } }, group.map((item) => el("option", { text: item.name, attrs: { value: item.id } }))),
+        );
+      }
+      model.replaceChildren(...modelNodes);
+      model.value = draft.model;
+
+      const effortNodes: Array<Node | string> = [el("option", { text: "CLI 默认", attrs: { value: "" } })];
+      if (draft.effort && !info.efforts.includes(draft.effort)) {
+        effortNodes.push(el("option", { text: `${draft.effort}（当前 CLI 不认）`, attrs: { value: draft.effort } }));
+      }
+      effortNodes.push(...info.efforts.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })));
+      effort.replaceChildren(...effortNodes);
+      effort.value = draft.effort;
+
+      optionsHint.textContent = info.note ?? "";
+      optionsHint.hidden = !info.note;
+
+      piModelList = info.piModels ?? [];
+      const piOptionNodes = (current: string, fallback: string): Array<Node | string> => {
+        const nodes: Array<Node | string> = [el("option", { text: fallback, attrs: { value: "" } })];
+        // 之前选过、这次清单里没有的模型（换了 pi 配置）也留着，别把草稿静默改掉。
+        if (current && !piModelList.some((item) => item.id === current)) {
+          nodes.push(el("option", { text: `${current}（清单里没有）`, attrs: { value: current } }));
+        }
+        // pi 的清单可能上百项，按 provider 分组，选项里只写模型名（id 在 value 里）。
+        const groups = new Map<string, ModelOption[]>();
+        for (const item of piModelList) {
+          const cut = item.id.indexOf("/");
+          const provider = cut > 0 ? item.id.slice(0, cut) : item.id;
+          const group = groups.get(provider);
+          if (group) group.push(item);
+          else groups.set(provider, [item]);
+        }
+        for (const [provider, group] of groups) {
+          nodes.push(
+            el(
+              "optgroup",
+              { attrs: { label: provider } },
+              group.map((item) =>
+                el("option", {
+                  text: item.name === item.id ? item.id.slice(provider.length + 1) : item.name,
+                  attrs: { value: item.id },
+                }),
+              ),
+            ),
+          );
+        }
+        return nodes;
+      };
+      piModel.replaceChildren(...piOptionNodes(draft.piModel, "pi 默认"));
+      piModel.value = draft.piModel;
+      subagentSelect.replaceChildren(...piOptionNodes(draft.subagentModel, "跟随 pi 设置"));
+      subagentSelect.value = draft.subagentModel;
+      subagentHint.textContent =
+        piModelList.length > 0
+          ? "只影响之后新派生的子代理，主模型不动。"
+          : "读不到 pi 的模型配置，先手填 `厂商/模型`；留空跟随 pi 设置。";
+
+      const agentOptions = info.agents ?? [{ id: "claude" as const, label: "Claude Code", available: true }];
+      agent.replaceChildren(
+        ...agentOptions.map((item) =>
+          el("option", {
+            text: item.available ? item.label : `${item.label}（不可用）`,
+            attrs: {
+              value: item.id,
+              ...(item.available ? {} : { disabled: "" }),
+              ...(item.detail ? { title: item.detail } : {}),
+            },
+          }),
+        ),
+      );
+      const usable = agentOptions.filter((item) => item.available).map((item) => item.id);
+      if (!usable.includes(draft.agent)) draft.agent = usable[0] ?? "claude";
+      agent.value = draft.agent;
+      syncAgent();
+    })
+    .catch((error) => {
+      optionsHint.classList.add("error");
+      optionsHint.textContent = `读不到模型与思考程度：${messageOf(error)}`;
+    });
+  void call<HostedDirsResult>("hosted.dirs")
+    .then((config) => {
+      mode.replaceChildren(
+        ...config.permissionModes.map((item) => el("option", {
+          text: HOSTED_MODE_HELP[item] ? `${item} — ${HOSTED_MODE_HELP[item].short}` : item,
+          attrs: { value: item },
+        })),
+      );
+      mode.value = config.permissionModes.includes(draft.mode as HostedPermissionMode)
+        ? draft.mode
+        : "manual";
+      draft.mode = mode.value;
+      syncModeHint();
+      const idle = Math.round(config.idleTimeoutMs / 60_000);
+      const bypassNote = config.allowBypassPermissions
+        ? ""
+        : "；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）";
+      status.textContent = config.enabled
+        ? `只在 ${project.cwd ?? ""} 中运行；网页断开不会结束进程，空闲 ${idle} 分钟后自动停止，再发消息时 resume。${bypassNote}`
+        : (config.note ?? "Bridge 还没有配置可托管的目录。");
+      submit.disabled = !config.enabled;
+    })
+    .catch((error) => {
+      status.classList.add("error");
+      status.textContent = messageOf(error);
+      submit.disabled = true;
+    });
+  return form;
+}
+
+/** 桌面客户端的新建会话：起点是一条消息，会话由该客户端的无界面模式在工程目录里创建。 */
+function desktopCreatePanel(project: ProjectInfo, appInfo: AppInfo, draft: { text: string }): HTMLElement {
+  const form = el("form", { className: "panel hosted-create" });
+  const status = el("p", { className: "hint", text: appInfo.capabilities.createDetail ?? "" });
+  const text = el("textarea", {
+    className: "input",
+    attrs: { rows: "4", placeholder: "第一条消息", "aria-label": "第一条消息" },
+  });
+  text.value = draft.text;
+  text.addEventListener("input", () => {
+    draft.text = text.value;
+  });
+  const submit = button("创建", () => {
+    const message = text.value.trim();
+    if (!message) {
+      status.classList.add("error");
+      status.textContent = "先写下第一条消息";
+      return;
+    }
+    submit.disabled = true;
+    status.classList.remove("error");
+    status.textContent = `正在启动 ${appInfo.name}…`;
+    void call<SessionCreateResult>(
+      "session.create",
+      { appId: appInfo.appId, projectId: project.projectId, text: message },
+      45_000,
+    )
+      .then((result) => {
+        desktopDraft = null;
+        // 聊天页读的是缓存快照，新会话要先放进去，否则会被当成「找不到这个会话」。
+        if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
+          snapshot = { ...snapshot, sessions: [result.session, ...snapshot.sessions] };
+        }
+        navigate({
+          level: "chat",
+          appId: appInfo.appId,
+          projectId: result.session.projectId,
+          sessionId: result.session.sessionId,
+        });
+      })
+      .catch((error) => {
+        submit.disabled = false;
+        status.classList.add("error");
+        status.textContent = messageOf(error);
+      });
+  }, "btn small");
+  form.addEventListener("submit", (event) => event.preventDefault());
+  form.append(
+    el("p", { className: "panel-title", text: `新建 ${appInfo.name} 会话` }),
+    el("label", { className: "field" }, [
+      el("span", { text: "工作目录" }),
+      el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
+    ]),
+    el("label", { className: "field" }, [el("span", { text: "第一条消息" }), text]),
+    status,
+    el("div", { className: "row-actions" }, [submit]),
+  );
+  return form;
+}
+
+/** 首页的「本设备」卡片：显示这台浏览器在 Bridge 里的名字，并且就地改名。 */
+function selfDeviceCard(): HTMLElement {
+  const panel = el("section", { className: "panel self-device" });
+  const showName = (): void => {
+    const name = connected?.device.name ?? "";
+    panel.replaceChildren(
+      el("h2", { className: "panel-title", text: "本设备" }),
+      el("p", { className: "hint", text: "这台浏览器在 Bridge 里的名字，Mac 菜单栏和其它设备都按它显示。" }),
+      el("div", { className: "row-main" }, [el("strong", { className: "row-title", text: name })]),
+      el("div", { className: "actions" }, [button("改名", showForm, "btn ghost small")]),
+    );
+  };
+  const showForm = (): void => {
+    const input = el("input", {
+      className: "input",
+      attrs: { type: "text", value: connected?.device.name ?? "", maxlength: "64" },
+    });
+    const error = el("p", { className: "notice error hidden" });
+    const save = button("保存", () => {
+      const name = input.value.trim();
+      if (!name) {
+        error.textContent = "请输入设备名称";
+        error.classList.remove("hidden");
+        return;
+      }
+      save.disabled = true;
+      void renameSelfDevice(name)
+        .then(showName)
+        .catch((failure: unknown) => {
+          save.disabled = false;
+          error.textContent = messageOf(failure);
+          error.classList.remove("hidden");
+        });
+    }, "btn small");
+    panel.replaceChildren(
+      el("h2", { className: "panel-title", text: "本设备" }),
+      el("label", { className: "field" }, [el("span", { text: "设备名称" }), input]),
+      error,
+      el("div", { className: "actions" }, [save, button("取消", showName, "btn ghost small")]),
+    );
+    input.focus();
+    input.select();
+  };
+  showName();
+  return panel;
 }
 
 function renderDevices(): void {
@@ -2063,6 +3831,22 @@ function renderDevices(): void {
   );
 }
 
+/**
+ * 只改当前设备自己的名字：先让 Bridge 改记录，再同步本地凭据和内存里的状态，
+ * Mac 菜单栏、其它设备和首页列表都按新名字显示，不用重连。
+ */
+async function renameSelfDevice(name: string): Promise<void> {
+  const local = connected?.device;
+  if (!local) throw new Error("还没有连接 Bridge");
+  await call<{ ok: boolean }>("device.rename", { deviceId: local.deviceId, name });
+  local.name = name;
+  for (const item of connected?.devices ?? []) {
+    if (item.deviceId === local.deviceId) item.name = name;
+  }
+  rememberDeviceName(name);
+  await renameDevice(local.relayUrl, local.roomId, name).catch(() => undefined);
+}
+
 /** 只改当前设备自己的名字，改完同步本地记录，首页列表不用重连就能看到新名字。 */
 function beginRename(item: DeviceSummary, label: HTMLElement): void {
   const input = el("input", {
@@ -2079,16 +3863,8 @@ function beginRename(item: DeviceSummary, label: HTMLElement): void {
     }
     save.disabled = true;
     cancel.disabled = true;
-    void call<{ ok: boolean }>("device.rename", { deviceId: item.deviceId, name })
-      .then(async () => {
-        item.name = name;
-        const local = connected?.device;
-        if (local?.deviceId === item.deviceId) {
-          local.name = name;
-          await renameDevice(local.relayUrl, local.roomId, name).catch(() => undefined);
-        }
-        renderDevices();
-      })
+    void renameSelfDevice(name)
+      .then(() => renderDevices())
       .catch((failure: unknown) => {
         save.disabled = false;
         cancel.disabled = false;
@@ -2121,7 +3897,35 @@ function statusLabel(status: AppInfo["status"]): string {
   return status === "ready" ? "可用" : status === "needs_permission" ? "需要授权" : "不可用";
 }
 
+function hostedControlButton(summary: SessionSummary): HTMLButtonElement {
+  const node = button(
+    summary.live ? "停止进程" : "恢复进程",
+    () => {
+      node.disabled = true;
+      const method: Method = summary.live ? "hosted.stop" : "hosted.resume";
+      void call<unknown>(method, { sessionId: summary.sessionId }, 30_000)
+        .then(() => {
+          snapshot = null;
+          void renderRoute();
+        })
+        .catch((error) => {
+          node.disabled = false;
+          node.textContent = messageOf(error);
+        });
+    },
+    "btn ghost small",
+  );
+  node.title = summary.live
+    ? "结束这台 Mac 上的托管进程；会话记录保留，之后可恢复"
+    : "在这台 Mac 上 resume 这个托管会话";
+  return node;
+}
+
 function sendStateLabel(session: SessionSummary): string {
+  if (session.hosted) {
+    if (!session.canSend) return "只读";
+    return session.live ? "托管运行中" : "可恢复";
+  }
   if (session.live) return "桌面运行中";
   if (!session.canSend) return "只读";
   return "可发送";
@@ -2159,10 +3963,16 @@ interface ChatState {
   /** The latest turn was stopped by the user. */
   interrupted: boolean;
   context?: ContextUsage;
+  /** 客户端报告的斜杠命令与技能（名字不带斜杠），输入「/」时提示。 */
+  slashCommands?: string[];
+  /** 「停止」按钮：只在 Bridge 托管的会话且回合还在跑时出现。 */
+  stopButton?: HTMLButtonElement;
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
   compactSince?: number;
+  /** 改自动压缩阈值的状态；与 compact 分开，避免互相覆盖提示。 */
+  compaction?: { pending: boolean; error?: string; note?: string };
   /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
   answers?: Map<string, string[]>;
   contextButton: HTMLButtonElement;
@@ -2183,6 +3993,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   }
   document.title = `${summary.title} · Agent Bridge`;
   rememberSession(summary);
+  noteSessionTrail(hashFor(route), summary.title);
   markRead(summary.sessionId);
 
   const note = el("p", { className: "hint" });
@@ -2230,6 +4041,95 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     },
   });
   input.value = draftFor(summary.sessionId);
+  // 待办面板要通过它把文字填进当前会话的输入框。
+  composerRef = input;
+
+  // 截图直接粘贴：把剪贴板里的图片文件交给现有上传流程，文本粘贴保持原样。
+  input.addEventListener("paste", (event) => {
+    const items = [...(event.clipboardData?.items ?? [])];
+    const files = items
+      .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => file !== null);
+    if (files.length === 0) return;
+    event.preventDefault();
+    void addFiles(files);
+  });
+
+  const slashMenu = el("div", { className: "slash-menu" });
+  slashMenu.hidden = true;
+  let slashItems: string[] = [];
+  let slashIndex = 0;
+
+  /** 「/」之后还没空格的这一段就是要匹配的命令名。 */
+  function slashQuery(): { start: number; text: string } | null {
+    if (input.selectionStart !== input.selectionEnd) return null;
+    const caret = input.selectionStart ?? input.value.length;
+    const match = /(^|\s)\/([^\s/]*)$/.exec(input.value.slice(0, caret));
+    if (!match) return null;
+    const text = match[2] ?? "";
+    return { start: caret - text.length - 1, text };
+  }
+
+  function closeSlashMenu(): void {
+    slashMenu.hidden = true;
+    slashItems = [];
+    slashIndex = 0;
+  }
+
+  function renderSlashMenu(): void {
+    const query = slashQuery();
+    const commands = state.slashCommands ?? [];
+    if (!query || commands.length === 0) {
+      closeSlashMenu();
+      return;
+    }
+    const needle = query.text.toLowerCase();
+    const matches = commands
+      .filter((name) => name.toLowerCase().includes(needle))
+      .sort((a, b) => {
+        const byPrefix =
+          Number(b.toLowerCase().startsWith(needle)) - Number(a.toLowerCase().startsWith(needle));
+        return byPrefix !== 0 ? byPrefix : a.localeCompare(b);
+      })
+      .slice(0, 40);
+    if (matches.length === 0) {
+      closeSlashMenu();
+      return;
+    }
+    slashItems = matches;
+    if (slashIndex >= slashItems.length) slashIndex = 0;
+    slashMenu.replaceChildren(
+      ...slashItems.map((name, index) =>
+        el("button", {
+          className: `slash-item${index === slashIndex ? " is-active" : ""}`,
+          attrs: { type: "button" },
+          text: `/${name}`,
+        }),
+      ),
+    );
+    [...slashMenu.children].forEach((item, index) => {
+      item.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        const name = slashItems[index];
+        if (name) applySlash(name);
+      });
+    });
+    slashMenu.hidden = false;
+  }
+
+  /** 把光标所在的那段命令替换成选中的命令，光标留在命令后面。 */
+  function applySlash(name: string): void {
+    const query = slashQuery();
+    if (!query) return;
+    const rest = input.value.slice(query.start + query.text.length + 1).replace(/^\s+/, "");
+    input.value = `${input.value.slice(0, query.start)}/${name}${rest ? ` ${rest}` : " "}`;
+    const caret = query.start + name.length + 2;
+    input.setSelectionRange(caret, caret);
+    closeSlashMenu();
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
 
   function autoGrow(): void {
     input.style.height = "auto";
@@ -2252,6 +4152,39 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   };
   const sendButton = button("发送", submit, "btn primary");
   sendButton.disabled = !canSend;
+
+  // 托管会话的回合可以从网页直接停：进程留着，CLI 收到 interrupt 后回到可输入状态。
+  const stopButton = button("停止", () => void stopTurn(), "btn secondary stop-turn");
+  stopButton.title = "停止当前回合（会话和进程保留）";
+  stopButton.hidden = true;
+  stopButton.disabled = true;
+  state.stopButton = stopButton;
+  let stopping = false;
+  async function stopTurn(): Promise<void> {
+    if (stopping || !state.busy) return;
+    stopping = true;
+    stopButton.disabled = true;
+    state.status.textContent = "正在停止当前回合…";
+    try {
+      const result = await call<HostedInterruptResult>("hosted.interrupt", {
+        sessionId: state.session.sessionId,
+      });
+      if (result.session) state.session = result.session;
+      if (result.interrupted) {
+        state.busy = false;
+        state.interrupted = true;
+        state.status.textContent = "已停止当前回合";
+      } else {
+        state.status.textContent = "当前没有在跑的回合";
+      }
+      renderMessages(state);
+    } catch (error) {
+      state.status.textContent = messageOf(error);
+    } finally {
+      stopping = false;
+      paintStopButton(state);
+    }
+  }
 
   const attachList = el("div", { className: "attach-list" });
   const fileInput = el("input", { className: "file-input", attrs: { type: "file", multiple: "" } });
@@ -2308,12 +4241,14 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const composer = el("form", { className: "composer" }, [
     attachList,
     fileInput,
+    slashMenu,
     el("div", { className: "composer-row" }, [
       attachButton,
       input,
       loadOlder,
       refreshButton,
       contextButton,
+      stopButton,
       sendButton,
       collapseButton,
     ]),
@@ -2420,13 +4355,41 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     saveDraft(state.session.sessionId, input.value);
     autoGrow();
     updateSendState();
+    renderSlashMenu();
   });
   input.addEventListener("keydown", (event) => {
+    if (!slashMenu.hidden && slashItems.length > 0) {
+      if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+        event.preventDefault();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        slashIndex = (slashIndex + delta + slashItems.length) % slashItems.length;
+        renderSlashMenu();
+        return;
+      }
+      if (event.key === "Enter" || event.key === "Tab") {
+        event.preventDefault();
+        const name = slashItems[slashIndex];
+        if (name) applySlash(name);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeSlashMenu();
+        return;
+      }
+    }
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
       event.preventDefault();
       submit();
     }
   });
+  input.addEventListener("keyup", (event) => {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+      renderSlashMenu();
+    }
+  });
+  input.addEventListener("click", () => renderSlashMenu());
+  input.addEventListener("blur", () => closeSlashMenu());
   fileInput.addEventListener("change", () => {
     const files = [...(fileInput.files ?? [])];
     fileInput.value = "";
@@ -2467,6 +4430,38 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     document.removeEventListener("keydown", onModelKey);
   }
 
+  /** 一条模型选项：当前项只标「当前」，可切换的其余项点一下就换。 */
+  const modelRow = (
+    item: ModelOption,
+    current: boolean,
+    canSwitch: boolean,
+    pick: (id: string) => void,
+    action: string,
+  ): HTMLElement => {
+    const content = [
+      el("div", { className: "model-item-main" }, [
+        el("span", { className: "model-item-name", text: item.name }),
+        ...(item.id ? [el("span", { className: "model-item-id", text: item.id })] : []),
+      ]),
+      ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+    ];
+    if (canSwitch && !current) {
+      // 托管会话可以从网页直接换模型：换完停掉进程，下一条消息按新模型 resume。
+      const row = el(
+        "button",
+        { className: "model-item is-switchable", attrs: { type: "button", title: `${action}：${item.name}` } },
+        content,
+      );
+      row.addEventListener("click", () => pick(item.id));
+      return row;
+    }
+    return el("div", { className: `model-item${current ? " is-current" : ""}` }, content);
+  };
+
+  /** 子代理模型一行；id 为空表示「跟随 pi 设置」，选它就把覆盖清掉。 */
+  const subagentRow = (item: ModelOption, current: boolean, pick: (id: string) => void): HTMLElement =>
+    modelRow(item, current, true, pick, "子代理用");
+
   const paintModels = (info: SessionModelsResult): void => {
     const label = info.currentName ?? info.current;
     if (!label && info.models.length === 0) {
@@ -2480,25 +4475,35 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("span", { className: "model-chip-value", text: label ?? "未知" }),
       icon("chevron", "icon model-chev"),
     );
-    modelButton.title = `当前模型：${label ?? "未知"}`;
+    modelButton.title = `当前模型：${label ?? "未知"}${
+      info.canSwitchSubagent ? ` · 子代理：${info.subagentModel ?? "跟随 pi 设置"}` : ""
+    }`;
     const rows: HTMLElement[] = [];
-    for (const section of ["main", "overflow"] as const) {
+    for (const section of ["main", "custom", "overflow"] as const) {
       const items = info.models.filter((item) => (item.section ?? "main") === section);
       if (items.length === 0) continue;
       rows.push(
-        el("p", { className: "model-pop-group", text: section === "main" ? "常用" : "更多" }),
+        el("p", {
+          className: "model-pop-group",
+          text: section === "main" ? "常用" : section === "custom" ? "自定义" : "更多",
+        }),
       );
       for (const item of items) {
-        const current = item.id === info.current;
-        rows.push(
-          el("div", { className: `model-item${current ? " is-current" : ""}` }, [
-            el("div", { className: "model-item-main" }, [
-              el("span", { className: "model-item-name", text: item.name }),
-              el("span", { className: "model-item-id", text: item.id }),
-            ]),
-            ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
-          ]),
-        );
+        rows.push(modelRow(item, item.id === info.current, info.canSwitch, applyModel, "切换模型"));
+      }
+    }
+    // pi 的子代理模型是单独的设置：只影响之后新派生的子代理，主模型不动。
+    if (info.canSwitchSubagent) {
+      rows.push(el("p", { className: "model-pop-group", text: "子代理模型" }));
+      rows.push(
+        subagentRow(
+          { id: "", name: "跟随 pi 设置", section: undefined },
+          !info.subagentModel,
+          applySubagentModel,
+        ),
+      );
+      for (const item of info.models) {
+        rows.push(subagentRow(item, item.id === info.subagentModel, applySubagentModel));
       }
     }
     if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
@@ -2520,6 +4525,31 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     }
   };
 
+  async function applyModel(model: string): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setModel", { sessionId: route.sessionId, model });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(`模型已换成 ${model}，下一条消息按新模型运行`);
+    } catch (error) {
+      flashNotice(`换模型失败：${messageOf(error)}`);
+    }
+  }
+
+  /** 只换子代理模型：主模型不动，之后新派生的子代理按它跑。 */
+  async function applySubagentModel(model: string): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setSubagentModel", { sessionId: route.sessionId, model: model || null });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(model ? `子代理模型已换成 ${model}，新派生的子代理按它运行` : "子代理模型改回跟随 pi 设置");
+    } catch (error) {
+      flashNotice(`换子代理模型失败：${messageOf(error)}`);
+    }
+  }
+
   modelButton.addEventListener("click", () => {
     if (!modelPop.hidden) {
       closeModels();
@@ -2533,7 +4563,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   });
   void loadModels();
 
-  const collapsed = window.matchMedia("(max-width: 720px)").matches;
+  // 桌面端也默认收起，把高度让给聊天记录；需要时点「展开」。
+  const collapsed = true;
   const head = el("section", { className: `view-head chat-head${collapsed ? " is-collapsed" : ""}` });
   const headToggle = button("", () => {
     const isCollapsed = head.classList.toggle("is-collapsed");
@@ -2556,15 +4587,71 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   railToggle.setAttribute("aria-label", "显示会话侧栏");
   railToggle.title = "显示环境、上下文、连接器与后台任务";
 
+  const chatMeta = summary.hosted
+    ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · 模型 ${hostedModelLabel(
+        summary.model,
+      )} · ${hostedModeFact(summary)} · ${
+        summary.live ? "进程运行中" : "进程已停止，发送时自动恢复"
+      }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
+    : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`;
+  // Bridge 侧覆盖了显示名时同时展示原名，回源应用里仍能认出这条会话。
+  const rename = button("", () => {
+    renameSessionSheet(summary, (renamed) => {
+      if (snapshot) {
+        snapshot = {
+          ...snapshot,
+          sessions: snapshot.sessions.map((item) =>
+            item.sessionId === renamed.sessionId ? renamed : item,
+          ),
+        };
+      }
+      void renderRoute();
+    });
+  }, "icon-btn rename-btn");
+  rename.append(icon("pencil"));
+  rename.setAttribute("aria-label", "重命名会话");
+  rename.title = "重命名会话";
+
+  const pinButton = button("", () => void setSessionPinned(summary, !summary.pinned), "icon-btn pin-btn");
+  pinButton.append(icon(summary.pinned ? "pinOff" : "pin"));
+  pinButton.setAttribute("aria-label", summary.pinned ? "取消置顶" : "置顶会话");
+  pinButton.setAttribute("aria-pressed", String(summary.pinned === true));
+  pinButton.title = summary.pinned ? "取消置顶" : "置顶会话";
+  const archiveButton = summary.hosted
+    ? button("", () => void setSessionArchived(summary, !summary.archived), "icon-btn archive-btn")
+    : null;
+  if (archiveButton) {
+    archiveButton.append(icon(summary.archived ? "unarchive" : "archive"));
+    archiveButton.setAttribute("aria-label", summary.archived ? "取消归档" : "归档会话");
+    archiveButton.title = summary.archived ? "取消归档" : "归档会话";
+  }
+  const deleteButton = summary.hosted
+    ? button("", () => void deleteHostedSession(summary), "icon-btn danger delete-btn")
+    : null;
+  if (deleteButton) {
+    deleteButton.append(icon("trash"));
+    deleteButton.setAttribute("aria-label", "删除会话");
+    deleteButton.title = "删除会话（停进程、删聊天记录）";
+  }
+
   head.append(
     back,
     el("div", { className: "view-head-main" }, [
       el("p", { className: "eyebrow", text: `${data.apps.find((item) => item.appId === route.appId)?.name ?? "客户端"} · ${project?.name ?? "工程"}` }),
       el("h1", { className: "display chat-title", text: summary.title }),
-      el("p", { className: "meta", text: `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}` }),
+      (() => {
+        const metaText = `${chatMeta}${summary.originalTitle ? ` · 原名：${summary.originalTitle}` : ""}`;
+        // 桌面端头部只留一行，说明会被省略号截断，完整内容挂在 title 上。
+        return el("p", { className: "meta", text: metaText, attrs: { title: metaText } });
+      })(),
     ]),
     el("div", { className: "chat-head-side" }, [
       el("span", { className: summary.canSend ? "pill ok" : "pill", text: sendStateLabel(summary) }),
+      rename,
+      pinButton,
+      ...(archiveButton ? [archiveButton] : []),
+      ...(deleteButton ? [deleteButton] : []),
+      ...(summary.hosted ? [hostedControlButton(summary)] : []),
       railToggle,
       headToggle,
     ]),
@@ -2573,6 +4660,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   // 工作树会话的项目是原仓库，但远程工具要落在它真正工作的目录。
   const cwd = summary.cwd ?? project?.cwd;
   previewRoot = cwd;
+  previewSessionId = summary.sessionId;
   const rail = createRail(summary.sessionId, summary.appId, cwd);
   railToggle.setAttribute("aria-pressed", String(rail.root.classList.contains("is-open")));
   state.rail = rail.state;
@@ -2658,6 +4746,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   document.title = `后台任务 · ${summary.title} · Agent Bridge`;
   markRead(summary.sessionId);
   previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
+  previewSessionId = summary.sessionId;
 
   const note = el("p", { className: "hint", text: "正在读取子任务记录…" });
   const list = el("div", { className: "transcript-body" });
@@ -3679,12 +5768,20 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
         compactChanged = true;
       }
     }
-    if (result.context) state.context = result.context;
-    if (result.context || compactChanged) paintContext(state);
+    if (result.context) {
+      // 轮询每 5 秒一次，上下文没变就不重建弹层：重建会打断正在输入的阈值。
+      const changed = JSON.stringify(result.context) !== JSON.stringify(state.context);
+      state.context = result.context;
+      if (changed || compactChanged) paintContext(state);
+    } else if (compactChanged) {
+      paintContext(state);
+    }
+    if (result.slashCommands) state.slashCommands = result.slashCommands;
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
     state.interrupted = result.interrupted === true;
+    if (busyChanged) paintStopButton(state);
     if (added || busyChanged || interruptedChanged || state.messages.length === 0) {
       renderMessages(state);
     }
@@ -3759,6 +5856,8 @@ function paintContext(state: ChatState): void {
     <circle class="context-arc" cx="10" cy="10" r="${radius}" fill="none" stroke-width="2.6" stroke-linecap="round" transform="rotate(-90 10 10)" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${(circumference * (1 - ratio)).toFixed(2)}"/>
   </svg>`;
 
+  // 弹层每轮轮询都会重建：正在输入的阈值不能被清掉，先记下草稿与光标，重建后还原。
+  const draft = contextDraft(pop, state);
   pop.replaceChildren(
     el("div", { className: "context-head" }, [
       el("span", { className: "context-percent", text: `${percent}%` }),
@@ -3781,7 +5880,34 @@ function paintContext(state: ChatState): void {
         ]))]
       : []),
     ...(percent >= 50 ? [contextCompactActions(state)] : []),
+    ...(state.session.hostedAgent === "pi" ? [contextCompactionSetting(state)] : []),
   );
+  restoreContextDraft(pop, draft);
+}
+
+/** 上下文弹层里正在编辑的输入框草稿；保存中或没有焦点时不保留。 */
+interface ContextDraft {
+  value: string;
+  start: number | null;
+  end: number | null;
+}
+
+function contextDraft(pop: HTMLElement, state: ChatState): ContextDraft | null {
+  if (state.compaction?.pending) return null;
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement)) return null;
+  if (active.dataset["persist"] !== "compaction" || !pop.contains(active)) return null;
+  return { value: active.value, start: active.selectionStart, end: active.selectionEnd };
+}
+
+function restoreContextDraft(pop: HTMLElement, draft: ContextDraft | null): void {
+  if (!draft) return;
+  const next = pop.querySelector<HTMLInputElement>('input[data-persist="compaction"]');
+  if (!next || next.disabled) return;
+  next.value = draft.value;
+  // preventScroll：重绘发生在滚动位置之上时，别把页面拉回输入框。
+  next.focus({ preventScroll: true });
+  if (draft.start !== null && draft.end !== null) next.setSelectionRange(draft.start, draft.end);
 }
 
 /** 上下文过半时在弹层里给出压缩入口：客户端能自己压就调用，否则复制命令让用户粘贴。 */
@@ -3839,6 +5965,90 @@ function contextCompactActions(state: ChatState): HTMLElement {
   return row;
 }
 
+/**
+ * pi 托管会话的自动压缩阈值：pi 只在上下文剩这么多 token 时触发压缩，
+ * 默认 16384。阈值只能写在会话语义目录的 settings.json 里，改完会重启 pi 进程。
+ */
+function contextCompactionSetting(state: ChatState): HTMLElement {
+  const row = el("div", { className: "context-actions" });
+  const pending = state.compaction?.pending === true;
+  const current = state.session.compactionReserveTokens;
+  const input = el("input", {
+    className: "context-input",
+    attrs: { type: "number", min: "0", step: "1024", inputmode: "numeric", placeholder: "16384", "data-persist": "compaction" },
+  });
+  if (typeof current === "number") input.value = String(current);
+  input.disabled = pending;
+  input.setAttribute("aria-label", "自动压缩阈值（剩余 tokens）");
+  const save = el("button", {
+    className: "context-action",
+    text: pending ? "保存中…" : "保存阈值",
+    attrs: { type: "button" },
+  });
+  save.disabled = pending;
+  const follow = el("button", {
+    className: "context-action",
+    text: "跟随 pi",
+    attrs: { type: "button" },
+  });
+  follow.disabled = pending;
+  const hint = el("p", { className: "context-hint" });
+  if (state.compaction?.error) {
+    hint.textContent = state.compaction.error;
+    hint.classList.add("is-error");
+  } else if (state.compaction?.note) {
+    hint.textContent = state.compaction.note;
+  } else {
+    hint.textContent =
+      typeof current === "number"
+        ? `当前剩 ${current} tokens 时压缩；改完重启 pi 进程，下一条消息生效。`
+        : "当前跟随 pi 设置（默认剩 16384 tokens 时压缩）；改完重启 pi 进程，下一条消息生效。";
+  }
+  save.addEventListener("click", () => {
+    const raw = input.value.trim();
+    const tokens = Number(raw);
+    if (!raw || !Number.isSafeInteger(tokens) || tokens < 0) {
+      hint.textContent = "填一个不小于 0 的整数（tokens）";
+      hint.classList.add("is-error");
+      return;
+    }
+    void runSetCompaction(state, tokens);
+  });
+  follow.addEventListener("click", () => {
+    void runSetCompaction(state, null);
+  });
+  row.append(
+    el("p", { className: "context-label", text: "自动压缩阈值" }),
+    el("div", { className: "context-compaction-row" }, [input, save, follow]),
+    hint,
+  );
+  return row;
+}
+
+async function runSetCompaction(state: ChatState, tokens: number | null): Promise<void> {
+  if (state.compaction?.pending) return;
+  state.compaction = { pending: true };
+  paintContext(state);
+  try {
+    const result = await call<SessionGetResult>(
+      "hosted.setCompaction",
+      { sessionId: state.session.sessionId, reserveTokens: tokens },
+      60_000,
+    );
+    state.session = result.session;
+    state.compaction = {
+      pending: false,
+      note:
+        tokens === null
+          ? "已改回跟随 pi 设置，下一条消息生效。"
+          : `已设为剩 ${tokens} tokens 时压缩，下一条消息生效。`,
+    };
+  } catch (error) {
+    state.compaction = { pending: false, error: messageOf(error) };
+  }
+  paintContext(state);
+}
+
 async function runCompact(state: ChatState): Promise<void> {
   if (state.compact?.pending) return;
   state.compactSince = Date.now();
@@ -3884,7 +6094,7 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (hasText && session) meta.append(shareButton(session, message));
+  if (hasText && session) meta.append(messageActions([copyButton(textBlocks([message])), shareButton(session, message)]));
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
@@ -3917,7 +6127,27 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     .map((question) => state?.answers?.get(askKey(block, question)))
     .filter((labels): labels is string[] => labels !== undefined);
   // 提问在等答案时回合仍在跑；回合结束后的旧提问不能再点，否则会当新消息重发。
-  const canAnswer = state !== null && state.session.canSend && state.busy;
+  // 终端会话靠 herdr 往面板 pty 按键代答，所以 canSend 为 false 时选项仍可点。
+  // herdr 只代答单题单选，多题多选仍要在终端里答。
+  const herdrSingle =
+    state?.session.askChannel === "herdr" && questions.length === 1 && !questions[0]?.multiSelect;
+  const canAnswer = state !== null && state.busy && (state.session.canSend || herdrSingle);
+  // 一个问题：点选即发送。多个问题：逐个选完，最后统一提交一条消息。
+  const batch = questions.length > 1;
+  const picks = new Map<string, Set<string>>();
+  const batchButtons: HTMLButtonElement[] = [];
+  const labelsOf = (question: MessageQuestion): string[] => {
+    const already = state?.answers?.get(askKey(block, question));
+    if (already) return already;
+    const picked = picks.get(question.question);
+    return question.options.map((option) => option.label).filter((label) => picked?.has(label));
+  };
+  let batchSubmit: HTMLButtonElement | null = null;
+  const syncBatch = (): void => {
+    if (!batchSubmit) return;
+    batchSubmit.disabled = questions.some((question) => labelsOf(question).length === 0);
+  };
+
   for (const question of questions) {
     const sent = state?.answers?.get(askKey(block, question));
     const selectable = canAnswer && sent === undefined;
@@ -3932,8 +6162,9 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     if (question.options.length > 0) {
       const row = el("div", { className: "ask-options" });
       const picked = new Set<string>();
+      picks.set(question.question, picked);
       const choices: HTMLButtonElement[] = [];
-      const submit = selectable && question.multiSelect
+      const submit = selectable && question.multiSelect && !batch
         ? el("button", { className: "ask-submit", text: "提交选择", attrs: { type: "button" } })
         : null;
       for (const option of question.options) {
@@ -3951,13 +6182,32 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
           "button",
           {
             className: "ask-option is-selectable",
-            attrs: { type: "button", "aria-pressed": "false" },
+            attrs: { type: "button", "aria-pressed": "false", "data-label": option.label },
           },
           children,
         );
         choice.addEventListener("click", () => {
+          if (batch) {
+            if (question.multiSelect) {
+              if (picked.has(option.label)) picked.delete(option.label);
+              else picked.add(option.label);
+            } else {
+              picked.clear();
+              picked.add(option.label);
+            }
+            for (const item of choices) {
+              item.setAttribute("aria-pressed", picked.has(item.dataset["label"] ?? "") ? "true" : "false");
+            }
+            syncBatch();
+            return;
+          }
           if (!question.multiSelect) {
-            void submitAskAnswer(state, askKey(block, question), [option.label], choices);
+            void submitAskAnswers(
+              state,
+              [{ key: askKey(block, question), labels: [option.label] }],
+              option.label,
+              choices,
+            );
             return;
           }
           if (picked.has(option.label)) picked.delete(option.label);
@@ -3966,17 +6216,21 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
           if (submit) submit.disabled = picked.size === 0;
         });
         choices.push(choice);
+        batchButtons.push(choice);
         row.append(choice);
       }
       if (submit) {
         submit.disabled = true;
         submit.addEventListener("click", () => {
           // 按选项原本的顺序发出，避免跟点选顺序绑在一起。
-          const labels = question.options
-            .map((option) => option.label)
-            .filter((label) => picked.has(label));
+          const labels = labelsOf(question);
           if (labels.length === 0) return;
-          void submitAskAnswer(state, askKey(block, question), labels, [...choices, submit]);
+          void submitAskAnswers(
+            state,
+            [{ key: askKey(block, question), labels }],
+            labels.join("、"),
+            [...choices, submit],
+          );
         });
         row.append(submit);
       }
@@ -3984,6 +6238,22 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
     }
     box.append(card);
   }
+
+  if (batch && canAnswer) {
+    const submit = el("button", { className: "ask-submit", text: "提交答案", attrs: { type: "button" } });
+    submit.disabled = true;
+    submit.addEventListener("click", () => {
+      const answers = questions.map((question) => ({ key: askKey(block, question), labels: labelsOf(question) }));
+      if (answers.some((entry) => entry.labels.length === 0)) return;
+      // 多选答案内部用「/」连接：只有问题之间用「、」，否则 Bridge 按「、」切分会串位。
+      const text = answers.map((entry) => entry.labels.join("/")).join("、");
+      void submitAskAnswers(state, answers, text, [...batchButtons, submit]);
+    });
+    batchSubmit = submit;
+    box.append(submit);
+    syncBatch();
+  }
+
   box.append(
     el("p", {
       className: "ask-note",
@@ -3991,22 +6261,27 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
         answered.length > 0
           ? `已发送：${answered.flat().join("、")}`
           : canAnswer
-            ? "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
-            : "请在桌面端回答这个提问",
+            ? batch
+              ? "逐个选好后点「提交答案」，会作为一条消息发到会话；桌面上的提问框不会自动关闭。"
+              : state?.session.askChannel === "herdr"
+                ? "点选后会在终端面板里替你按键选中这个选项。"
+                : "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
+            : state?.session.askChannel === "herdr"
+              ? "这个提问有多道题或是多选，请在终端里回答"
+              : (state?.session.sendBlockedReason ?? "请在桌面端回答这个提问"),
     }),
   );
   return box;
 }
 
-/** 选项就是一句话：原样发出去，桌面端的提问对话框仍由桌面收尾。 */
-async function submitAskAnswer(
+/** 答案按问题顺序拼成一条消息发出；桌面端的提问对话框仍由桌面收尾。 */
+async function submitAskAnswers(
   state: ChatState | null,
-  key: string,
-  labels: string[],
+  answers: Array<{ key: string; labels: string[] }>,
+  text: string,
   buttons: HTMLButtonElement[],
 ): Promise<void> {
   if (!state) return;
-  const text = labels.join("、");
   for (const item of buttons) item.disabled = true;
   state.status.classList.remove("error");
   state.status.textContent = "正在发送选择…";
@@ -4021,7 +6296,8 @@ async function submitAskAnswer(
       for (const item of buttons) item.disabled = false;
       return;
     }
-    (state.answers ??= new Map<string, string[]>()).set(key, labels);
+    state.answers ??= new Map<string, string[]>();
+    for (const entry of answers) state.answers.set(entry.key, entry.labels);
     state.queued.push({
       id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
       match: text,
@@ -4031,6 +6307,7 @@ async function submitAskAnswer(
     });
     state.busy = true;
     state.interrupted = false;
+    paintStopButton(state);
     renderMessages(state);
     state.status.textContent = result.delivered
       ? "已发送选择"
@@ -4101,10 +6378,15 @@ async function sendNextStep(
     });
     state.busy = true;
     state.interrupted = false;
+    paintStopButton(state);
     renderMessages(state);
-    state.status.textContent = result.delivered
-      ? "已投递到桌面会话"
-      : (result.detail ?? "已提交，等待桌面执行");
+    state.status.textContent = state.session.hosted
+      ? result.delivered
+        ? "已写入托管会话"
+        : (result.detail ?? "已提交")
+      : result.delivered
+        ? "已投递到桌面会话"
+        : (result.detail ?? "已提交，等待桌面执行");
     window.setTimeout(() => {
       void refreshTail(state);
     }, 800);
@@ -4119,6 +6401,8 @@ async function sendNextStep(
 
 /** Project directory of the chat on screen; file previews are scoped to it. */
 let previewRoot: string | undefined;
+/** fs.read 要 sessionId 才会放行：文件预览落在哪个会话的项目里就带哪个。 */
+let previewSessionId: string | undefined;
 
 const IMAGE_EXT = /\.(png|jpe?g|gif|webp|avif|bmp|ico|svg)$/i;
 
@@ -4153,9 +6437,10 @@ function fileName(path: string): string {
 
 async function readLocalFile(path: string): Promise<FsReadResult> {
   const root = previewRoot;
-  if (!root) throw new Error("这个会话没有项目目录，无法预览文件");
+  const sessionId = previewSessionId;
+  if (!root || !sessionId) throw new Error("这个会话没有项目目录，无法预览文件");
   const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
-  return call<FsReadResult>("fs.read", { root, path: full });
+  return call<FsReadResult>("fs.read", { sessionId, root, path: full });
 }
 
 /**
@@ -4230,6 +6515,8 @@ let filePreviewOverlay: HTMLElement | null = null;
 let filePreviewBody: HTMLElement | null = null;
 let filePreviewTitle: HTMLElement | null = null;
 let filePreviewNote: HTMLElement | null = null;
+/** 预览头部右侧的操作区：文本文档放「复制」，图片等二进制不放。 */
+let filePreviewActions: HTMLElement | null = null;
 /** Increments per open/close so a late response cannot overwrite a newer preview. */
 let previewRequest = 0;
 
@@ -4246,10 +6533,11 @@ function ensureFilePreview(): HTMLElement {
   close.addEventListener("click", closeFilePreview);
   filePreviewBody = el("div", { className: "file-preview-body" });
   filePreviewNote = el("p", { className: "file-preview-note" });
+  filePreviewActions = el("span", { className: "file-preview-actions" });
   overlay.append(
     backdrop,
     el("div", { className: "file-preview-card" }, [
-      el("header", { className: "file-preview-head" }, [filePreviewTitle, close]),
+      el("header", { className: "file-preview-head" }, [filePreviewTitle, filePreviewActions, close]),
       filePreviewBody,
       filePreviewNote,
     ]),
@@ -4268,6 +6556,7 @@ function closeFilePreview(): void {
   filePreviewOverlay.hidden = true;
   document.body.classList.remove("has-file-preview");
   filePreviewBody?.replaceChildren();
+  filePreviewActions?.replaceChildren();
 }
 
 async function openFilePreview(path: string): Promise<void> {
@@ -4280,6 +6569,7 @@ async function openFilePreview(path: string): Promise<void> {
     filePreviewTitle.title = path;
   }
   if (filePreviewNote) filePreviewNote.textContent = "";
+  filePreviewActions?.replaceChildren();
   filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: "正在读取…" }));
   try {
     const file = await readLocalFile(path);
@@ -4294,6 +6584,10 @@ async function openFilePreview(path: string): Promise<void> {
       filePreviewBody?.replaceChildren(body);
     } else {
       filePreviewBody?.replaceChildren(el("pre", { className: "file-preview-text", text: file.text ?? "" }));
+    }
+    // 复制的是文件原文（markdown、svg 也复制源码）；位图这类二进制没有可复制的文本。
+    if (filePreviewActions && typeof file.text === "string" && file.text.length > 0) {
+      filePreviewActions.replaceChildren(copyButton(file.text, "复制全部内容"));
     }
     if (filePreviewNote) {
       filePreviewNote.textContent = `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`;
@@ -4326,6 +6620,47 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
     void openShare(session, message);
   });
   return share;
+}
+
+/** 复制一段输出；写剪贴板失败时给出可见反馈，不静默。 */
+function copyButton(text: string, title = "复制这段输出"): HTMLButtonElement {
+  const label = el("span", { text: "复制" });
+  const copy = el("button", {
+    className: "share-btn copy-btn",
+    attrs: { type: "button", title, "aria-label": title },
+  }, [icon("copy"), label]);
+  const flash = (next: string): void => {
+    label.textContent = next;
+    setTimeout(() => {
+      label.textContent = "复制";
+    }, 1_500);
+  };
+  copy.addEventListener("click", () => {
+    if (!navigator.clipboard) {
+      flash("无法复制");
+      return;
+    }
+    void navigator.clipboard.writeText(text).then(
+      () => flash("已复制"),
+      () => flash("复制失败"),
+    );
+  });
+  return copy;
+}
+
+/** 消息头右侧的操作区：分享、复制。 */
+function messageActions(buttons: (HTMLElement | null)[]): HTMLElement {
+  return el("span", { className: "message-actions" }, buttons.filter((item): item is HTMLElement => item !== null));
+}
+
+/** 消息里所有正文块，按顺序拼回纯文本。 */
+function textBlocks(messages: MessageRecord[]): string {
+  return messages
+    .flatMap((message) => message.blocks)
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n\n")
+    .trim();
 }
 
 function assistantTurn(
@@ -4362,7 +6697,11 @@ function assistantTurn(
     ...(peer ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (lastText && session) meta.append(shareButton(session, lastText));
+  if (session) {
+    // 复制整回合的输出，分享仍沿用最后一条带正文的消息。
+    const copyText = textBlocks(messages);
+    meta.append(messageActions([copyText ? copyButton(copyText) : null, lastText ? shareButton(session, lastText) : null]));
+  }
   bubble.append(meta);
   let folded = steps.length === 0;
   for (const message of messages) {
@@ -4382,12 +6721,20 @@ function assistantTurn(
   if (!folded) bubble.append(processFold(steps));
   // 只有最新一回合的盒子可以点；历史回合保留文字说明。
   const latest = nextSteps[nextSteps.length - 1];
-  if (latest) bubble.append(nextStepBox(latest, state));
+  if (latest) bubble.append(nextStepBox(latest, latest.pending ? (askState ?? state) : state));
   return bubble;
 }
 
 function spinner(): HTMLElement {
   return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
+}
+
+/** 只有 Bridge 托管的会话能从网页停回合，别的来源由桌面应用自己控制。 */
+function paintStopButton(state: ChatState): void {
+  const node = state.stopButton;
+  if (!node) return;
+  node.hidden = state.session.hosted !== true || !state.busy;
+  node.disabled = !state.busy;
 }
 
 /** Marks the last assistant turn with its state: running, stopped, or finished. */
@@ -4489,7 +6836,13 @@ async function sendMessage(
   if (!text && attachments.length === 0) return;
   sendButton.disabled = true;
   status.classList.remove("error");
-  status.textContent = state.session.live ? "正在发送…" : "正在请求桌面打开该会话…";
+  status.textContent = state.session.hosted
+    ? state.session.live
+      ? "正在写入托管会话…"
+      : "正在恢复托管进程…"
+    : state.session.live
+      ? "正在发送…"
+      : "正在请求桌面打开该会话…";
   try {
     const result = await call<MessageSendResult>("message.send", {
       sessionId: state.session.sessionId,
@@ -4512,13 +6865,18 @@ async function sendMessage(
       });
       state.busy = true;
       state.interrupted = false;
+      paintStopButton(state);
       renderMessages(state);
     }
-    status.textContent = result.delivered
-      ? "已投递到桌面会话"
-      : result.accepted
-        ? (result.detail ?? "已提交，等待桌面执行")
-        : (result.detail ?? "未确认投递");
+    status.textContent = state.session.hosted
+      ? result.delivered
+        ? "已写入托管会话"
+        : (result.detail ?? "已提交")
+      : result.delivered
+        ? "已投递到桌面会话"
+        : result.accepted
+          ? (result.detail ?? "已提交，等待桌面执行")
+          : (result.detail ?? "未确认投递");
     // 发送落地后收起输入区，把空间让给对话；需要时点「写消息…」再展开。
     if (result.accepted) onSent();
     window.setTimeout(() => {
