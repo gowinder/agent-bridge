@@ -45,6 +45,9 @@ import type {
   ShellCancelResult,
   ShellEventData,
   ShellExecResult,
+  TodoItem,
+  TodoKind,
+  TodoListResult,
   TransferCommitResult,
   TransferPrepareResult,
 } from "@craftstead/protocol";
@@ -1675,11 +1678,12 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
 const DOCK_TAB_KEY = "ab.dockTab";
 const DOCK_SESSIONS_PER_PROJECT = 8;
 const DOCK_HISTORY_LIMIT = 30;
-type DockTab = "tree" | "history";
+type DockTab = "tree" | "history" | "todo";
 
 function readDockTab(): DockTab {
   try {
-    return localStorage.getItem(DOCK_TAB_KEY) === "history" ? "history" : "tree";
+    const value = localStorage.getItem(DOCK_TAB_KEY);
+    return value === "history" || value === "todo" ? value : "tree";
   } catch {
     return "tree";
   }
@@ -1854,7 +1858,180 @@ function dockHistory(): HTMLElement {
   return wrap;
 }
 
-/** 桌面宽屏左侧的 dock：结构树与历史两个 tab，选中的 tab 记在 localStorage。 */
+/** 待办面板的本地状态：切换 tab 会重绘，草稿与上次数据留着。 */
+let todoDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
+let todoCache: TodoListResult | null = null;
+let todoError = "";
+
+/** 当前聊天页的输入框：点待办时往这里填文字，不发送。 */
+let composerRef: HTMLTextAreaElement | null = null;
+
+function todoKindLabel(kind: TodoKind): string {
+  if (kind === "bug") return "bug";
+  if (kind === "feature") return "功能";
+  return "其他";
+}
+
+/** 待办写进输入框的文案：分类放在前面，跟手写的时候一样的习惯。 */
+function todoPrompt(item: TodoItem): string {
+  if (item.kind === "other") return item.title;
+  return `${todoKindLabel(item.kind)}: ${item.title}`;
+}
+
+/** 把文字接在输入框末尾（不发送）；没有打开的会话时提示一下。 */
+function fillComposer(text: string): boolean {
+  const input = composerRef;
+  if (!input || !input.isConnected) {
+    flashNotice("先打开一个会话，再把待办填进输入框");
+    return false;
+  }
+  const current = input.value.trimEnd();
+  input.value = current ? `${current}\n${text}` : text;
+  // 走一次 input 事件：草稿、高度和发送按钮状态都靠它更新。
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  return true;
+}
+
+/** 左侧 dock 的待办：未完成的在上面，最近完成的在下面。 */
+function dockTodos(): HTMLElement {
+  const wrap = el("div", { className: "dock-todos" });
+  const select = el("select", { className: "todo-kind", attrs: { "aria-label": "待办分类" } });
+  for (const [value, label] of [["feature", "功能"], ["bug", "bug"], ["other", "其他"]] as const) {
+    const option = el("option", { text: label, attrs: { value } });
+    if (todoDraft.kind === value) option.selected = true;
+    select.append(option);
+  }
+  select.addEventListener("change", () => {
+    todoDraft.kind = select.value as TodoKind;
+  });
+
+  const input = el("input", {
+    className: "todo-input",
+    attrs: { type: "text", placeholder: "记一条待办…", maxlength: "500" },
+  });
+  input.value = todoDraft.title;
+  input.addEventListener("input", () => {
+    todoDraft.title = input.value;
+  });
+
+  const list = el("div", { className: "todo-list" });
+  const addButton = button("添加", () => void add(), "btn primary todo-add");
+
+  const refresh = async (): Promise<void> => {
+    try {
+      todoCache = await call<TodoListResult>("todo.list");
+      todoError = "";
+    } catch (error) {
+      todoError = messageOf(error);
+    }
+    paintList();
+  };
+
+  const add = async (): Promise<void> => {
+    const title = input.value.trim();
+    if (!title) {
+      input.focus();
+      return;
+    }
+    addButton.disabled = true;
+    try {
+      await call("todo.add", { title, kind: select.value });
+      todoDraft = { title: "", kind: select.value as TodoKind };
+      input.value = "";
+      await refresh();
+    } catch (error) {
+      todoError = messageOf(error);
+      paintList();
+    } finally {
+      addButton.disabled = false;
+    }
+  };
+
+  const setChecked = async (item: TodoItem, checked: boolean): Promise<void> => {
+    try {
+      await call("todo.check", { todoId: item.todoId, checked });
+      await refresh();
+    } catch (error) {
+      todoError = messageOf(error);
+      paintList();
+    }
+  };
+
+  const remove = async (item: TodoItem): Promise<void> => {
+    if (!window.confirm(`删除待办「${item.title}」？`)) return;
+    try {
+      await call("todo.remove", { todoId: item.todoId });
+      await refresh();
+    } catch (error) {
+      todoError = messageOf(error);
+      paintList();
+    }
+  };
+
+  /** 点条目：先填进输入框，填成功才标记完成——没会话时不能白白勾掉。 */
+  const use = async (item: TodoItem): Promise<void> => {
+    if (!fillComposer(todoPrompt(item))) return;
+    if (item.checkedAt === null) await setChecked(item, true);
+  };
+
+  const row = (item: TodoItem): HTMLElement => {
+    const done = item.checkedAt !== null;
+    const main = el("button", { className: "todo-main", attrs: { type: "button", title: "填到输入框" } }, [
+      el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
+      el("span", { className: "todo-title", text: item.title }),
+    ]);
+    main.addEventListener("click", () => void use(item));
+    const tail = el(
+      "button",
+      {
+        className: "todo-tail",
+        attrs: { type: "button", "aria-label": done ? "标记未完成" : "删除待办", title: done ? "标记未完成" : "删除待办" },
+      },
+      [icon(done ? "refresh" : "trash")],
+    );
+    tail.addEventListener("click", () => {
+      void (done ? setChecked(item, false) : remove(item));
+    });
+    return el("div", { className: `todo-item${done ? " is-done" : ""}` }, [main, tail]);
+  };
+
+  const paintList = (): void => {
+    const parts: HTMLElement[] = [];
+    if (todoError) parts.push(el("p", { className: "hint warn", text: todoError }));
+    const data = todoCache;
+    if (!data) {
+      parts.push(el("p", { className: "hint", text: "正在读取待办…" }));
+    } else {
+      if (data.open.length === 0) {
+        parts.push(el("p", { className: "hint", text: "没有待办。" }));
+      } else {
+        parts.push(el("div", { className: "todo-group" }, data.open.map(row)));
+      }
+      if (data.done.length > 0) {
+        parts.push(el("p", { className: "todo-heading", text: "最近完成" }));
+        parts.push(el("div", { className: "todo-group" }, data.done.map(row)));
+        const hidden = data.doneTotal - data.done.length;
+        if (hidden > 0) parts.push(el("p", { className: "hint todo-hidden", text: `还有 ${hidden} 条已完成` }));
+      }
+    }
+    list.replaceChildren(...parts);
+  };
+
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    void add();
+  });
+
+  paintList();
+  void refresh();
+  wrap.append(el("div", { className: "todo-form" }, [select, input, addButton]), list);
+  return wrap;
+}
+
+/** 桌面宽屏左侧的 dock：结构树、历史与待办三个 tab，选中的 tab 记在 localStorage。 */
 function dockSidebar(route: Route): HTMLElement {
   let tab = readDockTab();
   const nav = el("nav", { className: "dock", attrs: { "aria-label": "会话导航" } });
@@ -1872,13 +2049,20 @@ function dockSidebar(route: Route): HTMLElement {
   };
   const treeTab = makeTab("tree", "结构");
   const historyTab = makeTab("history", "历史");
-  tabs.append(treeTab, historyTab);
+  const todoTab = makeTab("todo", "待办");
+  tabs.append(treeTab, historyTab, todoTab);
   const paint = (): void => {
-    for (const [id, node] of [["tree", treeTab], ["history", historyTab]] as const) {
+    for (const [id, node] of [
+      ["tree", treeTab],
+      ["history", historyTab],
+      ["todo", todoTab],
+    ] as const) {
       node.classList.toggle("is-active", tab === id);
       node.setAttribute("aria-selected", String(tab === id));
     }
-    body.replaceChildren(tab === "tree" ? dockTree(route) : dockHistory());
+    body.replaceChildren(
+      tab === "tree" ? dockTree(route) : tab === "history" ? dockHistory() : dockTodos(),
+    );
   };
   paint();
   nav.append(tabs, body);
@@ -3710,6 +3894,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     },
   });
   input.value = draftFor(summary.sessionId);
+  // 待办面板要通过它把文字填进当前会话的输入框。
+  composerRef = input;
 
   // 截图直接粘贴：把剪贴板里的图片文件交给现有上传流程，文本粘贴保持原样。
   input.addEventListener("paste", (event) => {

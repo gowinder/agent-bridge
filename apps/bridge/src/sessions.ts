@@ -25,8 +25,10 @@ import type {
   ResponseMessage,
   SessionListParams,
   ShellEventData,
+  TodoKind,
   WireMessage,
 } from "@craftstead/protocol";
+import { TODO_KINDS } from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import type { AdminMessage } from "./admin.js";
 import { RpcError } from "./adapters/types.js";
@@ -89,6 +91,14 @@ function constantTimeEqual(a: string, b: string): boolean {
 function stringParam(params: Record<string, unknown>, name: string): string | undefined {
   const value = params[name];
   return typeof value === "string" ? value : undefined;
+}
+
+function todoKindParam(value: string | undefined): TodoKind {
+  const kind = value ?? "other";
+  if (!(TODO_KINDS as readonly string[]).includes(kind)) {
+    throw new RpcError("invalid_params", "待办分类无效");
+  }
+  return kind as TodoKind;
 }
 
 function numberParam(params: Record<string, unknown>, name: string): number | undefined {
@@ -586,6 +596,28 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.pin(sessionId, params["pinned"] !== false);
+      }
+      // 待办存在 Bridge 自己的库里：换前端还在，换一台主机就是另一个库。
+      case "todo.list":
+        return this.options.store.listTodos();
+      case "todo.add": {
+        const title = (stringParam(params, "title") ?? "").trim();
+        if (!title) throw new RpcError("invalid_params", "待办内容不能为空");
+        if (title.length > 500) throw new RpcError("invalid_params", "待办内容最多 500 字");
+        return this.options.store.addTodo(title, todoKindParam(stringParam(params, "kind")));
+      }
+      case "todo.check": {
+        const todoId = stringParam(params, "todoId");
+        if (!todoId) throw new RpcError("invalid_params", "todoId required");
+        const item = this.options.store.setTodoChecked(todoId, params["checked"] !== false);
+        if (!item) throw new RpcError("not_found", "待办不存在");
+        return item;
+      }
+      case "todo.remove": {
+        const todoId = stringParam(params, "todoId");
+        if (!todoId) throw new RpcError("invalid_params", "todoId required");
+        if (!this.options.store.removeTodo(todoId)) throw new RpcError("not_found", "待办不存在");
+        return { ok: true };
       }
       case "hosted.archive": {
         const sessionId = stringParam(params, "sessionId");
