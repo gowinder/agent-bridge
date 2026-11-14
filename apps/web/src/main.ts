@@ -1827,7 +1827,10 @@ function dockHistory(): HTMLElement {
   for (const session of sessions) {
     const current = active.sessionId === session.sessionId;
     const node = el("button", { className: `dock-history-row${current ? " is-active" : ""}`, attrs: { type: "button" } }, [
-      el("span", { className: "dock-history-title", text: session.title }),
+      el("span", { className: "dock-history-title" }, [
+        ...(session.pinned ? [icon("pin", "icon pin-mark")] : []),
+        document.createTextNode(session.title),
+      ]),
       el("span", { className: "dock-history-facts" }, [
         el("span", {
           className: "dock-history-meta",

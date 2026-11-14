@@ -1311,7 +1311,8 @@ details[open] > .dock-project-head::before {
 }
 
 /* 置顶过的会话在标题前留一个钉子，列表排序之外也能一眼认出来。 */
-.row-title .pin-mark {
+.row-title .pin-mark,
+.dock-history-title .pin-mark {
   color: var(--accent);
   width: 12px;
   height: 12px;
