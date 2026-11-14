@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter, once } from "node:events";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -79,6 +79,20 @@ async function waitForWrite(child, type, count = 1) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   throw new Error(`没有等到第 ${count} 条 ${type} 命令`);
+}
+
+/** 系统消息是异步写进转录的：等到它出现再断言。 */
+async function waitForSystemMessage(manager, sessionId, pattern, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const list = manager.messagesFor(sessionId, { limit: 20 }).messages;
+    const found = [...list]
+      .reverse()
+      .find((item) => item.role === "system" && pattern.test(item.blocks?.[0]?.text ?? ""));
+    if (found) return found;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`没有等到匹配 ${pattern} 的系统消息`);
 }
 
 function piHandlers() {
@@ -229,16 +243,14 @@ test("/compact passes the user's instructions to pi", async (t) => {
   const session = h.manager.create({ path: h.repo, agent: "pi" });
   const child = h.spawns[0].child;
 
-  const pending = h.manager.send(session.sessionId, "/compact 关注代码改动");
+  const sent = await h.manager.send(session.sessionId, "/compact 关注代码改动");
+  // 压缩要真跑一次模型，不能占住设备通道：send 必须先返回。
+  assert.equal(sent.detail, "已在托管会话里执行命令");
   const compact = await waitForWrite(child, "compact");
   assert.equal(compact.customInstructions, "关注代码改动");
   child.reply("compact", { tokensBefore: 120_000, estimatedTokensAfter: 40_000 });
-  const sent = await pending;
-  assert.equal(sent.detail, "已在托管会话里执行命令");
+  await waitForSystemMessage(h.manager, session.sessionId, /120,000 → 40,000 tokens/);
   assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
-  const last = h.manager.messagesFor(session.sessionId, { limit: 20 }).messages.at(-1);
-  assert.equal(last.role, "system");
-  assert.match(last.blocks[0].text, /120,000 → 40,000 tokens/);
 });
 
 test("/session reports pi's own stats as a system message", async (t) => {
@@ -326,7 +338,7 @@ test("pi sessions advertise the commands the bridge handles itself", (t) => {
   const session = h.manager.create({ path: h.repo, agent: "pi" });
   const child = h.spawns[0].child;
   // pi 只报自己的扩展与模板命令，Bridge 接住的那几条由它补上，网页才看得到。
-  child.reply("get_commands", { commands: [{ name: "design" }, { name: "compact" }] });
+  child.reply("get_commands", { commands: [{ name: "design" }] });
   assert.deepEqual(h.manager.messagesFor(session.sessionId, { limit: 1 }).slashCommands, [
     "design",
     "compact",
@@ -338,6 +350,148 @@ test("pi sessions advertise the commands the bridge handles itself", (t) => {
     "thinking",
     "quit",
   ]);
+});
+
+test("/model switches the pi session through its native set_model", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/model group/dsgroup");
+  const sent = await waitForWrite(child, "set_model");
+  assert.equal(sent.provider, "group");
+  assert.equal(sent.modelId, "dsgroup");
+  child.emitJson({
+    id: sent.id,
+    type: "response",
+    command: "set_model",
+    success: true,
+    data: { provider: "group", id: "dsgroup" },
+  });
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /模型已换成 group\/dsgroup/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/thinking forwards a known level and rejects an unknown one", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const first = h.manager.send(session.sessionId, "/thinking high");
+  const sent = await waitForWrite(child, "set_thinking_level");
+  assert.equal(sent.level, "high");
+  child.reply("set_thinking_level", {});
+  await first;
+  await waitForSystemMessage(h.manager, session.sessionId, /思考等级已设为 high/);
+
+  await h.manager.send(session.sessionId, "/thinking ultra");
+  assert.equal(child.writes().filter((item) => item.type === "set_thinking_level").length, 1);
+  await waitForSystemMessage(h.manager, session.sessionId, /不支持的思考等级/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/name renames the session in pi and in the record", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/name 新名字");
+  const sent = await waitForWrite(child, "set_session_name");
+  assert.equal(sent.name, "新名字");
+  child.reply("set_session_name", {});
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /已改名为「新名字」/);
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId).title, "新名字");
+});
+
+test("/export keeps the output inside the session working directory", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  await h.manager.send(session.sessionId, "/export ../escape.html");
+  assert.equal(child.writes().filter((item) => item.type === "export_html").length, 0);
+  await waitForSystemMessage(h.manager, session.sessionId, /必须在这个会话的工作目录里/);
+
+  const pending = h.manager.send(session.sessionId, "/export out.html");
+  const sent = await waitForWrite(child, "export_html");
+  // 记录的 cwd 是 canonical 过的（macOS 下 /var 会变成 /private/var），两边对齐再比。
+  const root = realpathSync(h.repo);
+  assert.equal(sent.outputPath, join(root, "out.html"));
+  child.reply("export_html", { path: join(root, "out.html") });
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /已导出到/);
+  assert.equal(child.writes().filter((item) => item.type === "prompt").length, 0);
+});
+
+test("/quit stops the hosted process", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  await h.manager.send(session.sessionId, "/quit");
+  assert.ok(child.signals.includes("SIGTERM"));
+  await waitForSystemMessage(h.manager, session.sessionId, /已停掉托管进程/);
+});
+
+test("/new fails loudly when pi does not report a session file", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  const pending = h.manager.send(session.sessionId, "/new");
+  await waitForWrite(child, "new_session");
+  child.reply("new_session", {});
+  // prime 那条 get_state 之后才是新建会话的这一条。
+  const asked = await waitForWrite(child, "get_state", 2);
+  child.emitJson({ id: asked.id, type: "response", command: "get_state", success: true, data: {} });
+  await pending;
+  await waitForSystemMessage(h.manager, session.sessionId, /没有报回新的会话文件/);
+
+  const saved = JSON.parse(readFileSync(join(h.stateDir, "hosted", "sessions.json"), "utf8"));
+  const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
+  assert.equal(record.piSessionPath, undefined);
+});
+
+test("slash commands are not answered into a pending extension dialog", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  child.emitJson({
+    type: "extension_ui_request",
+    id: "ui-1",
+    method: "select",
+    title: "选一个",
+    options: ["A", "B"],
+  });
+  await h.manager.send(session.sessionId, "/new");
+  assert.equal(child.writes().filter((item) => item.type === "new_session").length, 0);
+  assert.equal(child.writes().filter((item) => item.type === "extension_ui_response").length, 0);
+  await waitForSystemMessage(h.manager, session.sessionId, /正在等你回答/);
+});
+
+test("an extension command with the same name wins over the bridge command", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns[0].child;
+
+  child.reply("get_commands", { commands: [{ name: "compact" }] });
+  await new Promise((resolve) => setImmediate(resolve));
+  await h.manager.send(session.sessionId, "/compact 交给扩展");
+  assert.equal(child.writes().filter((item) => item.type === "compact").length, 0);
+  const prompts = child.writes().filter((item) => item.type === "prompt");
+  assert.equal(prompts.length, 1);
+  assert.equal(prompts[0].message, "/compact 交给扩展");
 });
 
 test("PiSession answers extension dialogs and parses assistant turns", () => {

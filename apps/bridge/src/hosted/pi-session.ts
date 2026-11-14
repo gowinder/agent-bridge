@@ -159,7 +159,7 @@ export class PiSession {
    * 新建 pi 会话。`new_session` 会换一个会话文件（以及 id），所以回执之后还要问一遍
    * `get_state`，把新的文件路径交给调用方记下来续写用。
    */
-  async newSession(): Promise<{ sessionPath?: string; error?: string }> {
+  async newSession(): Promise<{ sessionPath?: string; model?: string; error?: string }> {
     const record = await this.call("new_session");
     if (record["success"] === undefined) return { error: "pi 没有回执" };
     if (record["success"] !== true) return { error: reasonOf(record) };
@@ -167,7 +167,10 @@ export class PiSession {
     if (data["cancelled"] === true) return { error: "pi 取消了新建会话" };
     const state = await this.state();
     const sessionPath = typeof state["sessionFile"] === "string" ? state["sessionFile"] : "";
-    return sessionPath ? { sessionPath } : {};
+    // 没报回文件就当成失败：静默成功会让记录继续指向旧会话，下次重启续到 /new 之前。
+    if (!sessionPath) return { error: "pi 没有报回新的会话文件" };
+    const model = modelIdOf(state["model"]);
+    return { sessionPath, ...(model ? { model } : {}) };
   }
 
   /** 手动压缩上下文；过程本身走 compaction_start/compaction_end 事件，回执只用来报错与报数。 */
@@ -359,22 +362,25 @@ export class PiSession {
   ): Promise<Record<string, unknown>> {
     return new Promise((resolve) => {
       let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        resolve({});
-      }, timeoutMs);
-      timer.unref();
-      this.command(
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const id = this.command(
         type,
         (record) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          if (timer !== null) clearTimeout(timer);
           resolve(record);
         },
         extra,
       );
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        // 回执永远不会来了：把回调从等待表里清掉，否则同一进程反复发命令会一直累积。
+        this.waiting.delete(id);
+        resolve({});
+      }, timeoutMs);
+      timer.unref();
     });
   }
 
@@ -382,11 +388,12 @@ export class PiSession {
     type: string,
     callback: (record: Record<string, unknown>) => void,
     extra: Record<string, unknown> = {},
-  ): void {
+  ): string {
     this.counter += 1;
     const id = `bridge-${this.counter}`;
     this.waiting.set(id, callback);
     this.writeLine(JSON.stringify({ id, type, ...extra }));
+    return id;
   }
 }
 

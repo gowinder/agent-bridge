@@ -217,6 +217,8 @@ interface HostedRecord {
   compactionReserveTokens?: number;
   /** pi 会话在 `/new` 之后用的新会话文件：续写要按 `--session <路径>` 而不是 `--session-id`。 */
   piSessionPath?: string;
+  /** pi 自己的命令清单（`get_commands` 原样）：同名时让给 pi 的扩展命令，Bridge 不截流。 */
+  piCommands?: string[];
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
   observedModel?: string;
   /** 最近一次 assistant 事件的 usage，用来在侧栏显示上下文占用。 */
@@ -1033,6 +1035,10 @@ export class HostedSessionManager {
     if (record.agent === "pi") {
       const pi = live.pi;
       if (!pi) throw new RpcError("adapter_unavailable", "pi 协议还没就绪，稍后再发");
+      // 命令先于弹窗答案判定：pi 在等回答时发 `/new` 不该被当成回答内容。
+      if (await this.runPiSlash(record, live, pi, text)) {
+        return { accepted: true, delivered: true, detail: "已在托管会话里执行命令" };
+      }
       if (live.piPending) {
         const pending = live.piPending;
         pi.answer(pending, text);
@@ -1042,9 +1048,6 @@ export class HostedSessionManager {
       }
       // 终端里的内置命令由终端自己执行；托管会话没有这一层，由 Bridge 接住，
       // 否则整行会被当成用户消息发给模型（模型只会解释一遍这个命令）。
-      if (await this.runPiSlash(record, live, pi, text)) {
-        return { accepted: true, delivered: true, detail: "已在托管会话里执行命令" };
-      }
       pi.prompt(text, live.busy);
       this.recordUser(record, text);
       // 这一轮要等 agent_settled 才算结束；中途 Bridge 退出就靠它续跑。
@@ -1485,6 +1488,7 @@ export class HostedSessionManager {
           this.touch(record);
         },
         commands: (names) => {
+          record.piCommands = names;
           record.slashCommands = withBridgeCommands(names);
           this.touch(record);
         },
@@ -1576,7 +1580,14 @@ export class HostedSessionManager {
     const arg = (match[2] ?? "").trim();
     const quit = name === BRIDGE_QUIT_COMMAND;
     if (!quit && !(BRIDGE_SLASH_COMMANDS as readonly string[]).includes(name)) return false;
+    // pi 那边也有同名命令（扩展、技能或模板）时让给它，Bridge 只接 pi 没有的。
+    if (!quit && record.piCommands?.includes(name)) return false;
     this.log(`hosted: slash /${name} ${record.id}`);
+    // 弹窗期间整行会被当成答案，命令不能这么处理：除 /quit 外都要求先回答。
+    if (!quit && live.piPending) {
+      this.piNotice(record, "pi 正在等你回答上一个问题，先回答它（或发 /quit 停掉这一轮）");
+      return true;
+    }
     // 这三条要独占一个空闲进程：跑着的回合里换会话或压缩会互相踩。
     if ((name === "new" || name === "compact" || quit) && live.busy) {
       this.piNotice(record, `这一轮还在跑，等它结束再 /${name}`);
@@ -1588,36 +1599,66 @@ export class HostedSessionManager {
       return true;
     }
     if (name === "new") {
-      const result = await pi.newSession();
-      if (result.error) {
-        this.piNotice(record, `新建会话失败：${result.error}`);
-        return true;
-      }
-      // 会话文件已经换了：记下新路径，否则 Bridge 重启会续到 `/new` 之前的旧会话。
-      if (result.sessionPath) record.piSessionPath = result.sessionPath;
-      delete record.context;
-      record.pendingText = undefined;
-      record.interrupted = false;
-      this.appendRecord(record, {
-        messageId: randomUUID(),
-        sessionId: record.id,
-        role: "system",
-        createdAt: Date.now(),
-        blocks: [{ type: "text", text: "已开始新会话，pi 的上下文已清空（上面更早的消息只留在 Bridge 的记录里）" }],
-      });
+      // 新建会换会话文件：置 busy，既挡住并发命令，也避免空闲回收在中间把进程杀掉。
+      live.busy = true;
       this.touch(record);
-      return true;
+      try {
+        const result = await pi.newSession();
+        if (result.error) {
+          this.piNotice(record, `新建会话失败：${result.error}`);
+          return true;
+        }
+        // 会话文件已经换了：记下新路径，否则 Bridge 重启会续到 `/new` 之前的旧会话。
+        const next = sanitizeSessionPath(result.sessionPath);
+        if (!next) {
+          this.piNotice(record, "新建会话失败：pi 没有报回新的会话文件");
+          return true;
+        }
+        record.piSessionPath = next;
+        if (result.model) record.observedModel = result.model;
+        delete record.context;
+        record.pendingText = undefined;
+        record.interrupted = false;
+        // 上一条会话撞过的续跑上限属于旧上下文，新会话从零计。
+        record.resumeAttempts = 0;
+        this.appendRecord(record, {
+          messageId: randomUUID(),
+          sessionId: record.id,
+          role: "system",
+          createdAt: Date.now(),
+          blocks: [{ type: "text", text: "已开始新会话，pi 的上下文已清空（上面更早的消息只留在 Bridge 的记录里）" }],
+        });
+        this.touch(record);
+        return true;
+      } finally {
+        live.busy = false;
+        this.touch(record);
+      }
     }
     if (name === "compact") {
-      const result = await pi.compact(arg);
-      if (result.error) {
-        this.piNotice(record, `压缩失败：${result.error}`);
-        return true;
-      }
-      const before = result.tokensBefore !== undefined ? result.tokensBefore.toLocaleString("en-US") : "";
-      const after = result.tokensAfter !== undefined ? result.tokensAfter.toLocaleString("en-US") : "";
-      const detail = before && after ? `：约 ${before} → ${after} tokens` : "";
-      this.piNotice(record, `已压缩上下文${detail}`);
+      // 压缩要真跑一次模型（最长 10 分钟）：置 busy 挡住并发命令与空闲回收，
+      // 同时不能等回执再返回，否则设备通道会被占住。
+      live.busy = true;
+      this.touch(record);
+      void pi
+        .compact(arg)
+        .then((result) => {
+          if (result.error) {
+            this.piNotice(record, `压缩失败：${result.error}`);
+            return;
+          }
+          const before = result.tokensBefore !== undefined ? result.tokensBefore.toLocaleString("en-US") : "";
+          const after = result.tokensAfter !== undefined ? result.tokensAfter.toLocaleString("en-US") : "";
+          const detail = before && after ? `：约 ${before} → ${after} tokens` : "";
+          this.piNotice(record, `已压缩上下文${detail}`);
+        })
+        .catch((error: unknown) => {
+          this.piNotice(record, `压缩失败：${error instanceof Error ? error.message : "未知原因"}`);
+        })
+        .finally(() => {
+          live.busy = false;
+          this.touch(record);
+        });
       return true;
     }
     if (name === "session") {
@@ -1685,14 +1726,28 @@ export class HostedSessionManager {
       this.piNotice(record, `思考等级已设为 ${level}`);
       return true;
     }
-    // export
-    const result = await pi.exportHtml(arg || undefined);
-    if (result.error) {
-      this.piNotice(record, `导出失败：${result.error}`);
+    if (name === "export") {
+      let outputPath: string | undefined;
+      if (arg) {
+        // 网页只能往这个会话的工作目录里写，不给它一条任意落盘的路径。
+        const root = resolve(record.cwd);
+        const target = resolve(root, arg);
+        if (target !== root && !target.startsWith(`${root}/`)) {
+          this.piNotice(record, "导出路径必须在这个会话的工作目录里");
+          return true;
+        }
+        outputPath = target;
+      }
+      const result = await pi.exportHtml(outputPath);
+      if (result.error) {
+        this.piNotice(record, `导出失败：${result.error}`);
+        return true;
+      }
+      this.piNotice(record, result.path ? `已导出到 ${result.path}` : "已导出会话");
       return true;
     }
-    this.piNotice(record, result.path ? `已导出到 ${result.path}` : "已导出会话");
-    return true;
+    // 名单与分支对不上就是写错了，交给 pi 按普通消息处理，不能静默跑成别的命令。
+    return false;
   }
 
   private handleEvent(
