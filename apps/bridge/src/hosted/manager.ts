@@ -515,6 +515,33 @@ export class HostedSessionManager {
       .map((record) => this.summary(record));
   }
 
+  /**
+   * 托管会话的转录同时也躺在对应 CLI 自己的会话目录里（claude 在 `~/.claude/projects`，
+   * pi 在 `~/.pi/agent/sessions`，sessions 整目录软链回用户目录），适配器会把同一段对话再列一遍；
+   * 改过名后两边标题对不上，历史里就是两条。这里给出各来源要认领的原生会话 id，
+   * 由会话列表把 CLI 那边的那份剔掉，保留带改名与运行状态的托管记录。
+   */
+  hostedNativeSessionIds(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    const claim = (adapterKey: string, id: string): void => {
+      const bucket = out.get(adapterKey) ?? new Set<string>();
+      bucket.add(id);
+      out.set(adapterKey, bucket);
+    };
+    for (const record of this.records.values()) {
+      if (record.agent !== "pi") {
+        claim("claude-code", record.id);
+        continue;
+      }
+      claim("pi", record.id);
+      // `/new` 之后续写的是 pi 新建的文件，id 由 pi 生成：文件名是 `<时间戳>_<id>.jsonl`。
+      const file = basename(record.piSessionPath ?? "").replace(/\.jsonl$/, "");
+      const at = file.lastIndexOf("_");
+      if (at >= 0 && at < file.length - 1) claim("pi", file.slice(at + 1));
+    }
+    return out;
+  }
+
   session(sessionId: string): SessionSummary | null {
     const record = this.record(sessionId);
     return record ? this.summary(record) : null;
