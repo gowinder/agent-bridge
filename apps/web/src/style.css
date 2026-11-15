@@ -1799,8 +1799,9 @@ details[open] > .dock-project-head::before {
   flex: none;
 }
 
-/* 聊天页状态行里的「重试」：超时的时候就地重发，不用刷新整页。 */
-.status-retry {
+/* 聊天页状态行里的「重试」：超时的时候就地重发，不用刷新整页。
+   用 .btn. 前缀才压得住 .btn.small 的 padding。 */
+.btn.status-retry {
   margin-left: 8px;
   padding: 2px 8px;
   font-size: 12px;
