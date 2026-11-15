@@ -785,6 +785,12 @@ details[open] > .dock-project-head::before {
   min-width: 0;
 }
 
+.todo-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 .todo-form {
   display: flex;
   align-items: center;
