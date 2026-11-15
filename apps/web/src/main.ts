@@ -143,6 +143,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>',
   device:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="7.6" rx="1.4"/><path d="M5.6 13.2h4.8"/></svg>',
+  download:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.4v8.2"/><path d="m4.8 7.6 3.2 3.2 3.2-3.2"/><path d="M2.8 13.2h10.4"/></svg>',
   swap:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h9.5"/><path d="m10 3 2.5 2.5L10 8"/><path d="M13 10.5H3.5"/><path d="M6 8 3.5 10.5 6 13"/></svg>',
   clip:
@@ -6150,8 +6152,15 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (hasText && session)
-    meta.append(messageActions([copyButton(copySource([message])), shareButton(session, message)]));
+  if (hasText && session) {
+    meta.append(
+      messageActions([
+        copyButton(copySource(session.sessionId, [message])),
+        shareButton(session, message),
+        downloadButton(session, [message]),
+      ]),
+    );
+  }
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
@@ -6161,7 +6170,11 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
           ? nextStepBox(block, null)
           : block.type === "ask"
             ? askBox(block)
-            : markdownBlock(block.text, block.truncated, () => void openMessageFullText(message)),
+            : markdownBlock(
+                block.text,
+                block.truncated,
+                session ? () => void openMessageFullText(session.sessionId, message) : null,
+              ),
     );
   }
   return bubble;
@@ -6658,8 +6671,9 @@ async function openFilePreview(path: string): Promise<void> {
 /**
  * 长回复被列表截断（只给前几千字）时点「读取全文」：弹层里按 markdown 显示原文，
  * 复制按钮拿的也是全文。弹层复用文件预览的卡片，关掉/按 Esc 就能回到会话。
+ * `sessionId` 用会话的（带 `hosted:` 这类前缀），不能用消息里存的裸 id。
  */
-async function openMessageFullText(message: MessageRecord): Promise<void> {
+async function openMessageFullText(sessionId: string, message: MessageRecord): Promise<void> {
   const overlay = ensureFilePreview();
   const request = (previewRequest += 1);
   overlay.hidden = false;
@@ -6674,7 +6688,7 @@ async function openMessageFullText(message: MessageRecord): Promise<void> {
   try {
     const result = await call<MessageTextResult>(
       "message.text",
-      { sessionId: message.sessionId, messageId: message.messageId },
+      { sessionId, messageId: message.messageId },
       60_000,
     );
     if (request !== previewRequest) return;
@@ -6782,7 +6796,7 @@ function textBlocks(messages: MessageRecord[]): string {
 }
 
 /** 列表里的长回复只给了前几千字；被截断的那条要回 Bridge 拿原文再拼。 */
-async function fullTextOf(messages: MessageRecord[]): Promise<string> {
+async function fullTextOf(sessionId: string, messages: MessageRecord[]): Promise<string> {
   const parts: string[] = [];
   for (const message of messages) {
     const blocks = message.blocks.filter((block) => block.type === "text");
@@ -6793,7 +6807,7 @@ async function fullTextOf(messages: MessageRecord[]): Promise<string> {
     }
     const result = await call<MessageTextResult>(
       "message.text",
-      { sessionId: message.sessionId, messageId: message.messageId },
+      { sessionId, messageId: message.messageId },
       60_000,
     );
     parts.push(result.text);
@@ -6801,12 +6815,57 @@ async function fullTextOf(messages: MessageRecord[]): Promise<string> {
   return parts.join("\n\n").trim();
 }
 
-/** 复制用：有截断就现取全文，否则直接用列表里的正文。 */
-function copySource(messages: MessageRecord[]): string | (() => Promise<string>) {
+/** 复制/下载用：有截断就现取全文，否则直接用列表里的正文。 */
+function copySource(sessionId: string, messages: MessageRecord[]): string | (() => Promise<string>) {
   const truncated = messages.some((message) =>
     message.blocks.some((block) => block.type === "text" && block.truncated),
   );
-  return truncated ? () => fullTextOf(messages) : textBlocks(messages);
+  return truncated ? () => fullTextOf(sessionId, messages) : textBlocks(messages);
+}
+
+/** 下载名：`<会话名>-<年月日-时分>.md`，把文件名里的非法字符换掉。 */
+function downloadName(title: string, messages: MessageRecord[]): string {
+  const at = new Date(messages[messages.length - 1]?.createdAt || Date.now());
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}`;
+  const base = (title || "回复").replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  return `${base || "回复"}-${stamp}.md`;
+}
+
+/** 浏览器里生成文件并点一下下载；不经过剪贴板，Safari 上也能用。 */
+function saveTextFile(text: string, name: string): void {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  const link = el("a", { attrs: { href: url, download: name } });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // 立刻 revoke 有的浏览器来不及取文件，留一会儿再清。
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** 下载这段回复（markdown）；正文被截断时先回 Bridge 取全文。 */
+function downloadButton(session: SessionSummary, messages: MessageRecord[]): HTMLButtonElement {
+  const title = "下载这段回复（Markdown）";
+  const node = el(
+    "button",
+    { className: "share-btn", attrs: { type: "button", title, "aria-label": "下载这段回复" } },
+    [icon("download")],
+  );
+  node.addEventListener("click", () => {
+    void (async () => {
+      try {
+        const text = await fullTextOf(session.sessionId, messages);
+        if (!text.trim()) {
+          flashNotice("这段回复没有可下载的正文");
+          return;
+        }
+        saveTextFile(text, downloadName(session.title, messages));
+      } catch (error) {
+        flashNotice(`下载失败：${messageOf(error)}`);
+      }
+    })();
+  });
+  return node;
 }
 
 function assistantTurn(
@@ -6844,12 +6903,13 @@ function assistantTurn(
     ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
   ]);
   if (session) {
-    // 复制整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
+    // 复制/下载整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
     const copyText = textBlocks(messages);
     meta.append(
       messageActions([
-        copyText ? copyButton(copySource(messages)) : null,
+        copyText ? copyButton(copySource(session.sessionId, messages)) : null,
         lastText ? shareButton(session, lastText) : null,
+        copyText ? downloadButton(session, messages) : null,
       ]),
     );
   }
@@ -6858,7 +6918,13 @@ function assistantTurn(
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
-        bubble.append(markdownBlock(block.text, block.truncated, () => void openMessageFullText(message)));
+        bubble.append(
+          markdownBlock(
+            block.text,
+            block.truncated,
+            session ? () => void openMessageFullText(session.sessionId, message) : null,
+          ),
+        );
       } else if (block.type === "next-step") {
         continue;
       } else if (block.type === "ask") {

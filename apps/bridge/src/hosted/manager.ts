@@ -2552,9 +2552,20 @@ function sanitizeSlashCommands(value: unknown): string[] | undefined {
 function trimMessageForList(message: MessageRecord): MessageRecord {
   let changed = false;
   const blocks = message.blocks.map((block) => {
-    if (block.type !== "text" || block.text.length <= MAX_BLOCK_CHARS) return block;
-    changed = true;
-    return { ...block, text: block.text.slice(0, MAX_BLOCK_CHARS), truncated: true };
+    if (block.type !== "text") return block;
+    if (block.text.length > MAX_BLOCK_CHARS) {
+      changed = true;
+      return { ...block, text: block.text.slice(0, MAX_BLOCK_CHARS), truncated: true };
+    }
+    // 早版本落盘时就把正文截到上限并留了标记，原文已经不在库里：
+    // 清掉标记，不给一个点了也拿不到东西的「读取全文」。
+    if (block.truncated) {
+      changed = true;
+      const copy = { ...block };
+      delete copy.truncated;
+      return copy;
+    }
+    return block;
   });
   return changed ? { ...message, blocks } : message;
 }
