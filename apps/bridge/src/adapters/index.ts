@@ -184,6 +184,9 @@ export class SessionAdapters {
     let completeness: SessionListResult["completeness"] = "complete";
     const notes: string[] = [];
     const collected: SessionSummary[] = [];
+    // 托管会话的转录也在对应 CLI 自己的会话目录里：适配器会把同一段对话再列一遍，
+    // 改过名后标题对不上，历史里就是两条。托管那份带改名后的标题与运行状态，优先留它。
+    const hostedNativeIds = this.hostedManager.hostedNativeSessionIds();
     for (const adapter of this.adapters) {
       if (params.appId && adapter.key !== params.appId) continue;
       const app = adapter.app();
@@ -193,7 +196,15 @@ export class SessionAdapters {
         notes.push(`${app.name}：${reason}`);
         continue;
       }
+      const claimed = hostedNativeIds.get(adapter.key);
+      const prefix = `${adapter.key}:`;
       const sessions = (await adapter.sessions()).filter((session) => {
+        if (claimed) {
+          const nativeId = session.sessionId.startsWith(prefix)
+            ? session.sessionId.slice(prefix.length)
+            : session.sessionId;
+          if (claimed.has(nativeId)) return false;
+        }
         if (params.projectId && session.projectId !== params.projectId) return false;
         if (!params.includeArchived && session.archived) return false;
         return true;
