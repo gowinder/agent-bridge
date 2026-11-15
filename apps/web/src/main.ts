@@ -5378,6 +5378,15 @@ function railExpandButton(state: RailState): HTMLButtonElement {
 }
 
 /** In the file preview header: only the reader goes fullscreen, no rail chrome. */
+/** 侧栏预览头部的小图标按钮：和全屏按钮同一行、同样尺寸。 */
+function railIconButton(name: Parameters<typeof icon>[0], title: string, onClick: () => void): HTMLButtonElement {
+  const node = button("", onClick, "icon-btn rail-icon-btn");
+  node.append(icon(name, "icon"));
+  node.title = title;
+  node.setAttribute("aria-label", title);
+  return node;
+}
+
 function previewFullButton(state: RailState): HTMLButtonElement {
   return classToggleButton(state.root, "is-preview-full", "全屏查看文件", "退出全屏查看");
 }
@@ -5516,10 +5525,24 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
   }, "icon-btn rail-icon-btn");
   back.append(icon("back"));
   back.title = "返回目录";
+  const hasText = typeof file.text === "string" && file.text.length > 0;
+  const copy = railIconButton("copy", "复制文件内容", () => {
+    if (!hasText) return;
+    void navigator.clipboard.writeText(file.text ?? "").then(
+      () => {
+        copy.replaceChildren(icon("check", "icon"));
+        window.setTimeout(() => copy.replaceChildren(icon("copy", "icon")), 1_500);
+      },
+      () => flashNotice("复制失败：浏览器拒绝了剪贴板访问"),
+    );
+  });
+  copy.disabled = !hasText;
   wrap.append(
     el("div", { className: "rail-filebar" }, [
       back,
       el("span", { className: "rail-filebar-name", text: file.name, attrs: { title: file.path } }),
+      railIconButton("download", `下载 ${file.name}`, () => downloadPreviewFile(file, file.name)),
+      copy,
       previewFullButton(state),
     ]),
   );
@@ -6971,19 +6994,22 @@ function previewDownloadButton(file: FsReadResult, path: string): HTMLButtonElem
     { className: "share-btn", attrs: { type: "button", title: `下载 ${name}`, "aria-label": "下载文件" } },
     [icon("download"), el("span", { text: "下载" })],
   );
-  node.addEventListener("click", () => {
-    try {
-      if (file.dataBase64) {
-        const bytes = Uint8Array.from(atob(file.dataBase64), (ch) => ch.charCodeAt(0));
-        saveBlobFile(new Blob([bytes], { type: file.mime || "application/octet-stream" }), name);
-        return;
-      }
-      saveBlobFile(new Blob([file.text ?? ""], { type: file.mime || "text/plain;charset=utf-8" }), name);
-    } catch (error) {
-      flashNotice(`下载失败：${messageOf(error)}`);
-    }
-  });
+  node.addEventListener("click", () => downloadPreviewFile(file, name));
   return node;
+}
+
+/** 下载一个已读到的文件：图片按原始字节，文本按 UTF-8（弹层与侧栏共用）。 */
+function downloadPreviewFile(file: FsReadResult, name: string): void {
+  try {
+    if (file.dataBase64) {
+      const bytes = Uint8Array.from(atob(file.dataBase64), (ch) => ch.charCodeAt(0));
+      saveBlobFile(new Blob([bytes], { type: file.mime || "application/octet-stream" }), name);
+      return;
+    }
+    saveBlobFile(new Blob([file.text ?? ""], { type: file.mime || "text/plain;charset=utf-8" }), name);
+  } catch (error) {
+    flashNotice(`下载失败：${messageOf(error)}`);
+  }
 }
 
 /** 下载这段回复（markdown）；正文被截断时先回 Bridge 取全文。 */
