@@ -2688,6 +2688,25 @@ h6.md-h {
   font-size: 12px;
 }
 
+/* 被截断的长回复：「…（已截断）读取全文」是一个按钮。 */
+.md-note-more {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.md-note-more:hover {
+  color: color-mix(in srgb, var(--accent) 80%, var(--text));
+}
+
 /* Local files referenced in a transcript */
 
 .file-ref {

@@ -11,6 +11,7 @@ import type {
   HostedResumeResult,
   HostedStopResult,
   MessageListResult,
+  MessageTextResult,
   MessageSendResult,
   ProjectInfo,
   ProjectListResult,
@@ -43,6 +44,8 @@ const DEFAULT_SESSION_LIMIT = 200;
 const MAX_SESSION_LIMIT = 500;
 const DEFAULT_MESSAGE_LIMIT = 50;
 const MAX_MESSAGE_LIMIT = 200;
+/** 单条消息可一次取回的字符数：封包上限 4 MiB，留足余量后仍是百万级以下。 */
+const MAX_FULL_TEXT_CHARS = 200_000;
 const TRANSFER_TTL_MS = 120_000;
 
 interface PreparedTransfer {
@@ -290,6 +293,27 @@ export class SessionAdapters {
     if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
     const limit = clamp(params.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
     return adapter.messages(sessionId, { limit, ...(params.before ? { before: params.before } : {}) });
+  }
+
+  /**
+   * 单条消息的完整正文。消息列表为了帧大小会把长文本截到 MAX_BLOCK_CHARS，
+   * 这里回到适配器取未截断的原文；中转层自己再限一次，免得一条消息把响应撑爆。
+   */
+  async messageText(sessionId: string, messageId: string): Promise<MessageTextResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
+    const message = await adapter.messageText(sessionId, messageId);
+    if (!message) throw new RpcError("not_found", "找不到该消息，或该消息没有可读取的文本");
+    const full = message.text;
+    const text = full.slice(0, MAX_FULL_TEXT_CHARS);
+    return {
+      messageId: message.messageId,
+      role: message.role,
+      createdAt: message.createdAt,
+      text,
+      truncated: text.length < full.length,
+      length: full.length,
+    };
   }
 
   async rail(sessionId: string): Promise<SessionRailResult> {
