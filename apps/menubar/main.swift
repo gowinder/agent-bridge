@@ -3,6 +3,7 @@
 import AppKit
 import CoreImage
 import Foundation
+import UserNotifications
 
 struct DeviceInfo: Decodable {
     let deviceId: String
@@ -457,6 +458,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsIdleLabel: NSTextField?
     private var settingsFilesSwitch: NSSwitch?
     private var settingsTerminalSwitch: NSSwitch?
+    private var settingsExpiryReminderSwitch: NSSwitch?
+    /// 已经提醒过的「能力 + 到期时间」，refresh 每 5 秒跑一次，不能重复弹。
+    private var expiryReminded: Set<String> = []
+    private let expiryReminderLeadMs: Double = 30 * 60 * 1000
+
+    /// 远程工具到期前 30 分钟是否发系统通知；默认开。
+    private var expiryReminderEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "devtoolsExpiryReminder") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "devtoolsExpiryReminder") }
+    }
     private var settingsTable: NSTableView?
     private var settingsCountLabel: NSTextField?
     private var settingsEmptyLabel: NSTextField?
@@ -489,6 +500,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             await refresh()
             autoStartBridgeIfIdle()
         }
+        // 提醒是默认开着的：启动时要先把通知权限拿到，否则到点也弹不出来。
+        if expiryReminderEnabled { requestNotificationPermission() }
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { await self?.refresh() }
         }
@@ -537,6 +550,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         paint()
+        checkDevtoolsExpiry()
         if settingsWindow?.isVisible == true { renderSettings() }
     }
 
@@ -645,11 +659,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         devSub.addItem(disabled("文件浏览（只读，仅当前项目目录）"))
         devSub.addItem(item("开启 1 小时", #selector(enableFilesOneHour), ""))
         devSub.addItem(item("开启 8 小时", #selector(enableFilesEightHours), ""))
+        devSub.addItem(item("开启 24 小时", #selector(enableFilesTwentyFourHours), ""))
         devSub.addItem(item("关闭", #selector(disableFiles), ""))
         devSub.addItem(.separator())
         devSub.addItem(disabled("命令执行（可写，可访问整台机器）"))
         devSub.addItem(item("开启 1 小时", #selector(enableTerminalOneHour), ""))
         devSub.addItem(item("开启 8 小时", #selector(enableTerminalEightHours), ""))
+        devSub.addItem(item("开启 24 小时", #selector(enableTerminalTwentyFourHours), ""))
         devSub.addItem(item("关闭", #selector(disableTerminal), ""))
         devItem.submenu = devSub
         menu.addItem(devItem)
@@ -874,6 +890,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setDevtools(capability: "files", enabled: true, ttlSeconds: 8 * 3_600)
     }
 
+    @objc private func enableFilesTwentyFourHours() {
+        setDevtools(capability: "files", enabled: true, ttlSeconds: 24 * 3_600)
+    }
+
     @objc private func disableFiles() {
         setDevtools(capability: "files", enabled: false, ttlSeconds: nil)
     }
@@ -884,6 +904,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func enableTerminalEightHours() {
         setDevtools(capability: "terminal", enabled: true, ttlSeconds: 8 * 3_600)
+    }
+
+    @objc private func enableTerminalTwentyFourHours() {
+        setDevtools(capability: "terminal", enabled: true, ttlSeconds: 24 * 3_600)
     }
 
     @objc private func disableTerminal() {
@@ -1297,7 +1321,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section("远程工具")
         settingsFilesSwitch = toggle("文件浏览（只读，仅当前项目目录）", #selector(toggleFiles(_:)))
         settingsTerminalSwitch = toggle("命令执行（可写，可访问整台机器）", #selector(toggleTerminal(_:)))
-        hint("开关立即生效；菜单里的「开启 1 小时 / 8 小时」只是加个自动关闭的时限。", height: 16)
+        settingsExpiryReminderSwitch = toggle("到期前 30 分钟提醒", #selector(toggleExpiryReminder(_:)))
+        hint("开关立即生效；菜单里的「开启 1 / 8 / 24 小时」只是加个自动关闭的时限。勾选提醒后，自动关闭前 30 分钟会发一条系统通知。")
 
         return view
     }
@@ -1414,6 +1439,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsStateDirLabel?.toolTip = settingsStateDirLabel?.stringValue
         settingsFilesSwitch?.isEnabled = reachable
         settingsTerminalSwitch?.isEnabled = reachable
+        settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
 
         settingsPortLabel?.stringValue =
             "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? "（环境变量指定）" : "")
@@ -1481,6 +1507,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleTerminal(_ sender: NSSwitch) {
         setDevtools(capability: "terminal", enabled: sender.state == .on, ttlSeconds: nil)
+    }
+
+    @objc private func toggleExpiryReminder(_ sender: NSSwitch) {
+        expiryReminderEnabled = sender.state == .on
+        if sender.state == .on { requestNotificationPermission() }
+    }
+
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// 远程工具快到点时提示一次；已经提醒过的按「能力 + 到期时间」记下来。
+    private func checkDevtoolsExpiry() {
+        guard expiryReminderEnabled, reachable, let devtools = snapshot?.devtools else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let capabilities: [(String, DevtoolsCapabilityInfo?)] = [
+            ("文件浏览", devtools.files),
+            ("命令执行", devtools.terminal),
+        ]
+        for (label, capability) in capabilities {
+            guard let capability, capability.enabled, let expiresAt = capability.expiresAt else { continue }
+            let remaining = expiresAt - now
+            guard remaining > 0, remaining <= expiryReminderLeadMs else { continue }
+            let key = "\(label)-\(Int64(expiresAt))"
+            guard !expiryReminded.contains(key) else { continue }
+            expiryReminded.insert(key)
+            notifyExpiring(label: label, minutes: max(1, Int((remaining / 60_000).rounded())))
+        }
+    }
+
+    private func notifyExpiring(label: String, minutes: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = "远程工具即将关闭"
+        content.body = "\(label)将在 \(minutes) 分钟后自动关闭；需要继续用就在菜单里重新开启。"
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "devtools-expiry-\(label)-\(Int64(Date().timeIntervalSince1970))",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - 新消息气泡
