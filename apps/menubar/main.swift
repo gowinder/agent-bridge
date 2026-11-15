@@ -459,6 +459,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsFilesSwitch: NSSwitch?
     private var settingsTerminalSwitch: NSSwitch?
     private var settingsExpiryReminderSwitch: NSSwitch?
+    private var settingsAutoUpdateSwitch: NSSwitch?
+    private var autoUpdateTimer: Timer?
+    /// 自动更新失败（网络、没有写权限）后先退避一小时，别每 10 分钟重试一遍。
+    private var autoUpdateBackoffUntil: Date?
+
+    /// 打开后在后台每 10 分钟查一次，有新版本直接下载装上，不弹确认。
+    private var autoUpdateEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "autoUpdateEnabled") as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: "autoUpdateEnabled") }
+    }
     /// 已经提醒过的「能力 + 到期时间」，refresh 每 5 秒跑一次，不能重复弹。
     private var expiryReminded: Set<String> = []
     private let expiryReminderLeadMs: Double = 30 * 60 * 1000
@@ -517,6 +527,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         messageTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { await self?.pollMessages() }
         }
+        scheduleAutoUpdate()
+    }
+
+    // MARK: - 自动更新
+
+    /// 打开时每 10 分钟查一次并直接安装；关掉就停掉定时器。
+    private func scheduleAutoUpdate() {
+        autoUpdateTimer?.invalidate()
+        autoUpdateTimer = nil
+        guard autoUpdateEnabled else { return }
+        // 启动后先等一会：初始化、配对和首轮状态刷新都比更新更该先跑。
+        Task {
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            await autoUpdateTick()
+        }
+        autoUpdateTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
+            Task { await self?.autoUpdateTick() }
+        }
+    }
+
+    private func autoUpdateTick() async {
+        guard autoUpdateEnabled, !updater.isBusy, pairWindow == nil else { return }
+        if let until = autoUpdateBackoffUntil, until > Date() { return }
+        await updater.check()
+        guard autoUpdateEnabled, !updater.isBusy, pairWindow == nil, let release = updater.available else {
+            if case .failed = updater.phase { autoUpdateBackoffUntil = Date().addingTimeInterval(3_600) }
+            return
+        }
+        // 静默安装：不弹确认。下载或替换失败时 summary 里能看到原因，其它环节不打扰人。
+        startUpdate(release)
+    }
+
+    @objc private func toggleAutoUpdate(_ sender: NSSwitch) {
+        autoUpdateEnabled = sender.state == .on
+        autoUpdateBackoffUntil = nil
+        scheduleAutoUpdate()
     }
 
     private func paint() {
@@ -768,7 +814,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 自动检查发现新版本时弹一次确认；同一个版本在一次运行里只提示一次。
     private func checkForUpdates(automatic: Bool) async {
         await updater.check()
-        guard automatic, pairWindow == nil,
+        // 自动更新开着时由 autoUpdateTick 直接装，这里不再弹「发现新版本」。
+        guard automatic, !autoUpdateEnabled, pairWindow == nil,
               let release = updater.available, promptedUpdate != release.tag else { return }
         promptedUpdate = release.tag
         let prompt = NSAlert()
@@ -1169,7 +1216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        let height: CGFloat = 620
+        let height: CGFloat = 700
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1324,6 +1371,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsExpiryReminderSwitch = toggle("到期前 30 分钟提醒", #selector(toggleExpiryReminder(_:)))
         hint("开关立即生效；菜单里的「开启 1 / 8 / 24 小时」只是加个自动关闭的时限。勾选提醒后，自动关闭前 30 分钟会发一条系统通知。")
 
+        section("更新")
+        settingsAutoUpdateSwitch = toggle("自动更新（每 10 分钟检查，有新版本直接装）", #selector(toggleAutoUpdate(_:)))
+        hint("装着新版本时会替换 AgentBridge.app 并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。", height: 16)
+
         return view
     }
 
@@ -1440,6 +1491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsFilesSwitch?.isEnabled = reachable
         settingsTerminalSwitch?.isEnabled = reachable
         settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
+        settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
 
         settingsPortLabel?.stringValue =
             "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? "（环境变量指定）" : "")
