@@ -147,8 +147,8 @@ export class SessionAdapters {
     return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
   }
 
-  async hostedSetCompactionReserveTokens(sessionId: string, tokens: number | null): Promise<SessionGetResult> {
-    return { session: await this.hostedManager.setCompactionReserveTokens(sessionId, tokens) };
+  async hostedSetCompaction(sessionId: string, percent: number | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setCompaction(sessionId, percent) };
   }
 
   hostedResume(sessionId: string): HostedResumeResult {

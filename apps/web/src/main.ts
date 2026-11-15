@@ -1,4 +1,4 @@
-import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
+import { DEFAULT_COMPACTION_TRIGGER_PERCENT, MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -6095,82 +6095,103 @@ function contextCompactActions(state: ChatState): HTMLElement {
 }
 
 /**
- * pi 托管会话的自动压缩阈值：pi 只在上下文剩这么多 token 时触发压缩，
- * 默认 16384。阈值只能写在会话语义目录的 settings.json 里，改完会重启 pi 进程。
+ * pi 托管会话的自动压缩触发点：上下文用到模型窗口的这个百分比时 pi 自己压缩。
+ * pi 原生只认「预留多少 token」，大窗口模型几乎永远不触发，所以这里按百分比填，
+ * 由 Bridge 按当前模型窗口换算。改完会重启 pi 进程。
  */
 function contextCompactionSetting(state: ChatState): HTMLElement {
   const row = el("div", { className: "context-actions" });
   const pending = state.compaction?.pending === true;
-  const current = state.session.compactionReserveTokens;
+  const current = state.session.compactionTriggerPercent;
+  const legacy = state.session.compactionReserveTokens;
+  const window = state.context?.windowTokens;
+  const percent = typeof current === "number" ? current : DEFAULT_COMPACTION_TRIGGER_PERCENT;
   const input = el("input", {
     className: "context-input",
-    attrs: { type: "number", min: "0", step: "1024", inputmode: "numeric", placeholder: "16384", "data-persist": "compaction" },
+    attrs: {
+      type: "number",
+      min: "1",
+      max: "100",
+      step: "1",
+      inputmode: "numeric",
+      placeholder: String(DEFAULT_COMPACTION_TRIGGER_PERCENT),
+      "data-persist": "compaction",
+    },
   });
   if (typeof current === "number") input.value = String(current);
   input.disabled = pending;
-  input.setAttribute("aria-label", "自动压缩阈值（剩余 tokens）");
+  input.setAttribute("aria-label", "自动压缩触发点（窗口百分比）");
   const save = el("button", {
     className: "context-action",
-    text: pending ? "保存中…" : "保存阈值",
+    text: pending ? "保存中…" : "保存",
     attrs: { type: "button" },
   });
   save.disabled = pending;
   const follow = el("button", {
     className: "context-action",
-    text: "跟随 pi",
+    text: "恢复默认",
     attrs: { type: "button" },
   });
   follow.disabled = pending;
+  const triggerLabel = window ? Math.round((window * percent) / 100).toLocaleString("en-US") : undefined;
   const hint = el("p", { className: "context-hint" });
   if (state.compaction?.error) {
     hint.textContent = state.compaction.error;
     hint.classList.add("is-error");
   } else if (state.compaction?.note) {
     hint.textContent = state.compaction.note;
+  } else if (typeof legacy === "number") {
+    // 老记录里存的是固定预留量：按当前窗口折算成触发点，避免两套说法并存。
+    hint.textContent = window
+      ? `当前按旧设置预留 ${legacy.toLocaleString("en-US")} tokens（约窗口用到 ${Math.round(((window - legacy) / window) * 100)}%）；填百分比保存即换成新算法。`
+      : `当前按旧设置预留 ${legacy.toLocaleString("en-US")} tokens；填百分比保存即换成新算法。`;
+  } else if (typeof current === "number") {
+    hint.textContent = window
+      ? `当前：窗口用到 ${current}%（约 ${triggerLabel} / ${window.toLocaleString("en-US")} tokens）时压缩；改完重启 pi 进程，下一条消息生效。`
+      : `当前：窗口用到 ${current}% 时压缩（窗口大小未知，启动后按实际模型换算）；改完重启 pi 进程，下一条消息生效。`;
   } else {
-    hint.textContent =
-      typeof current === "number"
-        ? `当前剩 ${current} tokens 时压缩；改完重启 pi 进程，下一条消息生效。`
-        : "当前跟随 pi 设置（默认剩 16384 tokens 时压缩）；改完重启 pi 进程，下一条消息生效。";
+    hint.textContent = window
+      ? `当前：默认窗口用到 ${DEFAULT_COMPACTION_TRIGGER_PERCENT}%（约 ${triggerLabel} / ${window.toLocaleString("en-US")} tokens）时压缩；改完重启 pi 进程，下一条消息生效。`
+      : `当前：默认窗口用到 ${DEFAULT_COMPACTION_TRIGGER_PERCENT}% 时压缩；改完重启 pi 进程，下一条消息生效。`;
   }
   save.addEventListener("click", () => {
     const raw = input.value.trim();
-    const tokens = Number(raw);
-    if (!raw || !Number.isSafeInteger(tokens) || tokens < 0) {
-      hint.textContent = "填一个不小于 0 的整数（tokens）";
+    const value = Number(raw);
+    if (!raw || !Number.isSafeInteger(value) || value < 1 || value > 100) {
+      hint.textContent = "填 1 到 100 之间的整数（百分比）";
       hint.classList.add("is-error");
       return;
     }
-    void runSetCompaction(state, tokens);
+    void runSetCompaction(state, value);
   });
   follow.addEventListener("click", () => {
     void runSetCompaction(state, null);
   });
   row.append(
-    el("p", { className: "context-label", text: "自动压缩阈值" }),
+    el("p", { className: "context-label", text: "自动压缩触发点（窗口百分比）" }),
     el("div", { className: "context-compaction-row" }, [input, save, follow]),
     hint,
   );
   return row;
 }
 
-async function runSetCompaction(state: ChatState, tokens: number | null): Promise<void> {
+async function runSetCompaction(state: ChatState, percent: number | null): Promise<void> {
   if (state.compaction?.pending) return;
   state.compaction = { pending: true };
   paintContext(state);
   try {
     const result = await call<SessionGetResult>(
       "hosted.setCompaction",
-      { sessionId: state.session.sessionId, reserveTokens: tokens },
+      { sessionId: state.session.sessionId, triggerPercent: percent },
       60_000,
     );
     state.session = result.session;
     state.compaction = {
       pending: false,
       note:
-        tokens === null
-          ? "已改回跟随 pi 设置，下一条消息生效。"
-          : `已设为剩 ${tokens} tokens 时压缩，下一条消息生效。`,
+        percent === null
+          ? `已恢复默认触发点（窗口用到 ${DEFAULT_COMPACTION_TRIGGER_PERCENT}%），下一条消息生效。`
+          : `已设为窗口用到 ${percent}% 时压缩，下一条消息生效。`,
     };
   } catch (error) {
     state.compaction = { pending: false, error: messageOf(error) };
