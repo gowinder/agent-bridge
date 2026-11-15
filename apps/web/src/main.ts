@@ -5532,7 +5532,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     );
   } else if (file.mime === "text/markdown") {
     const body = el("div", { className: "markdown rail-markdown" });
-    body.append(renderMarkdown(file.text ?? ""));
+    body.append(renderMarkdown(file.text ?? "", MARKDOWN_OPTIONS));
     wrap.append(body);
   } else {
     wrap.append(el("pre", { className: "rail-preview-text", text: file.text ?? "" }));
@@ -6605,6 +6605,26 @@ function fileRefChip(label: string, path: string): HTMLElement {
   return chip;
 }
 
+/**
+ * 正文里裸写的本地路径（`apps/web/src/main.ts:12`）：变成和 markdown 链接一样的引用，
+ * 点了直接预览，不用去右侧文件树里找。`~/...` 不认（设备端不展开 home）。
+ */
+function localPathChip(path: string, line: string): HTMLElement | null {
+  if (path.startsWith("~/")) return null;
+  const cleaned = fileRefPath(path);
+  if (!cleaned) return null;
+  const chip = fileRefChip(fileName(cleaned), cleaned);
+  if (line) chip.title = `${cleaned}${line}`;
+  return chip;
+}
+
+/** markdown 渲染选项：本地链接、图片、正文里裸写的路径都走同一套本地文件处理。 */
+const MARKDOWN_OPTIONS = {
+  localLink: localFileLink,
+  localImage: localFileImage,
+  localPath: localPathChip,
+};
+
 /** A transcript link that points at a local file becomes a preview button. */
 function localFileLink(label: string, href: string): HTMLElement | null {
   const path = fileRefPath(href);
@@ -6721,15 +6741,18 @@ async function openFilePreview(path: string): Promise<void> {
       filePreviewBody?.replaceChildren(el("img", { className: "file-preview-img", attrs: { src, alt: file.name } }));
     } else if (file.mime === "text/markdown") {
       const body = el("div", { className: "markdown file-preview-md" });
-      body.append(renderMarkdown(file.text ?? ""));
+      body.append(renderMarkdown(file.text ?? "", MARKDOWN_OPTIONS));
       filePreviewBody?.replaceChildren(body);
     } else {
       filePreviewBody?.replaceChildren(el("pre", { className: "file-preview-text", text: file.text ?? "" }));
     }
-    // 复制的是文件原文（markdown、svg 也复制源码）；位图这类二进制没有可复制的文本。
-    if (filePreviewActions && typeof file.text === "string" && file.text.length > 0) {
-      filePreviewActions.replaceChildren(copyButton(file.text, "复制全部内容"));
+    // 复制的是文件原文（markdown、svg 也复制源码）；下载对图片与文本都提供。
+    const actions: HTMLElement[] = [];
+    if (typeof file.text === "string" && file.text.length > 0) {
+      actions.push(copyButton(file.text, "复制全部内容"));
     }
+    actions.push(previewDownloadButton(file, path));
+    filePreviewActions?.replaceChildren(...actions);
     if (filePreviewNote) {
       filePreviewNote.textContent = `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`;
     }
@@ -6764,7 +6787,7 @@ async function openMessageFullText(sessionId: string, message: MessageRecord): P
     );
     if (request !== previewRequest) return;
     const body = el("div", { className: "markdown file-preview-md" });
-    body.append(renderMarkdown(result.text, { localLink: localFileLink, localImage: localFileImage }));
+    body.append(renderMarkdown(result.text, MARKDOWN_OPTIONS));
     filePreviewBody?.replaceChildren(body);
     filePreviewActions?.replaceChildren(copyButton(result.text, "复制全文"));
     if (filePreviewNote) {
@@ -6782,7 +6805,7 @@ async function openMessageFullText(sessionId: string, message: MessageRecord): P
 function markdownBlock(text: string, truncated?: boolean, onLoadFull?: (() => void) | null): HTMLElement {
   const node = el("div", { className: "message-text md" });
   try {
-    node.append(renderMarkdown(text, { localLink: localFileLink, localImage: localFileImage }));
+    node.append(renderMarkdown(text, MARKDOWN_OPTIONS));
   } catch {
     // A rendering failure must never blank the transcript; fall back to plain text.
     node.textContent = text;
@@ -6905,13 +6928,41 @@ function downloadName(title: string, messages: MessageRecord[]): string {
 
 /** 浏览器里生成文件并点一下下载；不经过剪贴板，Safari 上也能用。 */
 function saveTextFile(text: string, name: string): void {
-  const url = URL.createObjectURL(new Blob([text], { type: "text/markdown;charset=utf-8" }));
+  saveBlobFile(new Blob([text], { type: "text/markdown;charset=utf-8" }), name);
+}
+
+/** 浏览器里生成文件并点一下下载；不经过剪贴板，Safari 上也能用。 */
+function saveBlobFile(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
   const link = el("a", { attrs: { href: url, download: name } });
   document.body.append(link);
   link.click();
   link.remove();
   // 立刻 revoke 有的浏览器来不及取文件，留一会儿再清。
   window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** 预览弹层里的下载：图片按原始字节，文本按 UTF-8（超过 1 MB 的文本是截断后的部分）。 */
+function previewDownloadButton(file: FsReadResult, path: string): HTMLButtonElement {
+  const name = fileName(path);
+  const node = el(
+    "button",
+    { className: "share-btn", attrs: { type: "button", title: `下载 ${name}`, "aria-label": "下载文件" } },
+    [icon("download"), el("span", { text: "下载" })],
+  );
+  node.addEventListener("click", () => {
+    try {
+      if (file.dataBase64) {
+        const bytes = Uint8Array.from(atob(file.dataBase64), (ch) => ch.charCodeAt(0));
+        saveBlobFile(new Blob([bytes], { type: file.mime || "application/octet-stream" }), name);
+        return;
+      }
+      saveBlobFile(new Blob([file.text ?? ""], { type: file.mime || "text/plain;charset=utf-8" }), name);
+    } catch (error) {
+      flashNotice(`下载失败：${messageOf(error)}`);
+    }
+  });
+  return node;
 }
 
 /** 下载这段回复（markdown）；正文被截断时先回 Bridge 取全文。 */
