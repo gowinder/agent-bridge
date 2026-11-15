@@ -516,10 +516,10 @@ export class HostedSessionManager {
   }
 
   /**
-   * 托管会话的转录同时也躺在对应 CLI 自己的会话目录里（claude 在 `~/.claude/projects`，
-   * pi 在 `~/.pi/agent/sessions`，sessions 整目录软链回用户目录），适配器会把同一段对话再列一遍；
-   * 改过名后两边标题对不上，历史里就是两条。这里给出各来源要认领的原生会话 id，
-   * 由会话列表把 CLI 那边的那份剔掉，保留带改名与运行状态的托管记录。
+   * 托管会话的转录同时也躺在对应 CLI 自己的会话目录里（pi 在 `~/.pi/agent/sessions`，
+   * sessions 整目录软链回用户目录），适配器会把同一段对话再列一遍；改过名后两边标题对不上，
+   * 历史里就是两条。这里给出 pi 要认领的原生会话 id，由会话列表把 pi 那份剔掉，
+   * 保留带改名与运行状态的托管记录。
    */
   hostedNativeSessionIds(): Map<string, Set<string>> {
     const out = new Map<string, Set<string>>();
@@ -529,10 +529,9 @@ export class HostedSessionManager {
       out.set(adapterKey, bucket);
     };
     for (const record of this.records.values()) {
-      if (record.agent !== "pi") {
-        claim("claude-code", record.id);
-        continue;
-      }
+      // 只有 pi 需要认领：claude 桌面索引里的 id 是 `local_*`，不是 CLI 的 `--session-id`，
+      // 对不上；而 claude-code-cli 适配器本来就按 hosted/sessions.json 排除托管会话。
+      if (record.agent !== "pi") continue;
       claim("pi", record.id);
       // `/new` 之后续写的是 pi 新建的文件，id 由 pi 生成：文件名是 `<时间戳>_<id>.jsonl`。
       const file = basename(record.piSessionPath ?? "").replace(/\.jsonl$/, "");
