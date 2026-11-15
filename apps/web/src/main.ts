@@ -2193,7 +2193,14 @@ function dockTodos(): HTMLElement {
 
   paintList();
   void refresh();
-  wrap.append(el("div", { className: "todo-form" }, [select, input, addButton]), list);
+  wrap.append(
+    el("p", {
+      className: "hint todo-note",
+      text: "待办存在 Bridge 自己的数据库里，换浏览器、清缓存都不会丢；换一台主机就是另一个库。",
+    }),
+    el("div", { className: "todo-form" }, [select, input, addButton]),
+    list,
+  );
   return wrap;
 }
 
