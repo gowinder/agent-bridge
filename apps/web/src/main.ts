@@ -739,10 +739,61 @@ function showPairError(message: string): void {
   );
 }
 
-function flashNotice(message: string): void {
-  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" }, text: message });
+/** 超时/断线这类错误值得就地重试；参数错了之类重试也没用。 */
+function isRetryableError(error: unknown): boolean {
+  return /超时|已断开|已关闭|中继.*失败|Failed to fetch|NetworkError/i.test(messageOf(error));
+}
+
+/**
+ * 浮在最下层的临时提示。超时这类错误带上「重试」，就地重发，不用刷新整页。
+ * 带重试时留得久一点（15 秒），否则 5 秒就收。
+ */
+function flashNotice(message: string, retry?: () => void): void {
+  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" } }, [
+    el("span", { className: "float-notice-text", text: message }),
+  ]);
+  if (retry) {
+    box.classList.add("has-action");
+    box.append(
+      button(
+        "重试",
+        () => {
+          box.remove();
+          retry();
+        },
+        "btn primary small float-notice-retry",
+      ),
+    );
+  }
   document.body.append(box);
-  window.setTimeout(() => box.remove(), 5000);
+  window.setTimeout(() => box.remove(), retry ? 15_000 : 5_000);
+}
+
+/** 操作失败的统一提示：超时/断线的额外给一个「重试」。 */
+function noticeFailure(prefix: string, error: unknown, retry: () => void): void {
+  flashNotice(`${prefix}：${messageOf(error)}`, isRetryableError(error) ? retry : undefined);
+}
+
+/** 聊天页底部的状态行报错：超时就地给「重试」，不用刷新页面。 */
+function statusError(state: ChatState, error: unknown, retry: () => void): void {
+  const text = messageOf(error);
+  state.status.classList.add("error");
+  if (!isRetryableError(error)) {
+    state.status.textContent = text;
+    return;
+  }
+  state.status.replaceChildren(
+    el("span", { text }),
+    button(
+      "重试",
+      () => {
+        state.status.classList.remove("error");
+        state.status.textContent = "正在重试…";
+        retry();
+      },
+      "btn ghost small status-retry",
+    ),
+  );
 }
 
 function renderHome(): HTMLElement {
@@ -5846,7 +5897,7 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
     if (state.rail?.root.classList.contains("is-open")) void refreshRail(state.rail);
     return result;
   } catch (error) {
-    if (active) state.status.textContent = messageOf(error);
+    if (active) statusError(state, error, () => void refreshTail(state));
     return null;
   } finally {
     state.loading = false;
@@ -7145,7 +7196,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     try {
       data = await ensureSnapshot();
     } catch (error) {
-      flashNotice(`读取会话列表失败：${messageOf(error)}`);
+      noticeFailure("读取会话列表失败", error, () => void openShare(source, message));
       return;
     }
   }
@@ -7450,12 +7501,13 @@ function emptyState(title: string, hint: string): HTMLElement {
   ]);
 }
 
-function errorView(title: string, message: string): HTMLElement {
+function errorView(title: string, message: string, retry?: () => void): HTMLElement {
   return el("main", { className: "main" }, [
     el("p", { className: "eyebrow", text: "出错了" }),
     el("h1", { className: "display", text: title }),
     el("div", { className: "notice error", text: message }),
     el("div", { className: "actions" }, [
+      button("重试", retry ?? (() => void renderRoute()), "btn primary"),
       button("返回客户端", () => navigate({ level: "clients" }), "btn secondary"),
     ]),
   ]);

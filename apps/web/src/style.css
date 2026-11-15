@@ -1783,6 +1783,29 @@ details[open] > .dock-project-head::before {
   box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.35);
 }
 
+/* 带「重试」的时候排成一行：提示文字占满剩余宽度，按钮不被挤。 */
+.float-notice.has-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.float-notice-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.float-notice-retry {
+  flex: none;
+}
+
+/* 聊天页状态行里的「重试」：超时的时候就地重发，不用刷新整页。 */
+.status-retry {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
 /* ---------- chat ---------- */
 
 .main.chat {
