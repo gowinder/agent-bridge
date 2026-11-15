@@ -35,6 +35,33 @@ export function piModelCatalog(source: string = piAgentSourceDir()): ModelOption
   return models;
 }
 
+/** pi 自己当前用的默认模型（`provider/modelId`），读不到就 undefined。 */
+export function piDefaultModel(source: string = piAgentSourceDir()): string | undefined {
+  const settings = readJson(join(source, "settings.json"));
+  const provider = typeof settings?.["defaultProvider"] === "string" ? settings["defaultProvider"] : "";
+  const model = typeof settings?.["defaultModel"] === "string" ? settings["defaultModel"] : "";
+  return provider && model ? `${provider}/${model}` : undefined;
+}
+
+/**
+ * 模型窗口（tokens）。pi 的自动压缩按窗口算，Bridge 要按百分比换算成它认的预留量，
+ * 所以启动前得先知道窗口；清单来自 pi 自己的 models.json / models-store.json。
+ */
+export function piModelContextWindow(model: string, source: string = piAgentSourceDir()): number | undefined {
+  for (const file of ["models.json", "models-store.json"]) {
+    const parsed = readJson(join(source, file));
+    for (const [provider, config] of Object.entries(providersOf(parsed))) {
+      for (const entry of modelsOf(config)) {
+        const id = typeof entry["id"] === "string" ? entry["id"] : "";
+        const window = typeof entry["contextWindow"] === "number" ? entry["contextWindow"] : 0;
+        if (!id || window <= 0) continue;
+        if (`${provider}/${id}` === model) return window;
+      }
+    }
+  }
+  return undefined;
+}
+
 function providersOf(file: Record<string, unknown> | null): Record<string, unknown> {
   const providers = file?.["providers"] ?? file;
   return isObject(providers) ? providers : {};

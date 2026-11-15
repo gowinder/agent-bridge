@@ -30,7 +30,7 @@ export function piAgentSourceDir(env: NodeJS.ProcessEnv = process.env): string {
 export interface PiSubagentSettings {
   model?: string;
   thinking?: string;
-  /** `compaction.reserveTokens`：剩余这么多 token 时触发自动压缩。 */
+  /** `compaction.reserveTokens`：窗口减掉它之后就是压缩触发点。 */
   reserveTokens?: number;
 }
 
@@ -144,7 +144,7 @@ export function preparePiAgentDir(
       : {};
   if (options.model) subagents["defaultModel"] = options.model;
   if (options.thinking) subagents["defaultThinking"] = options.thinking;
-  settings["subagents"] = subagents;
+  if (Object.keys(subagents).length > 0) settings["subagents"] = subagents;
   if (options.reserveTokens !== undefined) {
     const compaction =
       typeof settings["compaction"] === "object" && settings["compaction"] !== null && !Array.isArray(settings["compaction"])
