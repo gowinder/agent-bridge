@@ -500,6 +500,13 @@ export class DeviceSession implements ChannelSession {
         if (before) query.before = before;
         return this.options.adapters.messages(sessionId, query);
       }
+      case "message.text": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const messageId = stringParam(params, "messageId");
+        if (!messageId) throw new RpcError("invalid_params", "messageId required");
+        return this.options.adapters.messageText(sessionId, messageId);
+      }
       case "session.rail": {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");

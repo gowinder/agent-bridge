@@ -483,15 +483,15 @@ function contextOf(usage: unknown, model: string, windowTokens?: number): Contex
 function blocksOf(content: unknown): MessageBlock[] {
   if (typeof content === "string") {
     const text = content.trim();
-    return text ? [{ type: "text", text: cut(text, MAX_BLOCK_CHARS) }] : [];
+    return text ? [{ type: "text", text }] : [];
   }
   if (!Array.isArray(content)) return [];
   const blocks: MessageBlock[] = [];
   for (const part of content) {
     if (!isRecord(part)) continue;
     if (part["type"] === "text" && typeof part["text"] === "string" && part["text"].trim()) {
-      const text = part["text"].trim();
-      blocks.push({ type: "text", text: cut(text, MAX_BLOCK_CHARS), ...(text.length > MAX_BLOCK_CHARS ? { truncated: true } : {}) });
+      // 文本全文留在托管记录里，列表返回前才截；否则网页“读取全文”拿不到东西。
+      blocks.push({ type: "text", text: part["text"].trim() });
       continue;
     }
     if (part["type"] === "toolCall" && typeof part["name"] === "string") {

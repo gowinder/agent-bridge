@@ -25,6 +25,7 @@ import type {
   MessageQuestion,
   MessageRecord,
   MessageSendResult,
+  MessageTextResult,
   Method,
   ModelOption,
   NextStepAction,
@@ -6149,7 +6150,8 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
     ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (hasText && session) meta.append(messageActions([copyButton(textBlocks([message])), shareButton(session, message)]));
+  if (hasText && session)
+    meta.append(messageActions([copyButton(copySource([message])), shareButton(session, message)]));
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
@@ -6159,7 +6161,7 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
           ? nextStepBox(block, null)
           : block.type === "ask"
             ? askBox(block)
-            : markdownBlock(block.text, block.truncated),
+            : markdownBlock(block.text, block.truncated, () => void openMessageFullText(message)),
     );
   }
   return bubble;
@@ -6653,8 +6655,46 @@ async function openFilePreview(path: string): Promise<void> {
   }
 }
 
-/** Renders transcript text as Markdown; truncation is annotated after the content. */
-function markdownBlock(text: string, truncated?: boolean): HTMLElement {
+/**
+ * 长回复被列表截断（只给前几千字）时点「读取全文」：弹层里按 markdown 显示原文，
+ * 复制按钮拿的也是全文。弹层复用文件预览的卡片，关掉/按 Esc 就能回到会话。
+ */
+async function openMessageFullText(message: MessageRecord): Promise<void> {
+  const overlay = ensureFilePreview();
+  const request = (previewRequest += 1);
+  overlay.hidden = false;
+  document.body.classList.add("has-file-preview");
+  if (filePreviewTitle) {
+    filePreviewTitle.textContent = message.role === "user" ? "完整消息" : "完整回复";
+    filePreviewTitle.title = "";
+  }
+  if (filePreviewNote) filePreviewNote.textContent = "";
+  filePreviewActions?.replaceChildren();
+  filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: "正在读取全文…" }));
+  try {
+    const result = await call<MessageTextResult>(
+      "message.text",
+      { sessionId: message.sessionId, messageId: message.messageId },
+      60_000,
+    );
+    if (request !== previewRequest) return;
+    const body = el("div", { className: "markdown file-preview-md" });
+    body.append(renderMarkdown(result.text, { localLink: localFileLink, localImage: localFileImage }));
+    filePreviewBody?.replaceChildren(body);
+    filePreviewActions?.replaceChildren(copyButton(result.text, "复制全文"));
+    if (filePreviewNote) {
+      filePreviewNote.textContent = `${result.length.toLocaleString()} 字${
+        result.truncated ? ` · 只显示前 ${result.text.length.toLocaleString()} 字` : ""
+      }`;
+    }
+  } catch (error) {
+    if (request !== previewRequest) return;
+    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+  }
+}
+
+/** Renders transcript text as Markdown; truncation offers the full text behind a click. */
+function markdownBlock(text: string, truncated?: boolean, onLoadFull?: (() => void) | null): HTMLElement {
   const node = el("div", { className: "message-text md" });
   try {
     node.append(renderMarkdown(text, { localLink: localFileLink, localImage: localFileImage }));
@@ -6662,7 +6702,19 @@ function markdownBlock(text: string, truncated?: boolean): HTMLElement {
     // A rendering failure must never blank the transcript; fall back to plain text.
     node.textContent = text;
   }
-  if (truncated) node.append(el("p", { className: "md-note", text: "…（已截断）" }));
+  if (truncated) {
+    if (onLoadFull) {
+      const more = el("button", {
+        className: "md-note md-note-more",
+        attrs: { type: "button" },
+        text: "…（已截断）读取全文",
+      });
+      more.addEventListener("click", onLoadFull);
+      node.append(more);
+    } else {
+      node.append(el("p", { className: "md-note", text: "…（已截断）" }));
+    }
+  }
   return node;
 }
 
@@ -6678,7 +6730,7 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
 }
 
 /** 复制一段输出；写剪贴板失败时给出可见反馈，不静默。 */
-function copyButton(text: string, title = "复制这段输出"): HTMLButtonElement {
+function copyButton(text: string | (() => Promise<string>), title = "复制这段输出"): HTMLButtonElement {
   const label = el("span", { text: "复制" });
   const copy = el("button", {
     className: "share-btn copy-btn",
@@ -6695,10 +6747,21 @@ function copyButton(text: string, title = "复制这段输出"): HTMLButtonEleme
       flash("无法复制");
       return;
     }
-    void navigator.clipboard.writeText(text).then(
-      () => flash("已复制"),
-      () => flash("复制失败"),
-    );
+    // 正文被截断的回复要先回 Bridge 拿全文，再写剪贴板；取失败时不能假装复制成功。
+    if (typeof text === "string") {
+      void navigator.clipboard.writeText(text).then(
+        () => flash("已复制"),
+        () => flash("复制失败"),
+      );
+      return;
+    }
+    flash("读取中…");
+    void text()
+      .then((full) => navigator.clipboard.writeText(full))
+      .then(
+        () => flash("已复制"),
+        () => flash("复制失败"),
+      );
   });
   return copy;
 }
@@ -6716,6 +6779,34 @@ function textBlocks(messages: MessageRecord[]): string {
     .map((block) => block.text)
     .join("\n\n")
     .trim();
+}
+
+/** 列表里的长回复只给了前几千字；被截断的那条要回 Bridge 拿原文再拼。 */
+async function fullTextOf(messages: MessageRecord[]): Promise<string> {
+  const parts: string[] = [];
+  for (const message of messages) {
+    const blocks = message.blocks.filter((block) => block.type === "text");
+    if (blocks.length === 0) continue;
+    if (blocks.every((block) => !block.truncated)) {
+      parts.push(blocks.map((block) => block.text).join("\n\n"));
+      continue;
+    }
+    const result = await call<MessageTextResult>(
+      "message.text",
+      { sessionId: message.sessionId, messageId: message.messageId },
+      60_000,
+    );
+    parts.push(result.text);
+  }
+  return parts.join("\n\n").trim();
+}
+
+/** 复制用：有截断就现取全文，否则直接用列表里的正文。 */
+function copySource(messages: MessageRecord[]): string | (() => Promise<string>) {
+  const truncated = messages.some((message) =>
+    message.blocks.some((block) => block.type === "text" && block.truncated),
+  );
+  return truncated ? () => fullTextOf(messages) : textBlocks(messages);
 }
 
 function assistantTurn(
@@ -6753,16 +6844,21 @@ function assistantTurn(
     ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
   ]);
   if (session) {
-    // 复制整回合的输出，分享仍沿用最后一条带正文的消息。
+    // 复制整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
     const copyText = textBlocks(messages);
-    meta.append(messageActions([copyText ? copyButton(copyText) : null, lastText ? shareButton(session, lastText) : null]));
+    meta.append(
+      messageActions([
+        copyText ? copyButton(copySource(messages)) : null,
+        lastText ? shareButton(session, lastText) : null,
+      ]),
+    );
   }
   bubble.append(meta);
   let folded = steps.length === 0;
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
-        bubble.append(markdownBlock(block.text, block.truncated));
+        bubble.append(markdownBlock(block.text, block.truncated, () => void openMessageFullText(message)));
       } else if (block.type === "next-step") {
         continue;
       } else if (block.type === "ask") {

@@ -556,7 +556,8 @@ export class HostedSessionManager {
       if (index >= 0) end = index;
     }
     const start = Math.max(0, end - page.limit);
-    const pageMessages = all.slice(start, end);
+    // 全文留到 message.text 再给，列表里还是截到 MAX_BLOCK_CHARS：帧大小与渲染成本不变。
+    const pageMessages = all.slice(start, end).map(trimMessageForList);
     const live = this.live.get(record.id);
     const result: MessageListResult = {
       messages: pageMessages,
@@ -1479,7 +1480,7 @@ export class HostedSessionManager {
             last.role === "system" &&
             last.blocks.length === 1 &&
             last.blocks[0]?.type === "text" &&
-            last.blocks[0].text === truncate(text, MAX_BLOCK_CHARS).text
+            truncate(last.blocks[0].text, MAX_BLOCK_CHARS).text === truncate(text, MAX_BLOCK_CHARS).text
           ) {
             return;
           }
@@ -1488,7 +1489,7 @@ export class HostedSessionManager {
             sessionId: record.id,
             role: "system",
             createdAt: Date.now(),
-            blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+            blocks: [{ type: "text", text }],
           });
           this.touch(record);
         },
@@ -1582,7 +1583,7 @@ export class HostedSessionManager {
       sessionId: record.id,
       role: "system",
       createdAt: Date.now(),
-      blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+      blocks: [{ type: "text", text }],
     });
     this.touch(record);
   }
@@ -1909,7 +1910,7 @@ export class HostedSessionManager {
           sessionId: record.id,
           role: "system",
           createdAt: Date.now(),
-          blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+          blocks: [{ type: "text", text }],
         });
       }
       this.touch(record);
@@ -1986,7 +1987,7 @@ export class HostedSessionManager {
       sessionId: record.id,
       role: "user",
       createdAt: Date.now(),
-      blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+      blocks: [{ type: "text", text }],
     });
   }
 
@@ -2547,6 +2548,17 @@ function sanitizeSlashCommands(value: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+/** 列表只给前几千字；全文留在托管记录里，等 message.text 再拿。 */
+function trimMessageForList(message: MessageRecord): MessageRecord {
+  let changed = false;
+  const blocks = message.blocks.map((block) => {
+    if (block.type !== "text" || block.text.length <= MAX_BLOCK_CHARS) return block;
+    changed = true;
+    return { ...block, text: block.text.slice(0, MAX_BLOCK_CHARS), truncated: true };
+  });
+  return changed ? { ...message, blocks } : message;
+}
+
 function truncateTitle(text: string): string {
   const line = text.replace(/\s+/g, " ").trim();
   if (!line) return "托管会话";
@@ -2559,7 +2571,8 @@ function blocksFromContent(content: unknown): MessageBlock[] {
   for (const item of items) {
     if (!isRecord(item)) continue;
     if (item["type"] === "text" && typeof item["text"] === "string" && item["text"].trim()) {
-      blocks.push({ type: "text", ...truncate(item["text"], MAX_BLOCK_CHARS) });
+      // 文本全文留在托管记录里，列表返回前才截断。
+      blocks.push({ type: "text", text: item["text"] });
     } else if (item["type"] === "tool_use") {
       const name = typeof item["name"] === "string" ? item["name"] : "tool";
       const input = isRecord(item["input"]) ? item["input"] : {};

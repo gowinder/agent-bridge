@@ -125,6 +125,7 @@ export const METHODS = [
   "push.unsubscribe",
   "task.messages",
   "message.list",
+  "message.text",
   "session.subscribe",
   "session.unsubscribe",
   "sync.resume",
@@ -733,6 +734,23 @@ export interface MessageSendResult {
   /** True only when the target confirmed delivery. */
   delivered: boolean;
   detail?: string;
+}
+
+export interface MessageTextParams {
+  sessionId: string;
+  messageId: string;
+}
+
+/** 单条消息的完整正文；消息列表里超过上限的部分会带 `truncated`，用它补齐。 */
+export interface MessageTextResult {
+  messageId: string;
+  role: MessageRole;
+  createdAt: number;
+  text: string;
+  /** 全文超过单次返回上限时为 true，`text` 只到上限为止。 */
+  truncated: boolean;
+  /** 全文长度（字符）。 */
+  length: number;
 }
 
 /** Outcome of asking a client to compact the conversation on demand. */
