@@ -749,6 +749,8 @@ function isRetryableError(error: unknown): boolean {
  * 带重试时留得久一点（15 秒），否则 5 秒就收。
  */
 function flashNotice(message: string, retry?: () => void): void {
+  // 浮条固定定位、彼此完全重叠：新的顶掉旧的，否则两条摞在一起只看得到一条。
+  for (const node of document.querySelectorAll(".float-notice")) node.remove();
   const box = el("div", { className: "notice error float-notice", attrs: { role: "status" } }, [
     el("span", { className: "float-notice-text", text: message }),
   ]);
@@ -787,6 +789,7 @@ function statusError(state: ChatState, error: unknown, retry: () => void): void 
     button(
       "重试",
       () => {
+        state.retrying = true;
         state.status.classList.remove("error");
         state.status.textContent = "正在重试…";
         retry();
@@ -4084,6 +4087,8 @@ interface ChatState {
   compaction?: { pending: boolean; error?: string; note?: string };
   /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
   answers?: Map<string, string[]>;
+  /** 点击了状态行的「重试」：成功后要把「正在重试…」收回去。 */
+  retrying?: boolean;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -4095,7 +4100,11 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const project = data.projects.find((item) => item.projectId === route.projectId);
   if (!summary) {
     renderShell(
-      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。"),
+      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。", () => {
+        // 快照里没有它：先重拉一次再判断，否则只是用同一份旧快照重画同一个错误页。
+        snapshot = null;
+        void renderRoute();
+      }),
       crumbsFor(route),
     );
     return;
@@ -4847,7 +4856,11 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   const summary = data.sessions.find((item) => item.sessionId === route.sessionId);
   if (!summary) {
     renderShell(
-      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。"),
+      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。", () => {
+        // 快照里没有它：先重拉一次再判断，否则只是用同一份旧快照重画同一个错误页。
+        snapshot = null;
+        void renderRoute();
+      }),
       crumbsFor(route),
     );
     return;
@@ -5828,8 +5841,9 @@ function railTaskMeta(task: RailTask): string {
   return parts.join(" · ") || (task.status === "running" ? "运行中" : "已结束");
 }
 
-async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
-  if (state.loading) return null;
+async function refreshTail(state: ChatState, force = false): Promise<MessageListResult | null> {
+  // force：用户点了「重试」，轮询那一轮还在飞也不能把这次默默丢弃。
+  if (state.loading && !force) return null;
   const startedAt = Date.now();
   state.loading = true;
   try {
@@ -5895,9 +5909,15 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
       renderMessages(state);
     }
     if (state.rail?.root.classList.contains("is-open")) void refreshRail(state.rail);
+    // 手动重试成功了：把「正在重试…」与 error 类收回去，不要永久留着。
+    if (state.retrying) {
+      state.retrying = false;
+      state.status.classList.remove("error");
+      state.status.textContent = "";
+    }
     return result;
   } catch (error) {
-    if (active) statusError(state, error, () => void refreshTail(state));
+    if (active) statusError(state, error, () => void refreshTail(state, true));
     return null;
   } finally {
     state.loading = false;

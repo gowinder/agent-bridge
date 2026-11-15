@@ -1793,6 +1793,8 @@ details[open] > .dock-project-head::before {
 .float-notice-text {
   flex: 1;
   min-width: 0;
+  /* 长 URL / hex 这类无断点文本不能压到按钮上。 */
+  overflow-wrap: anywhere;
 }
 
 .float-notice-retry {
