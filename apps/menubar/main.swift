@@ -1386,10 +1386,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         section("更新")
         settingsAutoUpdateSwitch = toggle("自动更新（每 10 分钟检查，有新版本直接装）", #selector(toggleAutoUpdate(_:)))
-        hint("装着新版本时会替换 AgentBridge.app 并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。", height: 16)
+        hint("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。", height: 16)
         if Updater.currentVersionIsPrerelease {
             settingsPrereleaseChannelSwitch = toggle("停留在测试版通道（只升 rc，不升正式版）", #selector(togglePrereleaseChannel(_:)))
-            hint("装在测试版 v\(Updater.currentVersion)：打开只升 rc，正式版不提示。", height: 16)
+            hint("装在测试版 v\(Updater.currentVersion)：打开只升 rc，正式版不提示；关掉就照常，有正式版会提示。", height: 16)
         }
 
         return view
