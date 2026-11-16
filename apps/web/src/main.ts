@@ -4254,6 +4254,8 @@ interface ChatState {
   answers?: Map<string, string[]>;
   /** 点击了状态行的「重试」：成功后要把「正在重试…」收回去。 */
   retrying?: boolean;
+  /** 已经翻到最早一条：轮询拿到的 nextBefore 不能再把「加载更早」解禁。 */
+  historyEnd?: boolean;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -4282,6 +4284,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const note = el("p", { className: "hint" });
   const list = el("div", { className: "transcript-body" });
   const status = el("p", { className: "hint" });
+  // 翻历史与 5 秒轮询是两条独立请求：共用一个 loading 会让点击被轮询默默吞掉。
+  let loadingOlder = false;
   const loadOlder = button("", () => {
     void loadOlderPage(state);
   }, "icon-btn composer-tool");
@@ -5057,7 +5061,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const page = await refreshTail(state);
   if (token !== renderToken) return;
-  if (page?.nextBefore) loadOlder.disabled = false;
+  if (page?.nextBefore && !state.historyEnd) loadOlder.disabled = false;
   startPolling();
   chatResumeKey = hashFor(route);
   chatResume = () => {
@@ -5068,8 +5072,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   async function loadOlderPage(current: ChatState): Promise<void> {
     const oldest = current.messages[0]?.messageId;
-    if (!oldest || current.loading) return;
-    current.loading = true;
+    if (!oldest || loadingOlder) return;
+    loadingOlder = true;
+    loadOlder.disabled = true;
     try {
       const result = await call<MessageListResult>("message.list", {
         sessionId: current.session.sessionId,
@@ -5078,13 +5083,20 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       });
       const fresh = result.messages.filter((message) => !current.known.has(message.messageId));
       for (const message of fresh) current.known.add(message.messageId);
-      current.messages = [...fresh, ...current.messages];
-      renderMessages(current);
-      if (!result.nextBefore) loadOlder.disabled = true;
+      if (fresh.length > 0) {
+        current.messages = [...fresh, ...current.messages];
+        renderMessages(current);
+        // 停在原地等于什么也没发生：视口要挪到刚读出来的最早一条，
+        // 否则用户在底部点一下，新内容全在视口上方，看着像没反应。
+        current.list.scrollTop = 0;
+      }
+      // 没有新消息（游标重复）或后端说没有更早的了，都当成翻到头，别再让人白点。
+      if (fresh.length === 0 || !result.nextBefore) current.historyEnd = true;
     } catch (error) {
-      current.status.textContent = messageOf(error);
+      statusError(current, error, () => void loadOlderPage(current));
     } finally {
-      current.loading = false;
+      loadingOlder = false;
+      loadOlder.disabled = current.historyEnd === true;
     }
   }
 }
@@ -7562,7 +7574,7 @@ async function sendMessage(
     if (result.accepted) onSent();
     window.setTimeout(() => {
       void refreshTail(state).then((page) => {
-        if (page?.nextBefore) loadOlder.disabled = false;
+        if (page?.nextBefore && !state.historyEnd) loadOlder.disabled = false;
       });
     }, 800);
   } catch (error) {

@@ -593,6 +593,48 @@ test("a bridge restart replays the unfinished turn in a new process", async (t) 
   assert.ok(texts.includes("Bridge 重启，已自动续跑上次未结束的一轮"));
 });
 
+test("paging back through history walks to the oldest message", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, permissionMode: "manual" });
+  const id = session.sessionId.replace(/^hosted:/, "");
+  // 造 120 条历史，直接写转录文件（manager 的缓存还没读它）。
+  const lines = [];
+  for (let index = 0; index < 120; index += 1) {
+    lines.push(
+      JSON.stringify({
+        messageId: `m${index}`,
+        sessionId: session.sessionId,
+        role: index % 2 === 0 ? "user" : "assistant",
+        createdAt: 1000 + index,
+        blocks: [{ type: "text", text: `消息 ${index}` }],
+      }),
+    );
+  }
+  writeFileSync(join(h.stateDir, "hosted", `${id}.jsonl`), `${lines.join("\n")}\n`);
+
+  const first = h.manager.messagesFor(session.sessionId, { limit: 50 });
+  assert.equal(first.messages.length, 50);
+  assert.equal(first.messages[0].messageId, "m70");
+  assert.equal(first.nextBefore, "m70");
+
+  const second = h.manager.messagesFor(session.sessionId, { limit: 50, before: first.nextBefore });
+  assert.equal(second.messages[0].messageId, "m20");
+  assert.equal(second.messages.at(-1).messageId, "m69");
+  assert.equal(second.nextBefore, "m20");
+
+  const third = h.manager.messagesFor(session.sessionId, { limit: 50, before: second.nextBefore });
+  assert.equal(third.messages.length, 20);
+  assert.equal(third.messages[0].messageId, "m0");
+  assert.equal(third.nextBefore, undefined);
+
+  // 游标不在了要报错：静默退回最新一页会让网页以为点击没反应。
+  assert.throws(
+    () => h.manager.messagesFor(session.sessionId, { limit: 50, before: "nope" }),
+    /未知的分页游标/,
+  );
+});
+
 test("stopping a session keeps a bridge restart from replaying the turn", async (t) => {
   const h = harness();
   const session = h.manager.create({ path: h.repo });
