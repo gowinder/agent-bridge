@@ -496,11 +496,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "antenna.radiowaves.left.and.right",
-            accessibilityDescription: "Agent Bridge"
-        )
-        statusItem.button?.image?.isTemplate = true
+        statusItem.button?.image = statusIcon()
         statusItem.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
@@ -531,6 +527,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { await self?.pollMessages() }
         }
         scheduleAutoUpdate()
+    }
+
+    /// 预览版和正式版在菜单栏上换个图标，扫一眼就知道装的是哪一个。
+    private func statusIcon() -> NSImage? {
+        let name = Updater.currentVersionIsPrerelease ? "testtube.2" : "antenna.radiowaves.left.and.right"
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Agent Bridge")
+            ?? NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "Agent Bridge")
+        image?.isTemplate = true
+        return image
+    }
+
+    /// 版本号后面跟的通道名：菜单版本行用。
+    private func channelLabel() -> String {
+        Updater.currentVersionIsPrerelease ? T("预览版") : T("正式版")
     }
 
     // MARK: - 自动更新
@@ -784,10 +794,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if updater.isBusy {
             menu.addItem(disabled(updater.summary))
         } else {
-            menu.addItem(disabled(TF(T("菜单栏 app v%@"), Updater.currentVersion)))
-            // 锁在测试版通道时不升级正式版，得让人知道这是有意的、去哪改。
+            menu.addItem(disabled(TF(T("菜单栏 app v%@ · %@"), Updater.currentVersion, channelLabel())))
+            // 锁在预览版通道时不升级正式版，得让人知道这是有意的、去哪改。
             if Updater.currentVersionIsPrerelease && Updater.staysOnPrereleaseChannel {
-                menu.addItem(disabled(T("停留在测试版通道，正式版不提示（设定里可关）")))
+                menu.addItem(disabled(T("停留在预览版通道，正式版不提示（设定里可关）")))
             }
             if let failure = updater.lastFailure {
                 menu.addItem(disabled(TF(T("检查更新失败：%@"), failure)))
@@ -1410,8 +1420,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
         hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
         if Updater.currentVersionIsPrerelease {
-            settingsPrereleaseChannelSwitch = toggle(T("停留在测试版通道（只升 rc，不升正式版）"), #selector(togglePrereleaseChannel(_:)))
-            hint(TF(T("装在测试版 v%@：打开只升 rc，正式版不提示；关掉就照常，有正式版会提示。"), Updater.currentVersion), height: 16)
+            settingsPrereleaseChannelSwitch = toggle(T("停留在预览版通道（只升 rc，不升正式版）"), #selector(togglePrereleaseChannel(_:)))
+            hint(TF(T("装在预览版 v%@：打开只升 rc，正式版不提示；关掉就照常，有正式版会提示。"), Updater.currentVersion), height: 16)
         }
 
         return view
