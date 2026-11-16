@@ -460,6 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsTerminalSwitch: NSSwitch?
     private var settingsExpiryReminderSwitch: NSSwitch?
     private var settingsAutoUpdateSwitch: NSSwitch?
+    private var settingsPrereleaseChannelSwitch: NSSwitch?
     private var autoUpdateTimer: Timer?
     /// 自动更新失败（网络、没有写权限）后先退避一小时，别每 10 分钟重试一遍。
     private var autoUpdateBackoffUntil: Date?
@@ -563,6 +564,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoUpdateEnabled = sender.state == .on
         autoUpdateBackoffUntil = nil
         scheduleAutoUpdate()
+    }
+
+    @objc private func togglePrereleaseChannel(_ sender: NSSwitch) {
+        Updater.staysOnPrereleaseChannel = sender.state == .on
+        // 换了通道，之前算出来的更新目标可能已经不适用，清掉重查（不弹窗）。
+        Task { await updater.check() }
     }
 
     private func paint() {
@@ -1216,7 +1223,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        let height: CGFloat = 700
+        // 测试版才多一行「停留在测试版通道」和它的说明。
+        let height: CGFloat = Updater.currentVersionIsPrerelease ? 774 : 700
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1374,6 +1382,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section("更新")
         settingsAutoUpdateSwitch = toggle("自动更新（每 10 分钟检查，有新版本直接装）", #selector(toggleAutoUpdate(_:)))
         hint("装着新版本时会替换 AgentBridge.app 并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。", height: 16)
+        if Updater.currentVersionIsPrerelease {
+            settingsPrereleaseChannelSwitch = toggle("停留在测试版通道（只升 rc，不升正式版）", #selector(togglePrereleaseChannel(_:)))
+            hint("当前装的是测试版 v\(Updater.currentVersion)。打开后只接受预发布版本，正式版发布时不会提示；关掉就回到默认，有正式版时会升上去。", height: 28)
+        }
 
         return view
     }
@@ -1492,6 +1504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsTerminalSwitch?.isEnabled = reachable
         settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
         settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
+        settingsPrereleaseChannelSwitch?.state = Updater.staysOnPrereleaseChannel ? .on : .off
 
         settingsPortLabel?.stringValue =
             "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? "（环境变量指定）" : "")
