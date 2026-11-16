@@ -22,6 +22,7 @@ import type {
   ContextUsage,
   HostedAgent,
   HostedAgentOption,
+  HostedCreateDefaults,
   HostedCreateParams,
   HostedDirInfo,
   HostedDirsResult,
@@ -188,6 +189,8 @@ export function remoteHostedModes(allowBypassPermissions: boolean): HostedPermis
 export interface HostedConfig {
   /** Directories allowed to host sessions. Absolute paths after `~` expansion. */
   dirs: string[];
+  /** 上一次新建托管会话用的选项：网页下次打开新建面板时据此预填。 */
+  lastCreate?: HostedCreateDefaults;
   idleTimeoutMs: number;
   /** 是否允许托管会话使用 bypassPermissions；默认 false。 */
   allowBypassPermissions: boolean;
@@ -384,6 +387,7 @@ export class HostedSessionManager {
       idleTimeoutMs: this.config.idleTimeoutMs,
       permissionModes: this.remotePermissionModes(),
       allowBypassPermissions: this.config.allowBypassPermissions,
+      ...(this.config.lastCreate ? { lastCreate: this.config.lastCreate } : {}),
     };
     if (!result.enabled) {
       result.note = `尚未配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`;
@@ -396,17 +400,20 @@ export class HostedSessionManager {
     this.config = readConfig(this.stateDir);
   }
 
-  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
-  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+  /**
+   * 读盘、改几个键、写回：运行中手改过 hosted.json（还没重启）时，不会被内存里的旧配置冲掉。
+   * 只用于「顺手记一下」的改动；改 dirs 这类设置仍走 writeConfig。
+   */
+  private patchConfigFile(patch: Record<string, unknown>): void {
     const path = join(this.stateDir, "hosted.json");
     let raw: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
       if (isRecord(parsed)) raw = parsed;
     } catch {
-      // 没有文件或内容坏了：按只有这一项的新配置写。
+      // 没有文件或内容坏了：按只有这几项的新配置写。
     }
-    raw["allowBypassPermissions"] = enabled;
+    Object.assign(raw, patch);
     try {
       mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
       const tmp = `${path}.tmp`;
@@ -418,6 +425,11 @@ export class HostedSessionManager {
         `写入 hosted.json 失败：${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
+  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+    this.patchConfigFile({ allowBypassPermissions: enabled });
     this.reloadConfig();
     return this.configForClient();
   }
@@ -467,6 +479,7 @@ export class HostedSessionManager {
       idleTimeoutMs: this.config.idleTimeoutMs,
       allowBypassPermissions: this.config.allowBypassPermissions,
       ...(this.config.cliPath ? { cliPath: this.config.cliPath } : {}),
+      ...(this.config.lastCreate ? { lastCreate: this.config.lastCreate } : {}),
     };
     try {
       mkdirSync(this.stateDir, { recursive: true });
@@ -697,6 +710,12 @@ export class HostedSessionManager {
     }
     this.records.set(id, record);
     this.persistRecords();
+    try {
+      this.rememberCreateDefaults(agent, permissionMode, { model, effort, subagentModel, thinking, subagentThinking });
+    } catch (error) {
+      // 记住默认值只是下次新建时省点事：写 hosted.json 失败不该让已经起来的会话看起来创建失败。
+      this.log(`hosted: 记住新建选项失败：${error instanceof Error ? error.message : String(error)}`);
+    }
     this.log(`hosted: created ${id} in ${cwd} (${permissionMode})`);
     return this.summary(record);
   }
@@ -1010,6 +1029,48 @@ export class HostedSessionManager {
     }
   }
 
+  /**
+   * 记住这次新建用的选项，写回 hosted.json。Claude Code 与 pi 的模型清单不通用，
+   * 所以各存各的：切引擎时只覆盖自己那一份，另一份留着。
+   */
+  private rememberCreateDefaults(
+    agent: HostedAgent,
+    permissionMode: HostedPermissionMode,
+    used: {
+      model?: string;
+      effort?: string;
+      subagentModel?: string;
+      thinking?: string;
+      subagentThinking?: string;
+    },
+  ): void {
+    const prev = this.config.lastCreate ?? {};
+    // pi 的 permissionMode 只是占位（它没有权限模式），沿用上一次 Claude Code 用的那个。
+    const next: HostedCreateDefaults = {
+      agent,
+      permissionMode: agent === "pi" ? (prev.permissionMode ?? permissionMode) : permissionMode,
+    };
+    // 本次用的引擎以「这次选了什么」为准：选回默认就不写这项，下次预填跟着回到默认；
+    // 另一个引擎的那份原样留着，来回切引擎不会互相清空。
+    if (agent === "pi") {
+      if (prev.model) next.model = prev.model;
+      if (prev.effort) next.effort = prev.effort;
+      if (used.model) next.piModel = used.model;
+      if (used.thinking) next.piThinking = used.thinking;
+      if (used.subagentModel) next.subagentModel = used.subagentModel;
+      if (used.subagentThinking) next.subagentThinking = used.subagentThinking;
+    } else {
+      if (prev.piModel) next.piModel = prev.piModel;
+      if (prev.piThinking) next.piThinking = prev.piThinking;
+      if (prev.subagentModel) next.subagentModel = prev.subagentModel;
+      if (prev.subagentThinking) next.subagentThinking = prev.subagentThinking;
+      if (used.model) next.model = used.model;
+      if (used.effort) next.effort = used.effort;
+    }
+    this.patchConfigFile({ lastCreate: next });
+    this.config.lastCreate = next;
+  }
+
   /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
   options(): HostedOptionsResult {
     const models = modelCatalog();
@@ -1045,6 +1106,7 @@ export class HostedSessionManager {
       for (const item of record.piModels ?? []) addPiModel(item);
     }
     if (piModels.length > 0) result.piModels = piModels;
+    if (this.config.lastCreate) result.lastCreate = this.config.lastCreate;
     return result;
   }
 
@@ -2525,16 +2587,34 @@ function readConfig(stateDir: string): HostedConfig {
       ? raw["dirs"].filter((item): item is string => typeof item === "string" && item.trim() !== "")
       : [];
     const idle = isRecord(raw) ? numberOr(raw["idleTimeoutMs"], DEFAULT_IDLE_TIMEOUT_MS) : DEFAULT_IDLE_TIMEOUT_MS;
+    const lastCreate = isRecord(raw) ? readCreateDefaults(raw["lastCreate"]) : undefined;
     const config: HostedConfig = {
       dirs,
       idleTimeoutMs: Math.max(idle, 60_000),
       allowBypassPermissions: isRecord(raw) && raw["allowBypassPermissions"] === true,
       ...(isRecord(raw) && typeof raw["cliPath"] === "string" ? { cliPath: raw["cliPath"] } : {}),
+      ...(lastCreate ? { lastCreate } : {}),
     };
     return config;
   } catch {
     return { dirs: [], idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS, allowBypassPermissions: false };
   }
+}
+
+/** hosted.json 里的新建默认值：只认已知字段，手改坏了也不至于让 Bridge 起不来。 */
+function readCreateDefaults(raw: unknown): HostedCreateDefaults | undefined {
+  if (!isRecord(raw)) return undefined;
+  const out: HostedCreateDefaults = {};
+  if (raw["agent"] === "pi" || raw["agent"] === "claude") out.agent = raw["agent"];
+  const mode = raw["permissionMode"];
+  if (typeof mode === "string" && HOSTED_PERMISSION_MODES.includes(mode as HostedPermissionMode)) {
+    out.permissionMode = mode as HostedPermissionMode;
+  }
+  for (const key of ["model", "effort", "piModel", "piThinking", "subagentModel", "subagentThinking"] as const) {
+    const value = raw[key];
+    if (typeof value === "string" && value.trim() !== "") out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function expandHome(path: string): string {

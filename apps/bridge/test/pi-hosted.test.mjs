@@ -341,6 +341,44 @@ test("pi sessions report pi as the hosting CLI, legacy records fall back to clau
   assert.equal(h.manager.sessions().find((item) => item.sessionId === "hosted:legacy")?.hostedAgent, "claude");
 });
 
+test("a pi session remembers its own options next to claude's", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({
+    path: h.repo,
+    agent: "pi",
+    model: "ncncapi/claude-opus-5-5",
+    thinking: "high",
+    subagentModel: "ncncapi/claude-haiku-4-5",
+    subagentThinking: "low",
+  });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "pi",
+    permissionMode: "manual",
+    piModel: "ncncapi/claude-opus-5-5",
+    piThinking: "high",
+    subagentModel: "ncncapi/claude-haiku-4-5",
+    subagentThinking: "low",
+  });
+});
+
+test("switching engines keeps the other engine's remembered options", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  // 先建一个 Claude Code 会话，记下权限模式与模型。
+  h.manager.create({ path: h.repo, permissionMode: "acceptEdits", model: "claude-opus-5-5" });
+  // 再建 pi 会话：它没有权限模式，不能把 claude 记下的值冲掉。
+  h.manager.create({ path: h.repo, agent: "pi", model: "ncncapi/claude-sonnet-4-5" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "pi",
+    permissionMode: "acceptEdits",
+    model: "claude-opus-5-5",
+    piModel: "ncncapi/claude-sonnet-4-5",
+  });
+});
+
 test("pi sessions advertise the commands the bridge handles itself", (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());

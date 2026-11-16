@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -93,6 +93,71 @@ test("session summaries say which CLI holds the process", (t) => {
   // 网页要靠这个字段决定图标与文案：kind 只说明「托管」，引擎藏在 hostedAgent 里。
   assert.equal(h.manager.session(session.sessionId)?.hostedAgent, "claude");
   assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId)?.hostedAgent, "claude");
+});
+
+test("creating a session remembers the options for the next one", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({ path: h.repo, permissionMode: "acceptEdits", model: "claude-opus-5-5", effort: "high" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "claude",
+    permissionMode: "acceptEdits",
+    model: "claude-opus-5-5",
+    effort: "high",
+  });
+  // 记在 Bridge 的状态目录里，换浏览器、重启 Bridge 都还在。
+  const next = new HostedSessionManager({ stateDir: h.stateDir, spawn: () => new FakeChild() });
+  t.after(() => next.dispose());
+  assert.deepEqual(next.options().lastCreate, config.lastCreate);
+});
+
+test("a failure to remember the options does not fail the create", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  // hosted.json 换成同名目录：记住默认值时写盘必然失败。
+  rmSync(join(h.stateDir, "hosted.json"));
+  mkdirSync(join(h.stateDir, "hosted.json"));
+  const session = h.manager.create({ path: h.repo, permissionMode: "manual" });
+  // 进程已经起来、记录已经入库，不能因为「顺手记一下选项」失败就报创建失败。
+  assert.ok(h.manager.session(session.sessionId));
+});
+
+test("choosing the CLI default again clears the remembered model", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({ path: h.repo, model: "claude-opus-5-5", effort: "high" });
+  h.manager.create({ path: h.repo, permissionMode: "manual" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  // 第二次都选了默认：记忆里不能再留着上一次的 model/effort。
+  assert.deepEqual(config.lastCreate, { agent: "claude", permissionMode: "manual" });
+});
+
+test("remembering options keeps hand edits to hosted.json", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const path = join(h.stateDir, "hosted.json");
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  // 运行中手改、还没重启：创建会话时按「读盘改一个键」写回，不能把这份改动冲掉。
+  raw.idleTimeoutMs = 123_000;
+  writeFileSync(path, JSON.stringify(raw));
+  h.manager.create({ path: h.repo, permissionMode: "manual" });
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(config.idleTimeoutMs, 123_000);
+  assert.equal(config.lastCreate.permissionMode, "manual");
+});
+
+test("a hand-edited permissionMode in hosted.json is ignored", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const path = join(h.stateDir, "hosted.json");
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  raw.lastCreate = { agent: "claude", permissionMode: "nonsense", model: "claude-opus-5-5" };
+  writeFileSync(path, JSON.stringify(raw));
+  h.manager.reloadConfig();
+  const defaults = h.manager.options().lastCreate;
+  assert.equal(defaults?.permissionMode, undefined);
+  assert.equal(defaults?.model, "claude-opus-5-5");
 });
 
 test("router model names with a slash reach argv and survive a restart", (t) => {

@@ -14,6 +14,7 @@ import type {
   FsRoot,
   FsRootsResult,
   HostedAgent,
+  HostedCreateDefaults,
   HostedDirsResult,
   HostedInterruptResult,
   HostedOptionsResult,
@@ -283,6 +284,25 @@ let hostedDraft: {
   /** 子代理的思考等级（`subagents.defaultThinking`）；空串表示跟随 pi 设置。 */
   subagentThinking: string;
 } | null = null;
+/**
+ * 上一次新建托管会话时用的选项，存在 Bridge 的 hosted.json 里（换浏览器也在），
+ * 会话列表页先取一次，点「新建」时就能直接拿来填默认值。
+ */
+let hostedCreateDefaults: HostedCreateDefaults | null = null;
+
+/**
+ * 点「新建」时现取一次：别的标签页或浏览器刚建过会话，缓存就会过期，
+ * 拿旧值预填再直接提交会把刚记住的选项又覆盖回去。`hosted.dirs` 是轻量的那份。
+ */
+async function fetchHostedCreateDefaults(): Promise<HostedCreateDefaults | null> {
+  try {
+    const config = await call<HostedDirsResult>("hosted.dirs");
+    hostedCreateDefaults = config.lastCreate ?? null;
+  } catch {
+    // 取不到就沿用缓存（可能为空），按默认值建也不影响创建。
+  }
+  return hostedCreateDefaults;
+}
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
 /** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
@@ -3218,23 +3238,26 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   if (panelHost && project && appInfo && desktopPanelDraft) {
     panelHost.append(desktopCreatePanel(project, appInfo, desktopPanelDraft));
   }
-  const openCreate = (): void => {
+  const openCreate = async (): Promise<void> => {
     if (!panelHost || !project || !appInfo) return;
     if (canCreateDesktop) {
       desktopDraft = { projectId: project.projectId, text: "" };
       panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
     } else {
+      // 默认沿用上一次创建时的选项；Bridge 没记过（第一次用）就退回手动 / Claude Code。
+      // 现取一次而不是用页面里缓存的：别的标签页建过会话后缓存就是旧的。
+      const last = await fetchHostedCreateDefaults();
       hostedDraft = {
         projectId: project.projectId,
         title: "",
-        model: "",
-        piModel: "",
-        effort: "",
-        mode: "manual",
-        agent: "claude",
-        subagentModel: "",
-        piThinking: "",
-        subagentThinking: "",
+        model: last?.model ?? "",
+        piModel: last?.piModel ?? "",
+        effort: last?.effort ?? "",
+        mode: last?.permissionMode ?? "manual",
+        agent: last?.agent ?? "claude",
+        subagentModel: last?.subagentModel ?? "",
+        piThinking: last?.piThinking ?? "",
+        subagentThinking: last?.subagentThinking ?? "",
       };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
@@ -3328,7 +3351,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(el("li", { className: session.archived ? "row-item is-archived" : "row-item" }, [row, actions]));
   }
 
-  const createHosted = canCreateHosted || canCreateDesktop ? button("", openCreate, "btn small create-btn") : null;
+  const createHosted = canCreateHosted || canCreateDesktop ? button("", () => void openCreate(), "btn small create-btn") : null;
   if (createHosted) {
     createHosted.append(
       el("span", {
