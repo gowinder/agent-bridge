@@ -569,7 +569,9 @@ export class HostedSessionManager {
     let end = all.length;
     if (page.before) {
       const index = all.findIndex((message) => message.messageId === page.before);
-      if (index >= 0) end = index;
+      // 找不到游标就报错，别静默退回最新一页：网页那边会以为「加载更早」点了没反应。
+      if (index === -1) throw new RpcError("invalid_params", "未知的分页游标");
+      end = index;
     }
     const start = Math.max(0, end - page.limit);
     // 全文留到 message.text 再给，列表里还是截到 MAX_BLOCK_CHARS：帧大小与渲染成本不变。
