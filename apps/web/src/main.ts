@@ -74,7 +74,7 @@ import { connectDevice, finishPairing, startPairing, type PairingChallenge } fro
 import type { PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
-import { langSwitchLabel, toggleLang, tr } from "./i18n";
+import { langSwitchLabel, serverTr, toggleLang, tr } from "./i18n";
 
 const RELAY_ERRORS: Record<string, string> = {
   invite_expired: tr("邀请已过期，请在 Mac 上重新生成配对链接。"),
@@ -1725,8 +1725,8 @@ function crumbsFor(route: Route): Crumb[] {
   const app = data?.apps.find((item) => item.appId === route.appId);
   crumbs.push(
     route.level === "projects"
-      ? { label: app?.name ?? tr("客户端") }
-      : { label: app?.name ?? tr("客户端"), href: hashFor({ level: "projects", appId: route.appId }) },
+      ? { label: app?.name ? serverTr(app.name) : tr("客户端") }
+      : { label: app?.name ? serverTr(app.name) : tr("客户端"), href: hashFor({ level: "projects", appId: route.appId }) },
   );
   if (route.level === "sessions" || route.level === "chat") {
     const project = data?.projects.find((item) => item.projectId === route.projectId);
@@ -5800,8 +5800,8 @@ function railSection(title: string, children: Node[], count?: number): HTMLEleme
 
 function railRow(row: RailRow): HTMLElement {
   return el("div", { className: "rail-row" }, [
-    el("span", { className: "rail-label", text: row.label }),
-    el("span", { className: "rail-value", text: row.value, attrs: { title: row.value } }),
+    el("span", { className: "rail-label", text: serverTr(row.label) }),
+    el("span", { className: "rail-value", text: serverTr(row.value), attrs: { title: serverTr(row.value) } }),
   ]);
 }
 
@@ -6521,7 +6521,7 @@ async function submitAskAnswers(
 /** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
 function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement {
   const box = el("div", { className: "next-step" });
-  box.append(el("p", { className: "next-step-ask", text: block.ask ?? block.text }));
+  box.append(el("p", { className: "next-step-ask", text: serverTr(block.ask ?? block.text) }));
   const actions = block.actions ?? [];
   if (!state || actions.length === 0) return box;
   const row = el("div", { className: "next-step-actions" });
@@ -6532,7 +6532,7 @@ function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement 
         type: "button",
         ...(action.action ? { title: tr("桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步") } : {}),
       },
-      text: action.label,
+      text: serverTr(action.label),
     });
     btn.addEventListener("click", () => {
       const buttons = [...row.querySelectorAll<HTMLButtonElement>("button")];
