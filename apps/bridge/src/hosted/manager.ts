@@ -701,7 +701,12 @@ export class HostedSessionManager {
     }
     this.records.set(id, record);
     this.persistRecords();
-    this.rememberCreateDefaults(agent, permissionMode, { model, effort, subagentModel, thinking, subagentThinking });
+    try {
+      this.rememberCreateDefaults(agent, permissionMode, { model, effort, subagentModel, thinking, subagentThinking });
+    } catch (error) {
+      // 记住默认值只是下次新建时省点事：写 hosted.json 失败不该让已经起来的会话看起来创建失败。
+      this.log(`hosted: 记住新建选项失败：${error instanceof Error ? error.message : String(error)}`);
+    }
     this.log(`hosted: created ${id} in ${cwd} (${permissionMode})`);
     return this.summary(record);
   }
@@ -1032,7 +1037,11 @@ export class HostedSessionManager {
     },
   ): void {
     const prev = this.config.lastCreate ?? {};
-    const next: HostedCreateDefaults = { agent, permissionMode };
+    // pi 的 permissionMode 只是占位（它没有权限模式），沿用上一次 Claude Code 用的那个。
+    const next: HostedCreateDefaults = {
+      agent,
+      permissionMode: agent === "pi" ? (prev.permissionMode ?? permissionMode) : permissionMode,
+    };
     if (agent === "pi") {
       if (prev.model !== undefined) next.model = prev.model;
       if (prev.effort !== undefined) next.effort = prev.effort;
