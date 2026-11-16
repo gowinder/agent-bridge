@@ -981,6 +981,12 @@ details[open] > .dock-project-head::before {
   gap: 12px;
 }
 
+.hero-lang {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -6px;
+}
+
 .eyebrow {
   font-size: 11px;
   letter-spacing: 0.14em;

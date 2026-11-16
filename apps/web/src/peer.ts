@@ -7,6 +7,7 @@ import type {
   WireMessage,
 } from "@craftstead/protocol";
 import type { RelayConnection } from "./relay.js";
+import { tr } from "./i18n";
 
 function requestId(): string {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -75,7 +76,7 @@ export class PeerClient {
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("Bridge 响应超时"));
+        reject(new Error(tr("Bridge 响应超时")));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       for (const frame of this.secure.seal(message)) this.connection.sendBinary(frame);
@@ -92,7 +93,7 @@ export class PeerClient {
     this.stopped = true;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error("连接已关闭"));
+      pending.reject(new Error(tr("连接已关闭")));
     }
     this.pending.clear();
     this.listeners.clear();

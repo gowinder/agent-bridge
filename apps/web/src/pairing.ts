@@ -16,6 +16,7 @@ import { noise } from "./noise.js";
 import { PeerClient } from "./peer.js";
 import { helloMessage, RelayConnection } from "./relay.js";
 import { saveDevice, type StoredDevice } from "./credentials.js";
+import { tr } from "./i18n";
 
 export interface PairingChallenge {
   connection: RelayConnection;
@@ -62,7 +63,7 @@ export async function startPairing(link: PairingLink): Promise<PairingChallenge>
     if (!handshake.finished) connection.sendBinary(handshake.write());
   }
   const remote = handshake.remoteStatic;
-  if (!remote) throw new Error("握手未得到 Bridge 公钥");
+  if (!remote) throw new Error(tr("握手未得到 Bridge 公钥"));
   const code = await confirmCode(keys.publicKey, remote);
   const secure = handshake.intoChannel();
   return {
@@ -86,7 +87,7 @@ export async function finishPairing(
     confirmCode: challenge.confirmCode,
   });
   if (!response.ok || !response.result) {
-    throw new Error(response.error?.message ?? "配对被拒绝");
+    throw new Error(response.error?.message ?? tr("配对被拒绝"));
   }
   const result = response.result as PairResult;
   const device: StoredDevice = {
@@ -135,7 +136,7 @@ export async function connectDevice(
   });
   connection.sendBinary(handshake.write());
   handshake.read(await connection.nextFrame());
-  if (!handshake.finished) throw new Error("重连握手未完成");
+  if (!handshake.finished) throw new Error(tr("重连握手未完成"));
   const secure = handshake.intoChannel();
   return { client: new PeerClient(connection, secure), connection };
 }
