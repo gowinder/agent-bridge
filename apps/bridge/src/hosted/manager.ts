@@ -1020,7 +1020,6 @@ export class HostedSessionManager {
     }
   }
 
-  /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
   /**
    * 记住这次新建用的选项，写回 hosted.json。Claude Code 与 pi 的模型清单不通用，
    * 所以各存各的：切引擎时只覆盖自己那一份，另一份留着。
@@ -1061,6 +1060,7 @@ export class HostedSessionManager {
     this.writeConfig();
   }
 
+  /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
   options(): HostedOptionsResult {
     const models = modelCatalog();
     const pi = piBinary();
@@ -2595,7 +2595,10 @@ function readCreateDefaults(raw: unknown): HostedCreateDefaults | undefined {
   if (!isRecord(raw)) return undefined;
   const out: HostedCreateDefaults = {};
   if (raw["agent"] === "pi" || raw["agent"] === "claude") out.agent = raw["agent"];
-  if (typeof raw["permissionMode"] === "string") out.permissionMode = raw["permissionMode"] as HostedPermissionMode;
+  const mode = raw["permissionMode"];
+  if (typeof mode === "string" && HOSTED_PERMISSION_MODES.includes(mode as HostedPermissionMode)) {
+    out.permissionMode = mode as HostedPermissionMode;
+  }
   for (const key of ["model", "effort", "piModel", "piThinking", "subagentModel", "subagentThinking"] as const) {
     const value = raw[key];
     if (typeof value === "string" && value.trim() !== "") out[key] = value;
