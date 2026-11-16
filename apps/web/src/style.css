@@ -3885,6 +3885,10 @@ body.has-file-preview {
   color: var(--danger);
 }
 
+.context-hint.is-warn {
+  color: var(--warn);
+}
+
 .composer-restore {
   display: none;
 }

@@ -947,6 +947,22 @@ export class HostedSessionManager {
   }
 
   private compactionLabel(record: HostedRecord): string {
+    const base = this.compactionSettingLabel(record);
+    // pi 只在启动时读 settings.json：进程里的值和记录里的设置不一致时，
+    // 说明它还按旧值在压缩，光看设置会以为已经改了。
+    const effective = this.liveCompactionReserve(record);
+    if (effective === undefined) return base;
+    const intended = this.compactionReserveFor(record);
+    if (intended === effective) return base;
+    const window = this.contextWindowFor(record);
+    if (window === undefined) {
+      return `${base}；运行中的进程仍按旧预留 ${effective.toLocaleString("en-US")} tokens 压缩，重启后生效`;
+    }
+    const trigger = Math.max(0, window - effective);
+    return `${base}；运行中的进程仍按旧预留 ${effective.toLocaleString("en-US")}（约 ${trigger.toLocaleString("en-US")} tokens 时压缩），重启后生效`;
+  }
+
+  private compactionSettingLabel(record: HostedRecord): string {
     if (record.compactionReserveTokens !== undefined) {
       const window = this.contextWindowFor(record);
       const trigger = window === undefined ? undefined : Math.max(0, window - record.compactionReserveTokens);
@@ -960,6 +976,21 @@ export class HostedSessionManager {
     if (window === undefined) return `上下文用到窗口的 ${percent}% 时压缩${suffix}`;
     const trigger = Math.round((window * percent) / 100);
     return `上下文用到窗口的 ${percent}%（约 ${trigger.toLocaleString("en-US")} / ${window.toLocaleString("en-US")} tokens）时压缩${suffix}`;
+  }
+
+  /** 运行中的 pi 进程实际读到的预留 token 数；进程不在、没独立 agent 目录或读不到时为 undefined。 */
+  private liveCompactionReserve(record: HostedRecord): number | undefined {
+    if (!this.live.has(record.id)) return undefined;
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(this.piAgentDirOf(record.id), "settings.json"), "utf8"));
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+      const compaction = (parsed as Record<string, unknown>)["compaction"];
+      if (typeof compaction !== "object" || compaction === null || Array.isArray(compaction)) return undefined;
+      const value = (compaction as Record<string, unknown>)["reserveTokens"];
+      return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** 让守护进程停掉这个会话的进程（没有就不做），并等它退出；strict 时停不掉就抛错。 */
@@ -2058,6 +2089,8 @@ export class HostedSessionManager {
   private summary(record: HostedRecord): SessionSummary {
     const live = this.live.get(record.id);
     const dirExists = isDirectory(record.cwd);
+    // 进程里真正生效的压缩预留量；和记录里的设置不一致说明还没重启。
+    const effectiveReserve = live ? this.liveCompactionReserve(record) : undefined;
     const summary: SessionSummary = {
       sessionId: sessionKeyFor(record.id),
       appId: "hosted",
@@ -2084,6 +2117,7 @@ export class HostedSessionManager {
       ...(record.compactionReserveTokens !== undefined
         ? { compactionReserveTokens: record.compactionReserveTokens }
         : {}),
+      ...(effectiveReserve !== undefined ? { compactionEffectiveReserveTokens: effectiveReserve } : {}),
       cwd: record.cwd,
     };
     if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;

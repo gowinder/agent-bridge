@@ -482,6 +482,12 @@ export interface SessionSummary {
   /** 旧字段：直接写死的预留 token 数；只在老记录里出现。 */
   compactionReserveTokens?: number;
   /**
+   * `hosted` pi only: 运行中的 pi 进程实际读到的预留 token 数（它那份 settings.json）。
+   * pi 只在启动时读配置，所以换成和记录里的设置不一致时说明进程还没重启；
+   * 进程没在跑或读不到配置时缺省。
+   */
+  compactionEffectiveReserveTokens?: number;
+  /**
    * The directory the session actually works in. A worktree session keeps the
    * original repository as its project but runs in `.claude/worktrees/<name>`;
    * remote tools (file browsing, commands) must start here, not at the project.

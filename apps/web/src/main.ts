@@ -6201,10 +6201,36 @@ function contextCompactionSetting(state: ChatState): HTMLElement {
   follow.addEventListener("click", () => {
     void runSetCompaction(state, null);
   });
+  // pi 只在启动时读配置：进程里的值和这里的设置不一致，说明还在按旧值压，得重启进程。
+  const effective = state.session.compactionEffectiveReserveTokens;
+  const intended =
+    typeof legacy === "number"
+      ? legacy
+      : window
+        ? Math.max(0, window - Math.round((window * percent) / 100))
+        : undefined;
+  const stale =
+    typeof effective === "number" && intended !== undefined && effective !== intended
+      ? el("p", {
+          className: "context-hint is-warn",
+          text: window
+            ? tr(
+                `运行中的 pi 进程仍按旧预留 {0} tokens（约 {1} / {2} tokens 时压缩）；停止后再发消息或等它空闲退出即按新设置重启。`,
+                effective.toLocaleString("en-US"),
+                Math.max(0, window - effective).toLocaleString("en-US"),
+                window.toLocaleString("en-US"),
+              )
+            : tr(
+                `运行中的 pi 进程仍按旧预留 {0} tokens；停止后再发消息或等它空闲退出即按新设置重启。`,
+                effective.toLocaleString("en-US"),
+              ),
+        })
+      : null;
   row.append(
     el("p", { className: "context-label", text: tr("自动压缩触发点（窗口百分比）") }),
     el("div", { className: "context-compaction-row" }, [input, save, follow]),
     hint,
+    ...(stale ? [stale] : []),
   );
   return row;
 }

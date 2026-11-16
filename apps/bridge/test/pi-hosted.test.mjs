@@ -800,6 +800,34 @@ test("pi compaction trigger percent is translated into pi's reserve tokens", asy
   );
 });
 
+test("rail and summary report the reserve the running pi process actually reads", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, piModelWindowSource(h));
+  const session = h.manager.create({ path: h.repo, agent: "pi", model: "magpie/grok-4.7" });
+  const dir = join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", ""));
+  // 升级前启动的进程：配置文件里还是旧版算出来的 800k 预留。
+  const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ ...settings, compaction: { reserveTokens: 800_000 } }));
+
+  const stale = h.manager.sessions().find((item) => item.sessionId === session.sessionId);
+  assert.equal(stale.compactionEffectiveReserveTokens, 800_000);
+  assert.equal(
+    h.manager.rail(session.sessionId).environment.find((row) => row.label === "自动压缩")?.value,
+    "上下文用到窗口的 80%（约 800,000 / 1,000,000 tokens）时压缩（默认）；运行中的进程仍按旧预留 800,000（约 200,000 tokens 时压缩），重启后生效",
+  );
+
+  // 重启后进程读到的是记录里的设置，提示消失。
+  h.spawns.at(-1).child.kill("SIGTERM");
+  await h.manager.send(session.sessionId, "继续");
+  const fresh = h.manager.sessions().find((item) => item.sessionId === session.sessionId);
+  assert.equal(fresh.compactionEffectiveReserveTokens, 200_000);
+  assert.equal(
+    h.manager.rail(session.sessionId).environment.find((row) => row.label === "自动压缩")?.value,
+    "上下文用到窗口的 80%（约 800,000 / 1,000,000 tokens）时压缩（默认）",
+  );
+});
+
 function piModelWindowSource(h) {
   const source = fakeAgentDir(h.stateDir);
   writeFileSync(
