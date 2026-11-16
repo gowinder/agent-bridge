@@ -947,8 +947,11 @@ export const MAX_TRANSFER_CHARS = 200_000;
  * Bridge 托管 pi 会话的自动压缩触发点：上下文用到模型窗口的这个百分比就压缩。
  * pi 原生只认「预留多少 token」（窗口 − 预留 才压），大窗口模型几乎永不触发；
  * Bridge 改成按百分比，启动时按当前模型窗口换算成 pi 认的 reserveTokens。
+ * 定在 80%：pi 每次压缩都会把上一份摘要合进来，摘要只增不减；触发点定得太早
+ * （早先默认 20%，300k 窗口即 60k）压缩后剩下的摘要加最近消息很快又越线，
+ * 于是每轮都压一次、摘要越压越大。
  */
-export const DEFAULT_COMPACTION_TRIGGER_PERCENT = 20;
+export const DEFAULT_COMPACTION_TRIGGER_PERCENT = 80;
 
 export interface TransferPrepareResult {
   transferId: string;

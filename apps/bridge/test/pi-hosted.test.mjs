@@ -754,11 +754,11 @@ test("pi compaction trigger percent is translated into pi's reserve tokens", asy
   );
   withAgentDir(t, source);
   const session = h.manager.create({ path: h.repo, agent: "pi", model: "magpie/grok-4.7" });
-  // 默认 20%：1M 窗口在 200k 时压缩，换算成 reserveTokens 就是 800k。
+  // 默认 80%：1M 窗口在 800k 时压缩，换算成 reserveTokens 就是 200k。
   const presetDir = h.spawns[0].options.env.PI_CODING_AGENT_DIR;
   assert.equal(presetDir, join(h.stateDir, "pi-agent", session.sessionId.replace("hosted:", "")));
   const preset = JSON.parse(readFileSync(join(presetDir, "settings.json"), "utf8"));
-  assert.equal(preset.compaction.reserveTokens, 800_000);
+  assert.equal(preset.compaction.reserveTokens, 200_000);
   assert.equal(preset.compaction.enabled, true);
   assert.equal(preset.compaction.keepRecentTokens, 20_000);
 
@@ -786,17 +786,17 @@ test("pi compaction trigger percent is translated into pi's reserve tokens", asy
   const record = saved.sessions.find((item) => item.id === session.sessionId.replace("hosted:", ""));
   assert.equal(record.compactionTriggerPercent, 40);
 
-  // 改回默认：目录留着，触发点退回 20%，用户自己的其它压缩项不动。
+  // 改回默认：目录留着，触发点退回 80%，用户自己的其它压缩项不动。
   h.spawns.at(-1).child.kill("SIGTERM");
   const cleared = await h.manager.setCompaction(session.sessionId, null);
   assert.equal(cleared.compactionTriggerPercent, undefined);
   const reset = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
-  assert.equal(reset.compaction.reserveTokens, 800_000);
+  assert.equal(reset.compaction.reserveTokens, 200_000);
   assert.equal(reset.compaction.keepRecentTokens, 20_000);
   const after = h.manager.rail(session.sessionId).environment;
   assert.equal(
     after.find((row) => row.label === "自动压缩")?.value,
-    "上下文用到窗口的 20%（约 200,000 / 1,000,000 tokens）时压缩（默认）",
+    "上下文用到窗口的 80%（约 800,000 / 1,000,000 tokens）时压缩（默认）",
   );
 });
 
@@ -820,10 +820,10 @@ test("compaction trigger and subagent model share the same agent dir", async (t)
   assert.equal(settings.compaction.reserveTokens, 700_000);
   assert.equal(settings.subagents.defaultModel, "group/dsgroup");
 
-  // 清掉触发点不能连带把子代理模型一起清掉，触发点退回默认 20%。
+  // 清掉触发点不能连带把子代理模型一起清掉，触发点退回默认 80%。
   await h.manager.setCompaction(session.sessionId, null);
   settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
-  assert.equal(settings.compaction.reserveTokens, 800_000);
+  assert.equal(settings.compaction.reserveTokens, 200_000);
   assert.equal(settings.subagents.defaultModel, "group/dsgroup");
 
   // 反过来，换子代理模型也要保留已设的触发点。
