@@ -462,7 +462,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsTerminalSwitch: NSSwitch?
     private var settingsExpiryReminderSwitch: NSSwitch?
     private var settingsAutoUpdateSwitch: NSSwitch?
-    private var settingsPrereleaseChannelSwitch: NSSwitch?
+    private var settingsReleaseUpgradeSwitch: NSSwitch?
     private var autoUpdateTimer: Timer?
     /// 自动更新失败（网络、没有写权限）后先退避一小时，别每 10 分钟重试一遍。
     private var autoUpdateBackoffUntil: Date?
@@ -578,8 +578,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scheduleAutoUpdate()
     }
 
-    @objc private func togglePrereleaseChannel(_ sender: NSSwitch) {
-        Updater.staysOnPrereleaseChannel = sender.state == .on
+    @objc private func toggleAllowReleaseUpgrade(_ sender: NSSwitch) {
+        Updater.allowsReleaseUpgrade = sender.state == .on
         // 旧的更新目标已经不属于这个通道，先清掉再重查（不弹窗）。
         updater.clearAvailable()
         Task { await updater.check() }
@@ -796,8 +796,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             menu.addItem(disabled(TF(T("菜单栏 app v%@ · %@"), Updater.currentVersion, channelLabel())))
             // 锁在预览版通道时不升级正式版，得让人知道这是有意的、去哪改。
-            if Updater.currentVersionIsPrerelease && Updater.staysOnPrereleaseChannel {
-                menu.addItem(disabled(T("停留在预览版通道，正式版不提示（设定里可关）")))
+            if Updater.currentVersionIsPrerelease && !Updater.allowsReleaseUpgrade {
+                menu.addItem(disabled(T("只更新预览版，正式版不提示（设定里可勾选升级到正式版）")))
             }
             if let failure = updater.lastFailure {
                 menu.addItem(disabled(TF(T("检查更新失败：%@"), failure)))
@@ -1420,8 +1420,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
         hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
         if Updater.currentVersionIsPrerelease {
-            settingsPrereleaseChannelSwitch = toggle(T("停留在预览版通道（只升 rc，不升正式版）"), #selector(togglePrereleaseChannel(_:)))
-            hint(TF(T("装在预览版 v%@：打开只升 rc，正式版不提示；关掉就照常，有正式版会提示。"), Updater.currentVersion), height: 16)
+            settingsReleaseUpgradeSwitch = toggle(T("允许升级到正式版（默认关，只升 rc）"), #selector(toggleAllowReleaseUpgrade(_:)))
+            hint(TF(T("装在预览版 v%@：关着只升 rc；勾选后正式版也会提示并安装。"), Updater.currentVersion), height: 16)
         }
 
         return view
@@ -1540,7 +1540,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsTerminalSwitch?.isEnabled = reachable
         settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
         settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
-        settingsPrereleaseChannelSwitch?.state = Updater.staysOnPrereleaseChannel ? .on : .off
+        settingsReleaseUpgradeSwitch?.state = Updater.allowsReleaseUpgrade ? .on : .off
 
         settingsPortLabel?.stringValue =
             "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? T("（环境变量指定）") : "")
