@@ -3297,8 +3297,23 @@ body.has-file-preview {
 
 .composer-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
+}
+
+/*
+ * 输入框独占一行，按钮排到下一行。模型选择这类按钮很宽，和输入框挤同一行时
+ * 输入框只剩半行字要折成好几行，按钮上方却空着——两行反而省高度。
+ */
+.composer-input {
+  flex: 1 1 100%;
+  order: -1;
+}
+
+/* 第二行：附件靠左，刷新、模型、发送等靠右。 */
+.composer-row .attach-btn {
+  margin-right: auto;
 }
 
 /* Keep the primary action the same height as the icon buttons beside it. */
@@ -3322,7 +3337,6 @@ body.has-file-preview {
 }
 
 .composer-input {
-  flex: 1;
   min-width: 0;
   border-color: transparent;
   background: transparent;
@@ -3353,18 +3367,11 @@ body.has-file-preview {
  */
 @container chat-body (max-width: 700px) {
   .composer-row {
-    flex-wrap: wrap;
     align-items: center;
   }
 
   .composer-input {
-    flex-basis: 100%;
-    order: -1;
     min-height: 40px;
-  }
-
-  .composer-row .btn.primary {
-    margin-left: auto;
   }
 }
 
@@ -4423,18 +4430,11 @@ body.has-file-preview {
   }
 
   .composer-row {
-    flex-wrap: wrap;
     align-items: center;
   }
 
   .composer-input {
-    flex-basis: 100%;
-    order: -1;
     min-height: 40px;
-  }
-
-  .composer-row .btn.primary {
-    margin-left: auto;
   }
 
   .composer-collapse {
