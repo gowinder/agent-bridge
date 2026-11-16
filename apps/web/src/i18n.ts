@@ -76,6 +76,27 @@ export function tr(zh: string, ...args: Array<string | number>): string {
   });
 }
 
+/**
+ * 服务器下发的文案（环境表、批准提示、适配器说明）也走同一张表。
+ * 带插值的几条是完整句式，只能按格式认回来；认不出就原样显示中文。
+ */
+const SERVER_PATTERNS: Array<[RegExp, string]> = [
+  [/^允许执行 (.+) 吗？$/, "允许执行 {0} 吗？"],
+  [/^运行中（pid (.+)）$/, "运行中（pid {0}）"],
+  [/^(\d+) 分钟$/, "{0} 分钟"],
+];
+
+export function serverTr(text: string | undefined): string {
+  if (!text || current !== "en") return text ?? "";
+  const mapped = EN[text];
+  if (mapped !== undefined) return mapped;
+  for (const [pattern, key] of SERVER_PATTERNS) {
+    const match = pattern.exec(text);
+    if (match) return tr(key, ...match.slice(1));
+  }
+  return text;
+}
+
 /** 开发自检：`?i18n=missing` 把英文缺的条目列在页面右下角。 */
 export function reportMissing(): void {
   if (!new URLSearchParams(location.search).has("i18n")) return;

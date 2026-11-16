@@ -74,7 +74,7 @@ import { connectDevice, finishPairing, startPairing, type PairingChallenge } fro
 import type { PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
-import { langSwitchLabel, toggleLang, tr } from "./i18n";
+import { langSwitchLabel, serverTr, toggleLang, tr } from "./i18n";
 
 const RELAY_ERRORS: Record<string, string> = {
   invite_expired: tr("邀请已过期，请在 Mac 上重新生成配对链接。"),
@@ -1725,8 +1725,8 @@ function crumbsFor(route: Route): Crumb[] {
   const app = data?.apps.find((item) => item.appId === route.appId);
   crumbs.push(
     route.level === "projects"
-      ? { label: app?.name ?? tr("客户端") }
-      : { label: app?.name ?? tr("客户端"), href: hashFor({ level: "projects", appId: route.appId }) },
+      ? { label: app?.name ? serverTr(app.name) : tr("客户端") }
+      : { label: app?.name ? serverTr(app.name) : tr("客户端"), href: hashFor({ level: "projects", appId: route.appId }) },
   );
   if (route.level === "sessions" || route.level === "chat") {
     const project = data?.projects.find((item) => item.projectId === route.projectId);
@@ -5800,8 +5800,8 @@ function railSection(title: string, children: Node[], count?: number): HTMLEleme
 
 function railRow(row: RailRow): HTMLElement {
   return el("div", { className: "rail-row" }, [
-    el("span", { className: "rail-label", text: row.label }),
-    el("span", { className: "rail-value", text: row.value, attrs: { title: row.value } }),
+    el("span", { className: "rail-label", text: serverTr(row.label) }),
+    el("span", { className: "rail-value", text: serverTr(row.value), attrs: { title: serverTr(row.value) } }),
   ]);
 }
 
@@ -6201,10 +6201,36 @@ function contextCompactionSetting(state: ChatState): HTMLElement {
   follow.addEventListener("click", () => {
     void runSetCompaction(state, null);
   });
+  // pi 只在启动时读配置：进程里的值和这里的设置不一致，说明还在按旧值压，得重启进程。
+  const effective = state.session.compactionEffectiveReserveTokens;
+  const intended =
+    typeof legacy === "number"
+      ? legacy
+      : window
+        ? Math.max(0, window - Math.round((window * percent) / 100))
+        : undefined;
+  const stale =
+    typeof effective === "number" && intended !== undefined && effective !== intended
+      ? el("p", {
+          className: "context-hint is-warn",
+          text: window
+            ? tr(
+                `运行中的 pi 进程仍按旧预留 {0} tokens（约 {1} / {2} tokens 时压缩）；停止后再发消息或等它空闲退出即按新设置重启。`,
+                effective.toLocaleString("en-US"),
+                Math.max(0, window - effective).toLocaleString("en-US"),
+                window.toLocaleString("en-US"),
+              )
+            : tr(
+                `运行中的 pi 进程仍按旧预留 {0} tokens；停止后再发消息或等它空闲退出即按新设置重启。`,
+                effective.toLocaleString("en-US"),
+              ),
+        })
+      : null;
   row.append(
     el("p", { className: "context-label", text: tr("自动压缩触发点（窗口百分比）") }),
     el("div", { className: "context-compaction-row" }, [input, save, follow]),
     hint,
+    ...(stale ? [stale] : []),
   );
   return row;
 }
@@ -6521,7 +6547,7 @@ async function submitAskAnswers(
 /** 桌面端回合结束时的「下一步」盒子：一句话加若干按钮。 */
 function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement {
   const box = el("div", { className: "next-step" });
-  box.append(el("p", { className: "next-step-ask", text: block.ask ?? block.text }));
+  box.append(el("p", { className: "next-step-ask", text: serverTr(block.ask ?? block.text) }));
   const actions = block.actions ?? [];
   if (!state || actions.length === 0) return box;
   const row = el("div", { className: "next-step-actions" });
@@ -6532,7 +6558,7 @@ function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement 
         type: "button",
         ...(action.action ? { title: tr("桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步") } : {}),
       },
-      text: action.label,
+      text: serverTr(action.label),
     });
     btn.addEventListener("click", () => {
       const buttons = [...row.querySelectorAll<HTMLButtonElement>("button")];

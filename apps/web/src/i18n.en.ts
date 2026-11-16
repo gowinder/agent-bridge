@@ -364,6 +364,10 @@ export const EN: Record<string, string> = {
     "Currently compacts when the default window reaches {0}%. Restart the pi process after changing this; takes effect with your next message.",
   "当前：默认窗口用到 {0}%（约 {1} / {2} tokens）时压缩；改完重启 pi 进程，下一条消息生效。":
     "Currently compacts when the default window reaches {0}% (about {1} / {2} tokens). Restart the pi process after changing this; takes effect with your next message.",
+  "运行中的 pi 进程仍按旧预留 {0} tokens；停止后再发消息或等它空闲退出即按新设置重启。":
+    "The running pi process still uses the old reserve of {0} tokens. Stop the session and send again, or let it idle out, to restart it with the new setting.",
+  "运行中的 pi 进程仍按旧预留 {0} tokens（约 {1} / {2} tokens 时压缩）；停止后再发消息或等它空闲退出即按新设置重启。":
+    "The running pi process still uses the old reserve of {0} tokens (compacts at about {1} / {2} tokens). Stop the session and send again, or let it idle out, to restart it with the new setting.",
   "当前按旧设置预留 {0} tokens；填百分比保存即换成新算法。":
     "Currently reserving {0} tokens from the old setting; enter a percentage and save to switch to the new scheme.",
   "当前按旧设置预留 {0} tokens（约窗口用到 {1}%）；填百分比保存即换成新算法。":
@@ -634,4 +638,15 @@ export const EN: Record<string, string> = {
   切换语言: "Switch language",
   预览: "Preview",
   高: "High",
+  进程: "Process",
+  空闲超时: "Idle timeout",
+  引擎: "Engine",
+  自动压缩: "Auto-compaction",
+  "未运行（发送时 resume）": "Not running (resumes on send)",
+  允许: "Allow",
+  拒绝: "Deny",
+  "Bridge 托管": "Bridge hosted",
+  "运行中（pid {0}）": "Running (pid {0})",
+  "{0} 分钟": "{0} min",
+  "允许执行 {0} 吗？": "Allow {0}?",
 };
