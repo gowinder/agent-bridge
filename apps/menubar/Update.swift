@@ -110,7 +110,14 @@ final class Updater {
     private(set) var lastFailure: String?
     var onChange: (() -> Void)?
 
-    /// preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
+    /// 换了更新通道后旧候选就不再适用，菜单/工具提示不该继续显示它。
+    func clearAvailable() {
+        available = nil
+        onChange?()
+    }
+
+    /// 通道判定的默认口径：preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
+    /// 装了测试版又勾了「停留在测试版通道」时，这个口径被通道开关覆盖（只看 prerelease 标志）。
     private var isPreview: Bool {
         AdminClient.isPreviewRelay(AdminClient.relayHint ?? UserDefaults.standard.string(forKey: "relayUrl"))
     }

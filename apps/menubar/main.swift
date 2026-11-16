@@ -568,7 +568,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func togglePrereleaseChannel(_ sender: NSSwitch) {
         Updater.staysOnPrereleaseChannel = sender.state == .on
-        // 换了通道，之前算出来的更新目标可能已经不适用，清掉重查（不弹窗）。
+        // 旧的更新目标已经不属于这个通道，先清掉再重查（不弹窗）。
+        updater.clearAvailable()
         Task { await updater.check() }
     }
 
@@ -762,6 +763,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(disabled(updater.summary))
         } else {
             menu.addItem(disabled("菜单栏 app v\(Updater.currentVersion)"))
+            // 锁在测试版通道时不升级正式版，得让人知道这是有意的、去哪改。
+            if Updater.currentVersionIsPrerelease && Updater.staysOnPrereleaseChannel {
+                menu.addItem(disabled("停留在测试版通道，正式版不提示（设定里可关）"))
+            }
             if let failure = updater.lastFailure {
                 menu.addItem(disabled("检查更新失败：\(failure)"))
             }
@@ -1223,8 +1228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        // 测试版才多一行「停留在测试版通道」和它的说明。
-        let height: CGFloat = Updater.currentVersionIsPrerelease ? 774 : 700
+        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉，统一给到 774。
+        let height: CGFloat = 774
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1384,7 +1389,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         hint("装着新版本时会替换 AgentBridge.app 并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。", height: 16)
         if Updater.currentVersionIsPrerelease {
             settingsPrereleaseChannelSwitch = toggle("停留在测试版通道（只升 rc，不升正式版）", #selector(togglePrereleaseChannel(_:)))
-            hint("当前装的是测试版 v\(Updater.currentVersion)。打开后只接受预发布版本，正式版发布时不会提示；关掉就回到默认，有正式版时会升上去。", height: 28)
+            hint("装在测试版 v\(Updater.currentVersion)：打开只升 rc，正式版不提示。", height: 16)
         }
 
         return view
