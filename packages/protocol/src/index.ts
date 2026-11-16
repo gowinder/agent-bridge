@@ -614,6 +614,29 @@ export type HostedPermissionMode = "manual" | "acceptEdits" | "auto" | "bypassPe
 /** Bridge 托管会话可以由哪个 CLI 持有：Claude Code（stream-json）或 pi（rpc）。 */
 export type HostedAgent = "claude" | "pi";
 
+/**
+ * 上一次成功创建托管会话时用的选项：存在 Bridge 的 hosted.json 里，
+ * 网页下次打开新建面板就按它填默认值，换浏览器、清缓存都不丢。
+ */
+export interface HostedCreateDefaults {
+  /** 上次用的引擎。 */
+  agent?: HostedAgent;
+  /** Claude Code 的权限模式；pi 会话恒为 manual（占位）。 */
+  permissionMode?: HostedPermissionMode;
+  /** 上次 Claude Code 会话用的 `--model`；缺省表示 CLI 默认。 */
+  model?: string;
+  /** 上次 Claude Code 会话用的 `--effort`。 */
+  effort?: string;
+  /** 上次 pi 会话的主模型；和 Claude Code 的 model 分开记，切引擎时互不覆盖。 */
+  piModel?: string;
+  /** 上次 pi 会话的 `--thinking`。 */
+  piThinking?: string;
+  /** 上次 pi 子代理用的模型。 */
+  subagentModel?: string;
+  /** 上次 pi 子代理的思考等级。 */
+  subagentThinking?: string;
+}
+
 /** 新建面板里可选的托管引擎；available 为 false 时按钮置灰并显示 detail。 */
 export interface HostedAgentOption {
   id: HostedAgent;
@@ -684,6 +707,8 @@ export interface HostedOptionsResult {
    * 一条 pi 会话都没跑过时没有这个字段，网页退回手填。
    */
   piModels?: ModelOption[];
+  /** 上次创建时用的选项，新建面板据此预填；从没建过就没有这个字段。 */
+  lastCreate?: HostedCreateDefaults;
   note?: string;
 }
 

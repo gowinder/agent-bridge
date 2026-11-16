@@ -95,6 +95,23 @@ test("session summaries say which CLI holds the process", (t) => {
   assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId)?.hostedAgent, "claude");
 });
 
+test("creating a session remembers the options for the next one", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({ path: h.repo, permissionMode: "acceptEdits", model: "claude-opus-5-5", effort: "high" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "claude",
+    permissionMode: "acceptEdits",
+    model: "claude-opus-5-5",
+    effort: "high",
+  });
+  // 记在 Bridge 的状态目录里，换浏览器、重启 Bridge 都还在。
+  const next = new HostedSessionManager({ stateDir: h.stateDir, spawn: () => new FakeChild() });
+  t.after(() => next.dispose());
+  assert.deepEqual(next.options().lastCreate, config.lastCreate);
+});
+
 test("router model names with a slash reach argv and survive a restart", (t) => {
   const h = harness();
   const session = h.manager.create({ path: h.repo, model: "ncncapi/claude-opus-5-5" });

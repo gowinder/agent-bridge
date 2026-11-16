@@ -14,6 +14,7 @@ import type {
   FsRoot,
   FsRootsResult,
   HostedAgent,
+  HostedCreateDefaults,
   HostedDirsResult,
   HostedInterruptResult,
   HostedOptionsResult,
@@ -283,6 +284,26 @@ let hostedDraft: {
   /** 子代理的思考等级（`subagents.defaultThinking`）；空串表示跟随 pi 设置。 */
   subagentThinking: string;
 } | null = null;
+/**
+ * 上一次新建托管会话时用的选项，存在 Bridge 的 hosted.json 里（换浏览器也在），
+ * 会话列表页先取一次，点「新建」时就能直接拿来填默认值。
+ */
+let hostedCreateDefaults: HostedCreateDefaults | null = null;
+/** 上面那份选项有没有取过：列表页重绘很频繁，取到就没必要再问。 */
+let hostedCreateDefaultsFetched = false;
+
+function prefetchHostedCreateDefaults(): void {
+  if (hostedCreateDefaultsFetched) return;
+  hostedCreateDefaultsFetched = true;
+  void call<HostedOptionsResult>("hosted.options")
+    .then((info) => {
+      hostedCreateDefaults = info.lastCreate ?? null;
+    })
+    .catch(() => {
+      // 读不到就按默认值来，下次进这个页面再试。
+      hostedCreateDefaultsFetched = false;
+    });
+}
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
 /** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
@@ -3208,6 +3229,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const sessions = visibleSessions(projectSessions, showArchived);
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
   const isHosted = appInfo?.appId === "hosted";
+  if (isHosted && appInfo?.capabilities.create === true) prefetchHostedCreateDefaults();
   const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
   // 桌面客户端（例如 dsh）也能从网页新建：Bridge 代它起一次无界面运行，第一条消息随创建发出。
   const canCreateDesktop = !isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
@@ -3224,17 +3246,19 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       desktopDraft = { projectId: project.projectId, text: "" };
       panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
     } else {
+      // 默认沿用上一次创建时的选项；Bridge 没记过（第一次用）就退回手动 / Claude Code。
+      const last = hostedCreateDefaults;
       hostedDraft = {
         projectId: project.projectId,
         title: "",
-        model: "",
-        piModel: "",
-        effort: "",
-        mode: "manual",
-        agent: "claude",
-        subagentModel: "",
-        piThinking: "",
-        subagentThinking: "",
+        model: last?.model ?? "",
+        piModel: last?.piModel ?? "",
+        effort: last?.effort ?? "",
+        mode: last?.permissionMode ?? "manual",
+        agent: last?.agent ?? "claude",
+        subagentModel: last?.subagentModel ?? "",
+        piThinking: last?.piThinking ?? "",
+        subagentThinking: last?.subagentThinking ?? "",
       };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
@@ -3757,6 +3781,7 @@ function hostedCreatePanel(
   syncAgent();
   void call<HostedOptionsResult>("hosted.options")
     .then((info) => {
+      hostedCreateDefaults = info.lastCreate ?? null;
       const groups: Array<[string, ModelOption[]]> = [
         [tr("自定义"), info.models.filter((item) => item.section === "custom")],
         [tr("常用"), info.models.filter((item) => (item.section ?? "main") === "main")],
