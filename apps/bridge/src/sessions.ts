@@ -123,6 +123,8 @@ const ACTIVITY_METHODS = new Set([
   "hosted.interrupt",
   "hosted.setModel",
   "hosted.setSubagentModel",
+  "hosted.setThinking",
+  "hosted.setSubagentThinking",
   "hosted.setCompaction",
   "hosted.archive",
   "hosted.delete",
@@ -158,6 +160,14 @@ function describeActivity(request: RequestMessage): string | null {
   if (request.method === "hosted.setSubagentModel") {
     const model = (stringParam(params, "model") ?? "").trim();
     return `${model ? `把托管会话的子代理模型换成「${model}」` : "把托管会话的子代理模型改回跟随 pi 设置"}${suffix}`;
+  }
+  if (request.method === "hosted.setThinking") {
+    const level = (stringParam(params, "level") ?? "").trim();
+    return `${level ? `把托管会话的思考等级换成「${level}」` : "把托管会话的思考等级改回跟随 pi 设置"}${suffix}`;
+  }
+  if (request.method === "hosted.setSubagentThinking") {
+    const level = (stringParam(params, "level") ?? "").trim();
+    return `${level ? `把托管会话的子代理思考等级换成「${level}」` : "把托管会话的子代理思考等级改回跟随 pi 设置"}${suffix}`;
   }
   if (request.method === "hosted.setCompaction") {
     const raw = params["triggerPercent"] ?? params["reserveTokens"];
@@ -671,6 +681,24 @@ export class DeviceSession implements ChannelSession {
           throw new RpcError("invalid_params", "model 必须是字符串或 null");
         }
         return this.options.adapters.hostedSetSubagentModel(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setThinking": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["level"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "level 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetThinking(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setSubagentThinking": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["level"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "level 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetSubagentThinking(sessionId, typeof raw === "string" ? raw : null);
       }
       case "hosted.setCompaction": {
         const sessionId = stringParam(params, "sessionId");

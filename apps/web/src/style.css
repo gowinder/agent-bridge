@@ -3763,6 +3763,37 @@ body.has-file-preview {
   background: color-mix(in srgb, var(--text) 6%, transparent);
 }
 
+/* 思考等级：一排小 chip，选项少、一行能放完。 */
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 6px 8px;
+}
+
+.thinking-chip {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.thinking-chip:hover {
+  border-color: color-mix(in srgb, var(--text) 22%, transparent);
+  color: var(--text);
+}
+
+.thinking-chip.is-current {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: var(--accent);
+}
+
 .model-item.is-switchable {
   width: 100%;
   border: 0;

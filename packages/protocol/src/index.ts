@@ -117,6 +117,8 @@ export const METHODS = [
   "hosted.resume",
   "hosted.setModel",
   "hosted.setSubagentModel",
+  "hosted.setThinking",
+  "hosted.setSubagentThinking",
   "hosted.setCompaction",
   "hosted.archive",
   "hosted.delete",
@@ -860,6 +862,16 @@ export interface SessionModelsResult {
   subagentModel?: string;
   /** 能否从网页换子代理模型（只有 pi 托管会话可以）。 */
   canSwitchSubagent?: boolean;
+  /** pi 托管会话：主会话的思考等级；缺省表示跟随 pi 自己的设置。 */
+  thinking?: string;
+  /** 能否从网页换思考等级（只有 pi 托管会话可以）。 */
+  canSwitchThinking?: boolean;
+  /** pi 的可用思考等级，从低到高。 */
+  thinkingLevels?: string[];
+  /** pi 托管会话：新派生子代理用的思考等级；缺省表示跟随 pi 自己的设置。 */
+  subagentThinking?: string;
+  /** 能否从网页换子代理思考等级（只有 pi 托管会话可以）。 */
+  canSwitchSubagentThinking?: boolean;
   note?: string;
 }
 

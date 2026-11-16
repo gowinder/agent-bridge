@@ -147,6 +147,14 @@ export class SessionAdapters {
     return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
   }
 
+  async hostedSetThinking(sessionId: string, level: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setThinking(sessionId, level) };
+  }
+
+  async hostedSetSubagentThinking(sessionId: string, level: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setSubagentThinking(sessionId, level) };
+  }
+
   async hostedSetCompaction(sessionId: string, percent: number | null): Promise<SessionGetResult> {
     return { session: await this.hostedManager.setCompaction(sessionId, percent) };
   }
