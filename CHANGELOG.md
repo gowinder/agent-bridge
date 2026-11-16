@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.11.1-rc.10] - 2026-11-16
+
+### Added
+
+- 网页端与菜单栏支持中英文切换。中文原文就是字典的 key，英文集中在网页端的 `apps/web/src/i18n.en.ts` 和菜单栏那份手写的 Swift 字典里，缺词时回退中文。网页端语言来自 `?lang=` 参数、本地存储或系统语言，顶栏和未配对首页的 hero 里都能一键切换，切换后整页重载；菜单栏在菜单里多一项「语言：中文 / Language: English」，存在 `UserDefaults` 的 `uiLanguage`。服务器下发的「排队」属于协议文本，保持原样不翻译。
+
+### Fixed
+
+- 由 launchd 或 Finder 启动的 Bridge 现在会补全 PATH（追加 `~/.bun/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、`~/.local/bin` 和当前 node 所在目录，只加已存在的目录、加在原有 PATH 之后）。之前 launchd 只给 `/usr/bin:/bin:/usr/sbin:/sbin`，`pi` 的入口是 `#!/usr/bin/env node`，找不到 node 就以 127 退出，会话恢复不了。
+
 ## [0.11.1-rc.9] - 2026-11-16
 
 ### Added
