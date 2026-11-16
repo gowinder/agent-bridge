@@ -2440,6 +2440,26 @@ details[open] > .dock-project-head::before {
   color: var(--muted);
 }
 
+/* 加载失败时给一个「重试」：小字块里不额外撑间距，按钮压到和提示同高。 */
+.rail-empty p,
+.file-preview-note p {
+  margin: 0 0 6px;
+}
+
+.rail-empty .btn,
+.file-preview-note .btn,
+.hint.warn .btn {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.hint.warn:has(.btn) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .rail-note {
   margin: 0;
   padding: 10px 12px 0;

@@ -15,6 +15,20 @@ function requestId(): string {
   return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
+/**
+ * 网页与 Bridge 之间的请求失败：重试有没有意义看 `code`，不看人类可读文案。
+ * `timeout` 是这边等太久，`closed` 是通道没了（断线 / 主动关）。
+ */
+export class PeerError extends Error {
+  constructor(
+    readonly code: "timeout" | "closed",
+    message: string,
+  ) {
+    super(message);
+    this.name = "PeerError";
+  }
+}
+
 interface Pending {
   resolve: (message: ResponseMessage) => void;
   reject: (error: Error) => void;
@@ -76,7 +90,7 @@ export class PeerClient {
     return new Promise((resolve, reject) => {
       const timer = window.setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(tr("Bridge 响应超时")));
+        reject(new PeerError("timeout", tr("Bridge 响应超时")));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       for (const frame of this.secure.seal(message)) this.connection.sendBinary(frame);
@@ -93,7 +107,7 @@ export class PeerClient {
     this.stopped = true;
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error(tr("连接已关闭")));
+      pending.reject(new PeerError("closed", tr("连接已关闭")));
     }
     this.pending.clear();
     this.listeners.clear();
