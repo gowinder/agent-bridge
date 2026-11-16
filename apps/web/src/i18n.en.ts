@@ -213,6 +213,8 @@ export const EN: Record<string, string> = {
   仅可读: "Read-only",
   会话名称: "Session name",
   会话导航: "Session navigation",
+  打开会话导航: "Open session navigation",
+  关闭会话导航: "Close session navigation",
   位置: "Location",
   低: "Low",
   使用配对链接: "Use a pairing link",

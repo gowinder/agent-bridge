@@ -563,6 +563,64 @@ a.crumb:hover {
   }
 }
 
+/*
+ * 窄屏没有常驻侧栏，顶栏左侧的按钮把同一个 dock 拉成左侧抽屉：
+ * 结构 / 历史 / 待办三个 tab 原样可用，宽屏 CSS 不认 `is-open`，桌面布局不变。
+ */
+.dock-toggle,
+.dock-head,
+.dock-scrim {
+  display: none;
+}
+
+body.dock-open {
+  overflow: hidden;
+}
+
+@media (max-width: 1119px) {
+  .dock-toggle {
+    display: inline-flex;
+  }
+
+  .dock-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 2px;
+  }
+
+  .dock-head-title {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  .dock.is-open {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    top: 0;
+    z-index: calc(var(--z-sheet) + 1);
+    width: min(340px, 88vw);
+    height: 100dvh;
+    padding: max(14px, env(safe-area-inset-top)) 10px calc(24px + env(safe-area-inset-bottom)) 14px;
+    border-right: 1px solid var(--line);
+    background: var(--surface);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.28);
+    overflow-y: auto;
+  }
+
+  .dock-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-sheet);
+    background: rgba(0, 0, 0, 0.42);
+  }
+}
+
 .dock-tabs {
   display: flex;
   gap: 3px;
