@@ -11,6 +11,7 @@ import type {
   HostedResumeResult,
   HostedStopResult,
   MessageListResult,
+  MessageTextResult,
   MessageSendResult,
   ProjectInfo,
   ProjectListResult,
@@ -43,6 +44,8 @@ const DEFAULT_SESSION_LIMIT = 200;
 const MAX_SESSION_LIMIT = 500;
 const DEFAULT_MESSAGE_LIMIT = 50;
 const MAX_MESSAGE_LIMIT = 200;
+/** 单条消息可一次取回的字符数：封包上限 4 MiB，留足余量后仍是百万级以下。 */
+const MAX_FULL_TEXT_CHARS = 200_000;
 const TRANSFER_TTL_MS = 120_000;
 
 interface PreparedTransfer {
@@ -144,8 +147,8 @@ export class SessionAdapters {
     return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
   }
 
-  async hostedSetCompactionReserveTokens(sessionId: string, tokens: number | null): Promise<SessionGetResult> {
-    return { session: await this.hostedManager.setCompactionReserveTokens(sessionId, tokens) };
+  async hostedSetCompaction(sessionId: string, percent: number | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setCompaction(sessionId, percent) };
   }
 
   hostedResume(sessionId: string): HostedResumeResult {
@@ -184,6 +187,9 @@ export class SessionAdapters {
     let completeness: SessionListResult["completeness"] = "complete";
     const notes: string[] = [];
     const collected: SessionSummary[] = [];
+    // 托管会话的转录也在对应 CLI 自己的会话目录里：适配器会把同一段对话再列一遍，
+    // 改过名后标题对不上，历史里就是两条。托管那份带改名后的标题与运行状态，优先留它。
+    const hostedNativeIds = this.hostedManager.hostedNativeSessionIds();
     for (const adapter of this.adapters) {
       if (params.appId && adapter.key !== params.appId) continue;
       const app = adapter.app();
@@ -193,7 +199,15 @@ export class SessionAdapters {
         notes.push(`${app.name}：${reason}`);
         continue;
       }
+      const claimed = hostedNativeIds.get(adapter.key);
+      const prefix = `${adapter.key}:`;
       const sessions = (await adapter.sessions()).filter((session) => {
+        if (claimed) {
+          const nativeId = session.sessionId.startsWith(prefix)
+            ? session.sessionId.slice(prefix.length)
+            : session.sessionId;
+          if (claimed.has(nativeId)) return false;
+        }
         if (params.projectId && session.projectId !== params.projectId) return false;
         if (!params.includeArchived && session.archived) return false;
         return true;
@@ -279,6 +293,27 @@ export class SessionAdapters {
     if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
     const limit = clamp(params.limit, DEFAULT_MESSAGE_LIMIT, MAX_MESSAGE_LIMIT);
     return adapter.messages(sessionId, { limit, ...(params.before ? { before: params.before } : {}) });
+  }
+
+  /**
+   * 单条消息的完整正文。消息列表为了帧大小会把长文本截到 MAX_BLOCK_CHARS，
+   * 这里回到适配器取未截断的原文；中转层自己再限一次，免得一条消息把响应撑爆。
+   */
+  async messageText(sessionId: string, messageId: string): Promise<MessageTextResult> {
+    const adapter = this.adapterFor(sessionId);
+    if (!(await adapter.session(sessionId))) throw new RpcError("not_found", "未知会话");
+    const message = await adapter.messageText(sessionId, messageId);
+    if (!message) throw new RpcError("not_found", "找不到该消息，或该消息没有可读取的文本");
+    const full = message.text;
+    const text = full.slice(0, MAX_FULL_TEXT_CHARS);
+    return {
+      messageId: message.messageId,
+      role: message.role,
+      createdAt: message.createdAt,
+      text,
+      truncated: text.length < full.length,
+      length: full.length,
+    };
   }
 
   async rail(sessionId: string): Promise<SessionRailResult> {

@@ -785,6 +785,12 @@ details[open] > .dock-project-head::before {
   min-width: 0;
 }
 
+.hint.todo-note {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
 .todo-form {
   display: flex;
   align-items: center;
@@ -973,6 +979,12 @@ details[open] > .dock-project-head::before {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.hero-lang {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: -6px;
 }
 
 .eyebrow {
@@ -1775,6 +1787,32 @@ details[open] > .dock-project-head::before {
   z-index: calc(var(--z-sheet) + 20);
   max-width: min(420px, calc(100vw - 32px));
   box-shadow: 0 12px 32px -12px rgb(0 0 0 / 0.35);
+}
+
+/* 带「重试」的时候排成一行：提示文字占满剩余宽度，按钮不被挤。 */
+.float-notice.has-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.float-notice-text {
+  flex: 1;
+  min-width: 0;
+  /* 长 URL / hex 这类无断点文本不能压到按钮上。 */
+  overflow-wrap: anywhere;
+}
+
+.float-notice-retry {
+  flex: none;
+}
+
+/* 聊天页状态行里的「重试」：超时的时候就地重发，不用刷新整页。
+   用 .btn. 前缀才压得住 .btn.small 的 padding。 */
+.btn.status-retry {
+  margin-left: 8px;
+  padding: 2px 8px;
+  font-size: 12px;
 }
 
 /* ---------- chat ---------- */
@@ -2680,6 +2718,25 @@ h6.md-h {
   margin: 6px 0 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+/* 被截断的长回复：「…（已截断）读取全文」是一个按钮。 */
+.md-note-more {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.md-note-more:hover {
+  color: color-mix(in srgb, var(--accent) 80%, var(--text));
 }
 
 /* Local files referenced in a transcript */

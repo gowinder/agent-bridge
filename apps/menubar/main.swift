@@ -3,6 +3,9 @@
 import AppKit
 import CoreImage
 import Foundation
+import UserNotifications
+
+let appName = "Agent Bridge"
 
 struct DeviceInfo: Decodable {
     let deviceId: String
@@ -92,7 +95,7 @@ enum AdminError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .notConfigured(let detail): return detail
-        case .http(let code, let body): return "管理接口返回 \(code)：\(body)"
+        case .http(let code, let body): return TF(T("管理接口返回 %d：%@"), code, body)
         case .transport(let detail): return detail
         }
     }
@@ -151,7 +154,7 @@ final class AdminClient {
 
     static func savePort(_ port: Int) throws {
         guard let value = validPort(port) else {
-            throw AdminError.transport("端口必须在 1024–65535 之间")
+            throw AdminError.transport(T("端口必须在 1024–65535 之间"))
         }
         try FileManager.default.createDirectory(
             at: stateDir,
@@ -171,11 +174,11 @@ final class AdminClient {
     private func token() throws -> String {
         let path = Self.stateDir.appendingPathComponent("admin-token")
         guard let text = try? String(contentsOf: path, encoding: .utf8) else {
-            throw AdminError.notConfigured("Bridge 还没启动过，找不到管理令牌（\(path.path)）")
+            throw AdminError.notConfigured(TF(T("Bridge 还没启动过，找不到管理令牌（%@）"), path.path))
         }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.isEmpty {
-            throw AdminError.notConfigured("管理令牌为空：\(path.path)")
+            throw AdminError.notConfigured(TF(T("管理令牌为空：%@"), path.path))
         }
         return trimmed
     }
@@ -183,7 +186,7 @@ final class AdminClient {
     func request(_ method: String, _ path: String, body: [String: Any]? = nil) async throws -> Data {
         let token = try token()
         guard let url = URL(string: "http://127.0.0.1:\(Self.port)\(path)") else {
-            throw AdminError.transport("管理接口地址无效")
+            throw AdminError.transport(T("管理接口地址无效"))
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -203,7 +206,7 @@ final class AdminClient {
         } catch let error as AdminError {
             throw error
         } catch {
-            throw AdminError.transport("Bridge 未响应（127.0.0.1:\(Self.port)）")
+            throw AdminError.transport(TF(T("Bridge 未响应（127.0.0.1:%d）"), Self.port))
         }
     }
 
@@ -240,7 +243,7 @@ final class AdminClient {
         let data = try await request("POST", "/invite", body: ["ttlSeconds": 300])
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let url = object["url"] as? String else {
-            throw AdminError.transport("邀请响应无法解析")
+            throw AdminError.transport(T("邀请响应无法解析"))
         }
         return url
     }
@@ -366,7 +369,7 @@ enum BridgeCLI {
         }
         if process.isRunning {
             process.terminate()
-            return Result(code: -2, output: "", error: "命令超时")
+            return Result(code: -2, output: "", error: T("命令超时"))
         }
         let output = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         let error = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
@@ -403,12 +406,12 @@ enum BridgeCLI {
 }
 
 func relativeTime(_ millis: Double?) -> String {
-    guard let millis, millis > 0 else { return "从未连接" }
+    guard let millis, millis > 0 else { return T("从未连接") }
     let seconds = max(0, Date().timeIntervalSince1970 - millis / 1000)
-    if seconds < 60 { return "刚刚" }
-    if seconds < 3600 { return "\(Int(seconds / 60)) 分钟前" }
-    if seconds < 86_400 { return "\(Int(seconds / 3600)) 小时前" }
-    return "\(Int(seconds / 86_400)) 天前"
+    if seconds < 60 { return T("刚刚") }
+    if seconds < 3600 { return TF(T("%d 分钟前"), Int(seconds / 60)) }
+    if seconds < 86_400 { return TF(T("%d 小时前"), Int(seconds / 3600)) }
+    return TF(T("%d 天前"), Int(seconds / 86_400))
 }
 
 // AppKit 的 UI 只能在主线程碰：`Task { }` 在 await 之后会跑到协作后台线程上，
@@ -457,6 +460,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsIdleLabel: NSTextField?
     private var settingsFilesSwitch: NSSwitch?
     private var settingsTerminalSwitch: NSSwitch?
+    private var settingsExpiryReminderSwitch: NSSwitch?
+    private var settingsAutoUpdateSwitch: NSSwitch?
+    private var settingsPrereleaseChannelSwitch: NSSwitch?
+    private var autoUpdateTimer: Timer?
+    /// 自动更新失败（网络、没有写权限）后先退避一小时，别每 10 分钟重试一遍。
+    private var autoUpdateBackoffUntil: Date?
+
+    /// 打开后在后台每 10 分钟查一次，有新版本直接下载装上，不弹确认。
+    private var autoUpdateEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "autoUpdateEnabled") as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: "autoUpdateEnabled") }
+    }
+    /// 已经提醒过的「能力 + 到期时间」，refresh 每 5 秒跑一次，不能重复弹。
+    private var expiryReminded: Set<String> = []
+    private let expiryReminderLeadMs: Double = 30 * 60 * 1000
+
+    /// 远程工具到期前 30 分钟是否发系统通知；默认开。
+    private var expiryReminderEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "devtoolsExpiryReminder") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "devtoolsExpiryReminder") }
+    }
     private var settingsTable: NSTableView?
     private var settingsCountLabel: NSTextField?
     private var settingsEmptyLabel: NSTextField?
@@ -489,6 +513,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             await refresh()
             autoStartBridgeIfIdle()
         }
+        // 提醒是默认开着的：启动时要先把通知权限拿到，否则到点也弹不出来。
+        if expiryReminderEnabled { requestNotificationPermission() }
         timer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
             Task { await self?.refresh() }
         }
@@ -504,20 +530,63 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         messageTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { await self?.pollMessages() }
         }
+        scheduleAutoUpdate()
+    }
+
+    // MARK: - 自动更新
+
+    /// 打开时每 10 分钟查一次并直接安装；关掉就停掉定时器。
+    private func scheduleAutoUpdate() {
+        autoUpdateTimer?.invalidate()
+        autoUpdateTimer = nil
+        guard autoUpdateEnabled else { return }
+        // 启动后先等一会：初始化、配对和首轮状态刷新都比更新更该先跑。
+        Task {
+            try? await Task.sleep(nanoseconds: 30_000_000_000)
+            await autoUpdateTick()
+        }
+        autoUpdateTimer = Timer.scheduledTimer(withTimeInterval: 600, repeats: true) { [weak self] _ in
+            Task { await self?.autoUpdateTick() }
+        }
+    }
+
+    private func autoUpdateTick() async {
+        guard autoUpdateEnabled, !updater.isBusy, pairWindow == nil else { return }
+        if let until = autoUpdateBackoffUntil, until > Date() { return }
+        await updater.check()
+        guard autoUpdateEnabled, !updater.isBusy, pairWindow == nil, let release = updater.available else {
+            if case .failed = updater.phase { autoUpdateBackoffUntil = Date().addingTimeInterval(3_600) }
+            return
+        }
+        // 静默安装：不弹确认。下载或替换失败时 summary 里能看到原因，其它环节不打扰人。
+        startUpdate(release)
+    }
+
+    @objc private func toggleAutoUpdate(_ sender: NSSwitch) {
+        autoUpdateEnabled = sender.state == .on
+        autoUpdateBackoffUntil = nil
+        scheduleAutoUpdate()
+    }
+
+    @objc private func togglePrereleaseChannel(_ sender: NSSwitch) {
+        Updater.staysOnPrereleaseChannel = sender.state == .on
+        // 旧的更新目标已经不属于这个通道，先清掉再重查（不弹窗）。
+        updater.clearAvailable()
+        Task { await updater.check() }
     }
 
     private func paint() {
         guard let button = statusItem.button else { return }
         let version = snapshot?.version ?? bridge?.version
-        let update = updater.available.map { " · 可更新 \($0.tag)" } ?? ""
+        let update = updater.available.map { TF(T(" · 可更新 %@"), $0.tag) } ?? ""
         let suffix = (version.map { " · v\($0)" } ?? "") + update
         if reachable {
             let online = snapshot?.connections.filter { $0.kind == "device" }.count ?? 0
             button.title = online > 0 ? " \(online)" : ""
-            button.toolTip = (online > 0 ? "\(online) 个客户端已连接" : "Agent Bridge · 就绪") + suffix
+            button.toolTip = (online > 0 ? TF(T("%d 个客户端已连接"), online) : appName + T(" · 就绪")) + suffix
         } else {
             button.title = ""
-            let state = bridge?.initialized == true ? "Agent Bridge 未运行" : "Agent Bridge 尚未初始化"
+            let state = bridge?.initialized == true ? appName + " " + T("未运行") : appName + " " + T("尚未初始化")
             button.toolTip = state + suffix
         }
     }
@@ -530,13 +599,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } catch {
             reachable = false
             if BridgeCLI.adminPortBusy(AdminClient.port) {
-                lastError = "管理端口 \(AdminClient.port) 被另一份 Bridge 占用"
+                lastError = TF(T("管理端口 %d 被另一份 Bridge 占用"), AdminClient.port)
             } else {
                 lastError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                 if let fresh = BridgeCLI.info() { bridge = fresh }
             }
         }
         paint()
+        checkDevtoolsExpiry()
         if settingsWindow?.isVisible == true { renderSettings() }
     }
 
@@ -547,49 +617,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !reachable {
             let initialized = bridge?.initialized == true
-            let state = initialized ? "Bridge 未运行" : "Bridge 尚未初始化"
+            let state = initialized ? T("Bridge 未运行") : T("Bridge 尚未初始化")
             let version = bridge.map { " · v\($0.version)" } ?? ""
             menu.addItem(disabled(state + version))
             if let stateDir = bridge?.stateDir {
-                menu.addItem(disabled("状态目录：\(stateDir)"))
+                menu.addItem(disabled(TF(T("状态目录：%@"), stateDir)))
             } else if !initialized {
-                menu.addItem(disabled("状态目录：\(AdminClient.stateDir.path)"))
+                menu.addItem(disabled(TF(T("状态目录：%@"), AdminClient.stateDir.path)))
             }
             if let lastError, initialized { menu.addItem(disabled(lastError)) }
             menu.addItem(.separator())
             if initialized {
-                let start = NSMenuItem(title: "启动 Bridge", action: #selector(startBridge), keyEquivalent: "")
+                let start = NSMenuItem(title: T("启动 Bridge"), action: #selector(startBridge), keyEquivalent: "")
                 start.target = self
                 start.isEnabled = BridgeCLI.nodePath() != nil && BridgeCLI.scriptPath() != nil
                 menu.addItem(start)
-                menu.addItem(item("打开日志", #selector(openLog), ""))
+                menu.addItem(item(T("打开日志"), #selector(openLog), ""))
             } else {
-                menu.addItem(item("初始化 Bridge…", #selector(initBridge), ""))
+                menu.addItem(item(T("初始化 Bridge…"), #selector(initBridge), ""))
             }
-            menu.addItem(item("设定…", #selector(showSettings), ","))
-            menu.addItem(item("管理端口…（\(AdminClient.port)）", #selector(changePort), ""))
+            menu.addItem(item(T("设定…"), #selector(showSettings), ","))
+            menu.addItem(languageMenuItem())
+            menu.addItem(item(TF(T("管理端口…（%d）"), AdminClient.port), #selector(changePort), ""))
             addUpdateItems(to: menu)
             menu.addItem(.separator())
-            menu.addItem(item("刷新", #selector(refreshNow), "r"))
-            menu.addItem(item("退出", #selector(quit), "q"))
+            menu.addItem(item(T("刷新"), #selector(refreshNow), "r"))
+            menu.addItem(item(T("退出"), #selector(quit), "q"))
             return
         }
 
         guard let snapshot else { return }
-        menu.addItem(disabled("\(snapshot.hostName) · v\(snapshot.version) · 中继\(snapshot.relayOnline ? "在线" : "离线")"))
+        menu.addItem(disabled(header(snapshot)))
         if let error = snapshot.error {
-            menu.addItem(disabled("设备列表读取失败：\(error)"))
+            menu.addItem(disabled(TF(T("设备列表读取失败：%@"), error)))
         }
         menu.addItem(.separator())
 
         let active = snapshot.connections.filter { $0.kind == "device" }
         if snapshot.devices.isEmpty {
-            menu.addItem(disabled("还没有配对过设备"))
+            menu.addItem(disabled(T("还没有配对过设备")))
         }
         for device in snapshot.devices {
             let revoked = device.revokedAt != nil
             let expired = device.expiresAt.map { $0 < Date().timeIntervalSince1970 * 1000 } ?? false
-            let state = revoked ? "已作废" : expired ? "已过期" : device.online ? "在线" : "离线"
+            let state = revoked ? T("已作废") : expired ? T("已过期") : device.online ? T("在线") : T("离线")
             let entry = NSMenuItem(
                 title: "\(device.name) · \(state) · \(relativeTime(device.lastSeenAt))",
                 action: nil,
@@ -603,12 +674,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.image?.isTemplate = true
 
             let sub = NSMenu()
-            let cut = NSMenuItem(title: "断开连接", action: #selector(disconnectDevice(_:)), keyEquivalent: "")
+            let cut = NSMenuItem(title: T("断开连接"), action: #selector(disconnectDevice(_:)), keyEquivalent: "")
             cut.target = self
             cut.representedObject = device.deviceId
             cut.isEnabled = device.online
             sub.addItem(cut)
-            let revoke = NSMenuItem(title: "作废证书…", action: #selector(revokeDevice(_:)), keyEquivalent: "")
+            let revoke = NSMenuItem(title: T("作废证书…"), action: #selector(revokeDevice(_:)), keyEquivalent: "")
             revoke.target = self
             revoke.representedObject = device.deviceId
             revoke.isEnabled = !revoked
@@ -621,58 +692,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if !snapshot.devices.isEmpty {
             menu.addItem(.separator())
-            let disconnectAllItem = item("断开全部连接", #selector(disconnectAllDevices), "")
+            let disconnectAllItem = item(T("断开全部连接"), #selector(disconnectAllDevices), "")
             disconnectAllItem.isEnabled = !snapshot.connections.isEmpty
             menu.addItem(disconnectAllItem)
-            let revokeAllItem = item("作废全部证书…", #selector(revokeAllDevices), "")
+            let revokeAllItem = item(T("作废全部证书…"), #selector(revokeAllDevices), "")
             revokeAllItem.isEnabled = snapshot.devices.contains { $0.revokedAt == nil }
             menu.addItem(revokeAllItem)
-            let purgeItem = item("删除全部作废的设备…", #selector(purgeRevokedDevices), "")
+            let purgeItem = item(T("删除全部作废的设备…"), #selector(purgeRevokedDevices), "")
             purgeItem.isEnabled = snapshot.devices.contains { $0.revokedAt != nil }
             menu.addItem(purgeItem)
         }
 
         if active.count > 0 {
-            menu.addItem(disabled("当前连接 \(active.count) 条"))
+            menu.addItem(disabled(TF(T("当前连接 %d 条"), active.count)))
         }
         menu.addItem(.separator())
-        menu.addItem(item("邀请新设备…", #selector(inviteDevice), "i"))
+        menu.addItem(item(T("邀请新设备…"), #selector(inviteDevice), "i"))
 
         let devtools = snapshot.devtools
         let devItem = NSMenuItem(title: devtoolsTitle(devtools), action: nil, keyEquivalent: "")
         devItem.isEnabled = true
         let devSub = NSMenu()
-        devSub.addItem(disabled("文件浏览（只读，仅当前项目目录）"))
-        devSub.addItem(item("开启 1 小时", #selector(enableFilesOneHour), ""))
-        devSub.addItem(item("开启 8 小时", #selector(enableFilesEightHours), ""))
-        devSub.addItem(item("关闭", #selector(disableFiles), ""))
+        devSub.addItem(disabled(T("文件浏览（只读，仅当前项目目录）")))
+        devSub.addItem(item(T("开启 1 小时"), #selector(enableFilesOneHour), ""))
+        devSub.addItem(item(T("开启 8 小时"), #selector(enableFilesEightHours), ""))
+        devSub.addItem(item(T("开启 24 小时"), #selector(enableFilesTwentyFourHours), ""))
+        devSub.addItem(item(T("关闭"), #selector(disableFiles), ""))
         devSub.addItem(.separator())
-        devSub.addItem(disabled("命令执行（可写，可访问整台机器）"))
-        devSub.addItem(item("开启 1 小时", #selector(enableTerminalOneHour), ""))
-        devSub.addItem(item("开启 8 小时", #selector(enableTerminalEightHours), ""))
-        devSub.addItem(item("关闭", #selector(disableTerminal), ""))
+        devSub.addItem(disabled(T("命令执行（可写，可访问整台机器）")))
+        devSub.addItem(item(T("开启 1 小时"), #selector(enableTerminalOneHour), ""))
+        devSub.addItem(item(T("开启 8 小时"), #selector(enableTerminalEightHours), ""))
+        devSub.addItem(item(T("开启 24 小时"), #selector(enableTerminalTwentyFourHours), ""))
+        devSub.addItem(item(T("关闭"), #selector(disableTerminal), ""))
         devItem.submenu = devSub
         menu.addItem(devItem)
 
-        menu.addItem(item("设定…", #selector(showSettings), ","))
-        menu.addItem(item("管理端口：\(AdminClient.port)…", #selector(changePort), ""))
-        menu.addItem(item("在浏览器中打开", #selector(openWeb), "o"))
+        menu.addItem(item(T("设定…"), #selector(showSettings), ","))
+        menu.addItem(languageMenuItem())
+        menu.addItem(item(TF(T("管理端口：%d…"), AdminClient.port), #selector(changePort), ""))
+        menu.addItem(item(T("在浏览器中打开"), #selector(openWeb), "o"))
         addUpdateItems(to: menu)
-        menu.addItem(item("刷新", #selector(refreshNow), "r"))
+        menu.addItem(item(T("刷新"), #selector(refreshNow), "r"))
         menu.addItem(.separator())
         if bridgeProcess?.isRunning == true {
-            menu.addItem(item("停止 Bridge", #selector(stopBridge), ""))
+            menu.addItem(item(T("停止 Bridge"), #selector(stopBridge), ""))
         }
-        menu.addItem(item("打开日志", #selector(openLog), ""))
-        menu.addItem(item("退出", #selector(quit), "q"))
+        menu.addItem(item(T("打开日志"), #selector(openLog), ""))
+        menu.addItem(item(T("退出"), #selector(quit), "q"))
+    }
+
+    /// 菜单顶栏那行：设备名 · 版本 · 中继状态。设置窗口也复用同一份拼法。
+    private func header(_ snapshot: Snapshot) -> String {
+        let version = " · v" + snapshot.version
+        return snapshot.hostName + version + " · " + T("中继") + (snapshot.relayOnline ? T("在线") : T("离线"))
     }
 
     private func devtoolsTitle(_ info: DevtoolsInfo?) -> String {
         let files = info?.files?.enabled == true
         let terminal = info?.terminal?.enabled == true
-        guard files || terminal else { return "远程工具：已关闭" }
-        let parts = [files ? "文件" : nil, terminal ? "命令" : nil].compactMap { $0 }
-        return "远程工具：\(parts.joined(separator: " + ")) 已开启"
+        guard files || terminal else { return T("远程工具：已关闭") }
+        let parts = [files ? T("文件") : nil, terminal ? T("命令") : nil].compactMap { $0 }
+        return TF(T("远程工具：%@ 已开启"), parts.joined(separator: " + "))
+    }
+
+    /// 语言一项显示的是「点了会切到哪」，跟着系统语言走时也照实写。
+    private func languageMenuItem() -> NSMenuItem {
+        let title = L10n.isEnglish ? "Language: English" : T("语言：中文")
+        return item(title, #selector(toggleLanguage), "")
+    }
+
+    @objc private func toggleLanguage() {
+        L10n.set(L10n.isEnglish ? "zh" : "en")
+        refreshNow()
+        if settingsWindow?.isVisible == true { renderSettings() }
     }
 
     private func disabled(_ title: String) -> NSMenuItem {
@@ -685,38 +777,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addUpdateItems(to menu: NSMenu) {
         menu.addItem(.separator())
         if let release = updater.available, !updater.isBusy {
-            menu.addItem(item("发现新版本 \(release.tag) — 立即更新", #selector(installUpdate), ""))
+            menu.addItem(item(TF(T("发现新版本 %@ — 立即更新"), release.tag), #selector(installUpdate), ""))
             if case .failed(let reason) = updater.phase {
-                menu.addItem(disabled("上次更新失败：\(reason)"))
+                menu.addItem(disabled(TF(T("上次更新失败：%@"), reason)))
             }
         } else if updater.isBusy {
             menu.addItem(disabled(updater.summary))
         } else {
-            menu.addItem(disabled("菜单栏 app v\(Updater.currentVersion)"))
+            menu.addItem(disabled(TF(T("菜单栏 app v%@"), Updater.currentVersion)))
+            // 锁在测试版通道时不升级正式版，得让人知道这是有意的、去哪改。
+            if Updater.currentVersionIsPrerelease && Updater.staysOnPrereleaseChannel {
+                menu.addItem(disabled(T("停留在测试版通道，正式版不提示（设定里可关）")))
+            }
             if let failure = updater.lastFailure {
-                menu.addItem(disabled("检查更新失败：\(failure)"))
+                menu.addItem(disabled(TF(T("检查更新失败：%@"), failure)))
             }
         }
         if !updater.isBusy {
-            menu.addItem(item("检查更新…", #selector(checkForUpdates), ""))
+            menu.addItem(item(T("检查更新…"), #selector(checkForUpdates), ""))
         }
     }
 
     /// 设备子菜单里的「最近操作日志」：先列最近三条，后面再挂一个「更多」子菜单放全部历史。
     private func logMenuItem(for device: DeviceInfo) -> NSMenuItem {
-        let entry = NSMenuItem(title: "最近操作日志", action: nil, keyEquivalent: "")
+        let entry = NSMenuItem(title: T("最近操作日志"), action: nil, keyEquivalent: "")
         entry.isEnabled = true
         let sub = NSMenu()
         let lines = device.log ?? []
         if lines.isEmpty {
-            sub.addItem(disabled("暂无操作记录"))
+            sub.addItem(disabled(T("暂无操作记录")))
             entry.submenu = sub
             return entry
         }
         for line in lines.prefix(3) { sub.addItem(logLineItem(line)) }
         if lines.count > 3 {
             sub.addItem(.separator())
-            let more = NSMenuItem(title: "更多…（共 \(lines.count) 条）", action: nil, keyEquivalent: "")
+            let more = NSMenuItem(title: TF(T("更多…（共 %d 条）"), lines.count), action: nil, keyEquivalent: "")
             more.isEnabled = true
             let moreSub = NSMenu()
             for line in lines { moreSub.addItem(logLineItem(line)) }
@@ -752,14 +848,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 自动检查发现新版本时弹一次确认；同一个版本在一次运行里只提示一次。
     private func checkForUpdates(automatic: Bool) async {
         await updater.check()
-        guard automatic, pairWindow == nil,
+        // 自动更新开着时由 autoUpdateTick 直接装，这里不再弹「发现新版本」。
+        guard automatic, !autoUpdateEnabled, pairWindow == nil,
               let release = updater.available, promptedUpdate != release.tag else { return }
         promptedUpdate = release.tag
         let prompt = NSAlert()
-        prompt.messageText = "发现新版本 \(release.tag)"
-        prompt.informativeText = "菜单栏 app 当前 v\(Updater.currentVersion)。点「立即更新」会下载 DMG、替换应用，完成后自动重启。"
-        prompt.addButton(withTitle: "立即更新")
-        prompt.addButton(withTitle: "稍后")
+        prompt.messageText = TF(T("发现新版本 %@"), release.tag)
+        prompt.informativeText = TF(T("菜单栏 app 当前 v%@。点「立即更新」会下载 DMG、替换应用，完成后自动重启。"), Updater.currentVersion)
+        prompt.addButton(withTitle: T("立即更新"))
+        prompt.addButton(withTitle: T("稍后"))
         NSApp.activate(ignoringOtherApps: true)
         if prompt.runModal() == .alertFirstButtonReturn { startUpdate(release) }
     }
@@ -767,10 +864,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func installUpdate() {
         guard let release = updater.available else { return }
         let confirm = NSAlert()
-        confirm.messageText = "更新到 \(release.tag)？"
-        confirm.informativeText = "会下载安装包并替换当前应用，完成后自动重启。由菜单栏启动的 Bridge 会跟着重启。"
-        confirm.addButton(withTitle: "更新")
-        confirm.addButton(withTitle: "取消")
+        confirm.messageText = TF(T("更新到 %@？"), release.tag)
+        confirm.informativeText = T("会下载安装包并替换当前应用，完成后自动重启。由菜单栏启动的 Bridge 会跟着重启。")
+        confirm.addButton(withTitle: T("更新"))
+        confirm.addButton(withTitle: T("取消"))
         NSApp.activate(ignoringOtherApps: true)
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
         startUpdate(release)
@@ -791,7 +888,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try await client.disconnect(deviceId)
                 await refresh()
             } catch {
-                alert("断开失败", error.localizedDescription)
+                alert(T("断开失败"), error.localizedDescription)
             }
         }
     }
@@ -800,11 +897,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let deviceId = sender.representedObject as? String else { return }
         let name = snapshot?.devices.first { $0.deviceId == deviceId }?.name ?? deviceId
         let confirm = NSAlert()
-        confirm.messageText = "作废「\(name)」的证书？"
-        confirm.informativeText = "作废后这个设备无法再连接，需要重新配对才能使用。"
+        confirm.messageText = TF(T("作废「%@」的证书？"), name)
+        confirm.informativeText = T("作废后这个设备无法再连接，需要重新配对才能使用。")
         confirm.alertStyle = .warning
-        confirm.addButton(withTitle: "作废")
-        confirm.addButton(withTitle: "取消")
+        confirm.addButton(withTitle: T("作废"))
+        confirm.addButton(withTitle: T("取消"))
         NSApp.activate(ignoringOtherApps: true)
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
         Task {
@@ -812,7 +909,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try await client.revoke(deviceId)
                 await refresh()
             } catch {
-                alert("作废失败", error.localizedDescription)
+                alert(T("作废失败"), error.localizedDescription)
             }
         }
     }
@@ -823,7 +920,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try await client.disconnectAll()
                 await refresh()
             } catch {
-                alert("断开失败", error.localizedDescription)
+                alert(T("断开失败"), error.localizedDescription)
             }
         }
     }
@@ -832,11 +929,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let pending = snapshot?.devices.filter { $0.revokedAt == nil }.count ?? 0
         guard pending > 0 else { return }
         let confirm = NSAlert()
-        confirm.messageText = "作废全部 \(pending) 个设备的证书？"
-        confirm.informativeText = "作废后这些设备都无法再连接，需要重新配对才能使用。"
+        confirm.messageText = TF(T("作废全部 %d 个设备的证书？"), pending)
+        confirm.informativeText = T("作废后这些设备都无法再连接，需要重新配对才能使用。")
         confirm.alertStyle = .warning
-        confirm.addButton(withTitle: "全部作废")
-        confirm.addButton(withTitle: "取消")
+        confirm.addButton(withTitle: T("全部作废"))
+        confirm.addButton(withTitle: T("取消"))
         NSApp.activate(ignoringOtherApps: true)
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
         Task {
@@ -844,10 +941,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let result = try await client.revokeAll()
                 await refresh()
                 if !result.failed.isEmpty {
-                    alert("部分设备作废失败", result.failed.joined(separator: "\n"))
+                    alert(T("部分设备作废失败"), result.failed.joined(separator: "\n"))
                 }
             } catch {
-                alert("作废失败", error.localizedDescription)
+                alert(T("作废失败"), error.localizedDescription)
             }
         }
     }
@@ -861,7 +958,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 pairDeviceCountBefore = snapshot?.devices.count ?? 0
                 showPairWindow(url: url)
             } catch {
-                alert("生成邀请失败", error.localizedDescription)
+                alert(T("生成邀请失败"), error.localizedDescription)
             }
         }
     }
@@ -872,6 +969,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func enableFilesEightHours() {
         setDevtools(capability: "files", enabled: true, ttlSeconds: 8 * 3_600)
+    }
+
+    @objc private func enableFilesTwentyFourHours() {
+        setDevtools(capability: "files", enabled: true, ttlSeconds: 24 * 3_600)
     }
 
     @objc private func disableFiles() {
@@ -886,6 +987,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setDevtools(capability: "terminal", enabled: true, ttlSeconds: 8 * 3_600)
     }
 
+    @objc private func enableTerminalTwentyFourHours() {
+        setDevtools(capability: "terminal", enabled: true, ttlSeconds: 24 * 3_600)
+    }
+
     @objc private func disableTerminal() {
         setDevtools(capability: "terminal", enabled: false, ttlSeconds: nil)
     }
@@ -896,7 +1001,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 try await client.setDevtools(capability: capability, enabled: enabled, ttlSeconds: ttlSeconds)
                 await refresh()
             } catch {
-                alert("设置远程工具失败", error.localizedDescription)
+                alert(T("设置远程工具失败"), error.localizedDescription)
             }
         }
     }
@@ -977,7 +1082,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             backing: .buffered,
             defer: false
         )
-        window.title = "邀请新设备"
+        window.title = T("邀请新设备")
         window.center()
         window.isReleasedWhenClosed = false
 
@@ -991,7 +1096,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             content.addSubview(qrView)
         }
 
-        let hint = NSTextField(wrappingLabelWithString: "用手机相机扫码打开配对页，或复制链接到浏览器。链接 5 分钟内有效；客户端显示的确认码要和下面一致，否则取消配对。")
+        let hint = NSTextField(wrappingLabelWithString: T("用手机相机扫码打开配对页，或复制链接到浏览器。链接 5 分钟内有效；客户端显示的确认码要和下面一致，否则取消配对。"))
         hint.frame = NSRect(x: 20, y: 240, width: width - 40, height: 48)
         hint.font = .systemFont(ofSize: 12)
         hint.textColor = .secondaryLabelColor
@@ -1003,7 +1108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         urlField.isSelectable = true
         urlField.toolTip = url
 
-        let status = NSTextField(labelWithString: "等待设备打开链接…")
+        let status = NSTextField(labelWithString: T("等待设备打开链接…"))
         status.frame = NSRect(x: 20, y: 182, width: width - 40, height: 20)
         status.font = .systemFont(ofSize: 13, weight: .medium)
 
@@ -1013,7 +1118,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         code.alignment = .center
         code.isSelectable = true
 
-        let copy = NSButton(title: "复制链接", target: self, action: #selector(copyPairLink))
+        let copy = NSButton(title: T("复制链接"), target: self, action: #selector(copyPairLink))
         copy.frame = NSRect(x: (width - 100) / 2, y: 64, width: 100, height: 24)
         copy.bezelStyle = .rounded
 
@@ -1051,18 +1156,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if let code = pairing.code {
                     pairCodeLabel?.stringValue = code
                     pairCodeLabel?.textColor = .labelColor
-                    pairStatusLabel?.stringValue = "核对这个确认码与客户端显示的是否一致"
+                    pairStatusLabel?.stringValue = T("核对这个确认码与客户端显示的是否一致")
                 } else {
-                    pairCodeLabel?.stringValue = "等待握手…"
-                    pairStatusLabel?.stringValue = "设备已连接，正在建立加密通道…"
+                    pairCodeLabel?.stringValue = T("等待握手…")
+                    pairStatusLabel?.stringValue = T("设备已连接，正在建立加密通道…")
                 }
                 return
             }
             guard pairSawChannel else { return }
             // The channel vanished; a new device means the pairing went through.
             let added = fresh.devices.count > pairDeviceCountBefore
-            pairStatusLabel?.stringValue = added ? "配对完成" : "配对已取消或连接中断"
-            pairCodeLabel?.stringValue = added ? "已配对" : "已结束"
+            pairStatusLabel?.stringValue = added ? T("配对完成") : T("配对已取消或连接中断")
+            pairCodeLabel?.stringValue = added ? T("已配对") : T("已结束")
             pairTimer?.invalidate()
             pairTimer = nil
             NSSound.beep()
@@ -1072,7 +1177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             }
         } catch {
-            pairStatusLabel?.stringValue = "Bridge 未响应：\(error.localizedDescription)"
+            pairStatusLabel?.stringValue = TF(T("Bridge 未响应：%@"), error.localizedDescription)
         }
     }
 
@@ -1097,7 +1202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if FileManager.default.fileExists(atPath: log.path) {
             NSWorkspace.shared.open(log)
         } else {
-            alert("还没有日志", "Bridge 启动后日志会写到：\(log.path)")
+            alert(T("还没有日志"), TF(T("Bridge 启动后日志会写到：%@"), log.path))
         }
     }
 
@@ -1110,11 +1215,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let revoked = snapshot?.devices.filter { $0.revokedAt != nil } ?? []
         guard !revoked.isEmpty else { return }
         let confirm = NSAlert()
-        confirm.messageText = "删除全部 \(revoked.count) 个作废的设备？"
-        confirm.informativeText = "会把它们从本机和中继的设备清单里彻底删掉（连同操作日志），无法恢复。证书本来就已经作废，删除只是清理列表。"
+        confirm.messageText = TF(T("删除全部 %d 个作废的设备？"), revoked.count)
+        confirm.informativeText = T("会把它们从本机和中继的设备清单里彻底删掉（连同操作日志），无法恢复。证书本来就已经作废，删除只是清理列表。")
         confirm.alertStyle = .warning
-        confirm.addButton(withTitle: "删除")
-        confirm.addButton(withTitle: "取消")
+        confirm.addButton(withTitle: T("删除"))
+        confirm.addButton(withTitle: T("取消"))
         NSApp.activate(ignoringOtherApps: true)
         guard confirm.runModal() == .alertFirstButtonReturn else { return }
         Task {
@@ -1122,10 +1227,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let result = try await client.purgeRevoked()
                 await refresh()
                 if !result.failed.isEmpty {
-                    alert("部分设备删除失败", result.failed.joined(separator: "\n"))
+                    alert(T("部分设备删除失败"), result.failed.joined(separator: "\n"))
                 }
             } catch {
-                alert("删除失败", error.localizedDescription)
+                alert(T("删除失败"), error.localizedDescription)
             }
         }
     }
@@ -1145,24 +1250,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        let height: CGFloat = 620
+        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉，统一给到 774。
+        let height: CGFloat = 774
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        window.title = "Agent Bridge 设定"
+        window.title = appName + " " + T("设定")
         window.isReleasedWhenClosed = false
         window.center()
 
         let tabs = NSTabView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         tabs.autoresizingMask = [.width, .height]
         let general = NSTabViewItem(identifier: "general")
-        general.label = "常规"
+        general.label = T("常规")
         general.view = buildGeneralTab(size: NSSize(width: width, height: height - 40))
         let log = NSTabViewItem(identifier: "log")
-        log.label = "日志"
+        log.label = T("日志")
         log.view = buildLogTab(size: NSSize(width: width, height: height - 40))
         tabs.addTabViewItem(general)
         tabs.addTabViewItem(log)
@@ -1265,18 +1371,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsStatusDot = dot
         settingsStatusLabel = status
 
-        section("连接")
+        section(T("连接"))
         settingsRelayLabel = valueLabel("…")
-        row("中继", settingsRelayLabel!)
+        row(T("中继"), settingsRelayLabel!)
         settingsRoomLabel = valueLabel("…", mono: true)
-        row("房间号", settingsRoomLabel!)
+        row(T("房间号"), settingsRoomLabel!)
         settingsStateDirLabel = valueLabel("…", mono: true)
-        row("状态目录", settingsStateDirLabel!)
+        row(T("状态目录"), settingsStateDirLabel!)
 
-        section("管理端口")
+        section(T("管理端口"))
         settingsPortLabel = valueLabel("…", mono: true)
-        row("本机接口", settingsPortLabel!)
-        let portButton = NSButton(title: "修改…", target: self, action: #selector(changePort))
+        row(T("本机接口"), settingsPortLabel!)
+        let portButton = NSButton(title: T("修改…"), target: self, action: #selector(changePort))
         portButton.bezelStyle = .rounded
         portButton.controlSize = .small
         portButton.font = .systemFont(ofSize: 11)
@@ -1286,18 +1392,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         view.addSubview(portButton)
 
-        section("托管会话")
-        settingsBypassSwitch = toggle("允许 bypassPermissions（跳过权限确认）", #selector(toggleBypass(_:)))
-        hint("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。")
+        section(T("托管会话"))
+        settingsBypassSwitch = toggle(T("允许 bypassPermissions（跳过权限确认）"), #selector(toggleBypass(_:)))
+        hint(T("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。"))
         settingsDirsLabel = valueLabel("…")
-        row("托管目录", settingsDirsLabel!)
+        row(T("托管目录"), settingsDirsLabel!)
         settingsIdleLabel = valueLabel("…")
-        row("空闲超时", settingsIdleLabel!)
+        row(T("空闲超时"), settingsIdleLabel!)
 
-        section("远程工具")
-        settingsFilesSwitch = toggle("文件浏览（只读，仅当前项目目录）", #selector(toggleFiles(_:)))
-        settingsTerminalSwitch = toggle("命令执行（可写，可访问整台机器）", #selector(toggleTerminal(_:)))
-        hint("开关立即生效；菜单里的「开启 1 小时 / 8 小时」只是加个自动关闭的时限。", height: 16)
+        section(T("远程工具"))
+        settingsFilesSwitch = toggle(T("文件浏览（只读，仅当前项目目录）"), #selector(toggleFiles(_:)))
+        settingsTerminalSwitch = toggle(T("命令执行（可写，可访问整台机器）"), #selector(toggleTerminal(_:)))
+        settingsExpiryReminderSwitch = toggle(T("到期前 30 分钟提醒"), #selector(toggleExpiryReminder(_:)))
+        hint(T("开关立即生效；菜单里的「开启 1 / 8 / 24 小时」只是加个自动关闭的时限。勾选提醒后，自动关闭前 30 分钟会发一条系统通知。"))
+
+        section(T("更新"))
+        settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
+        hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
+        if Updater.currentVersionIsPrerelease {
+            settingsPrereleaseChannelSwitch = toggle(T("停留在测试版通道（只升 rc，不升正式版）"), #selector(togglePrereleaseChannel(_:)))
+            hint(TF(T("装在测试版 v%@：打开只升 rc，正式版不提示；关掉就照常，有正式版会提示。"), Updater.currentVersion), height: 16)
+        }
 
         return view
     }
@@ -1309,7 +1424,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let search = NSSearchField(frame: NSRect(x: margin, y: size.height - 44, width: size.width - margin * 2 - 92, height: 24))
         search.autoresizingMask = [.width]
-        search.placeholderString = "按设备、工程、agent 或内容过滤"
+        search.placeholderString = T("按设备、工程、agent 或内容过滤")
         search.sendsSearchStringImmediately = true
         search.target = self
         search.action = #selector(filterMessages(_:))
@@ -1345,11 +1460,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         table.delegate = self
         table.headerView = NSTableHeaderView()
         let columns: [(String, String, CGFloat)] = [
-            ("time", "时间", 92),
-            ("device", "来自", 128),
-            ("project", "工程", 132),
+            ("time", T("时间"), 92),
+            ("device", T("来自"), 128),
+            ("project", T("工程"), 132),
             ("agent", "agent", 84),
-            ("message", "标题与正文", 0),
+            ("message", T("标题与正文"), 0),
         ]
         for (id, title, width) in columns {
             let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
@@ -1363,7 +1478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.addSubview(scroll)
         settingsTable = table
 
-        let empty = NSTextField(labelWithString: "还没有收到客户端发来的消息")
+        let empty = NSTextField(labelWithString: T("还没有收到客户端发来的消息"))
         empty.font = .systemFont(ofSize: 12)
         empty.textColor = .tertiaryLabelColor
         empty.alignment = .center
@@ -1391,20 +1506,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func renderSettings() {
         guard let window = settingsWindow, window.isVisible else { return }
-        let version = snapshot?.version ?? bridge?.version ?? Updater.currentVersion
         let relayOnline = reachable && snapshot?.relayOnline == true
         settingsStatusDot?.layer?.backgroundColor =
             (reachable ? (relayOnline ? NSColor.systemGreen : NSColor.systemOrange) : NSColor.systemRed).cgColor
         if reachable, let snapshot {
             settingsStatusLabel?.stringValue =
-                "\(snapshot.hostName) · v\(version) · 中继\(snapshot.relayOnline ? "在线" : "离线")"
+                header(snapshot)
             settingsRelayLabel?.stringValue = bridge?.relayUrl ?? snapshot.webUrl
             settingsRoomLabel?.stringValue = snapshot.roomId
             settingsStateDirLabel?.stringValue = bridge?.stateDir ?? AdminClient.stateDir.path
             settingsFilesSwitch?.state = snapshot.devtools?.files?.enabled == true ? .on : .off
             settingsTerminalSwitch?.state = snapshot.devtools?.terminal?.enabled == true ? .on : .off
         } else {
-            settingsStatusLabel?.stringValue = bridge?.initialized == true ? "Bridge 未运行" : "Bridge 尚未初始化"
+            settingsStatusLabel?.stringValue = bridge?.initialized == true ? T("Bridge 未运行") : T("Bridge 尚未初始化")
             settingsRelayLabel?.stringValue = bridge?.relayUrl ?? "—"
             settingsRoomLabel?.stringValue = bridge?.roomId ?? "—"
             settingsStateDirLabel?.stringValue = bridge?.stateDir ?? AdminClient.stateDir.path
@@ -1414,20 +1528,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsStateDirLabel?.toolTip = settingsStateDirLabel?.stringValue
         settingsFilesSwitch?.isEnabled = reachable
         settingsTerminalSwitch?.isEnabled = reachable
+        settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
+        settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
+        settingsPrereleaseChannelSwitch?.state = Updater.staysOnPrereleaseChannel ? .on : .off
 
         settingsPortLabel?.stringValue =
-            "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? "（环境变量指定）" : "")
+            "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? T("（环境变量指定）") : "")
 
         if let hosted = hostedConfig {
             settingsBypassSwitch?.state = hosted.allowBypassPermissions ? .on : .off
             settingsDirsLabel?.stringValue = hosted.dirs.isEmpty
-                ? "（没有可用的托管目录）"
+                ? T("（没有可用的托管目录）")
                 : hosted.dirs.joined(separator: "、")
             settingsDirsLabel?.toolTip = hosted.dirs.joined(separator: "\n")
-            settingsIdleLabel?.stringValue = "\(Int((hosted.idleTimeoutMs / 60_000).rounded())) 分钟"
+            settingsIdleLabel?.stringValue = TF(T("%d 分钟"), Int((hosted.idleTimeoutMs / 60_000).rounded()))
         } else {
             settingsBypassSwitch?.state = .off
-            settingsDirsLabel?.stringValue = reachable ? "读取中…" : "Bridge 未运行，无法读取"
+            settingsDirsLabel?.stringValue = reachable ? T("读取中…") : T("Bridge 未运行，无法读取")
             settingsDirsLabel?.toolTip = nil
             settingsIdleLabel?.stringValue = ""
         }
@@ -1450,11 +1567,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func renderMessageLog() {
         let rows = filteredMessages()
         settingsTable?.reloadData()
-        settingsCountLabel?.stringValue = rows.isEmpty ? "" : "\(rows.count) 条"
+        settingsCountLabel?.stringValue = rows.isEmpty ? "" : TF(T("%d 条"), rows.count)
         settingsEmptyLabel?.isHidden = !rows.isEmpty
         settingsEmptyLabel?.stringValue = messageLog.isEmpty
-            ? "还没有收到客户端发来的消息"
-            : "没有匹配的消息"
+            ? T("还没有收到客户端发来的消息")
+            : T("没有匹配的消息")
     }
 
     @objc private func filterMessages(_ sender: NSSearchField) {
@@ -1469,7 +1586,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 hostedConfig = try await client.setHostedAllowBypass(enabled)
             } catch {
-                alert("保存失败", error.localizedDescription)
+                alert(T("保存失败"), error.localizedDescription)
             }
             renderSettings()
         }
@@ -1481,6 +1598,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleTerminal(_ sender: NSSwitch) {
         setDevtools(capability: "terminal", enabled: sender.state == .on, ttlSeconds: nil)
+    }
+
+    @objc private func toggleExpiryReminder(_ sender: NSSwitch) {
+        expiryReminderEnabled = sender.state == .on
+        if sender.state == .on { requestNotificationPermission() }
+    }
+
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+    }
+
+    /// 远程工具快到点时提示一次；已经提醒过的按「能力 + 到期时间」记下来。
+    private func checkDevtoolsExpiry() {
+        guard expiryReminderEnabled, reachable, let devtools = snapshot?.devtools else { return }
+        let now = Date().timeIntervalSince1970 * 1000
+        let capabilities: [(String, DevtoolsCapabilityInfo?)] = [
+            (T("文件浏览"), devtools.files),
+            (T("命令执行"), devtools.terminal),
+        ]
+        for (label, capability) in capabilities {
+            guard let capability, capability.enabled, let expiresAt = capability.expiresAt else { continue }
+            let remaining = expiresAt - now
+            guard remaining > 0, remaining <= expiryReminderLeadMs else { continue }
+            let key = "\(label)-\(Int64(expiresAt))"
+            guard !expiryReminded.contains(key) else { continue }
+            expiryReminded.insert(key)
+            notifyExpiring(label: label, minutes: max(1, Int((remaining / 60_000).rounded())))
+        }
+    }
+
+    private func notifyExpiring(label: String, minutes: Int) {
+        let content = UNMutableNotificationContent()
+        content.title = T("远程工具即将关闭")
+        content.body = TF(T("%@将在 %d 分钟后自动关闭；需要继续用就在菜单里重新开启。"), label, minutes)
+        content.sound = .default
+        let request = UNNotificationRequest(
+            identifier: "devtools-expiry-\(label)-\(Int64(Date().timeIntervalSince1970))",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
     }
 
     // MARK: - 新消息气泡
@@ -1619,10 +1777,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ?? "https://agent-bridge-preview.craftstead.app"
 
         let dialog = NSAlert()
-        dialog.messageText = "初始化 Agent Bridge"
-        dialog.informativeText = "选中继地址即可：房间号和凭据都在本机生成，中继只负责转发。"
-        dialog.addButton(withTitle: "初始化")
-        dialog.addButton(withTitle: "取消")
+        dialog.messageText = T("初始化") + " " + appName
+        dialog.informativeText = T("选中继地址即可：房间号和凭据都在本机生成，中继只负责转发。")
+        dialog.addButton(withTitle: T("初始化"))
+        dialog.addButton(withTitle: T("取消"))
 
         let form = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 116))
         func field(_ row: Int, _ label: String, _ value: String) -> NSTextField {
@@ -1637,8 +1795,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             form.addSubview(input)
             return input
         }
-        let relayField = field(0, "中继地址", relay)
-        let nameField = field(1, "本机名称", Host.current().localizedName ?? "Mac")
+        let relayField = field(0, T("中继地址"), relay)
+        let nameField = field(1, T("本机名称"), Host.current().localizedName ?? "Mac")
         dialog.accessoryView = form
 
         NSApp.activate(ignoringOtherApps: true)
@@ -1647,7 +1805,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let relayValue = relayField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let nameValue = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !relayValue.isEmpty else {
-            alert("信息不完整", "中继地址必须填写。")
+            alert(T("信息不完整"), T("中继地址必须填写。"))
             return
         }
         defaults.set(relayValue, forKey: "relayUrl")
@@ -1655,11 +1813,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var args = ["init", "--relay", relayValue]
         if !nameValue.isEmpty { args += ["--name", nameValue] }
         guard let result = BridgeCLI.run(args, timeout: 30) else {
-            alert("无法运行 Bridge", "找不到 node 或 apps/bridge/dist/main.js。")
+            alert(T("无法运行 Bridge"), T("找不到 node 或 apps/bridge/dist/main.js。"))
             return
         }
         guard result.code == 0 else {
-            alert("初始化失败", (result.error.isEmpty ? result.output : result.error).trimmingCharacters(in: .whitespacesAndNewlines))
+            alert(T("初始化失败"), (result.error.isEmpty ? result.output : result.error).trimmingCharacters(in: .whitespacesAndNewlines))
             return
         }
         bridge = BridgeCLI.info()
@@ -1680,18 +1838,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func startBridge() {
         if BridgeCLI.adminPortBusy(AdminClient.port) {
             alert(
-                "已有 Bridge 在运行",
-                "127.0.0.1:\(AdminClient.port) 已被占用，通常是另一份状态目录的 Bridge（例如终端里用 AGENT_BRIDGE_HOME 启动的 preview 实例）。先停掉它，或在菜单「管理端口」里换一个端口。"
+                T("已有 Bridge 在运行"),
+                TF(T("127.0.0.1:%d 已被占用，通常是另一份状态目录的 Bridge（例如终端里用 AGENT_BRIDGE_HOME 启动的 preview 实例）。先停掉它，或在菜单「管理端口」里换一个端口。"), AdminClient.port)
             )
             Task { await refresh() }
             return
         }
         guard let node = BridgeCLI.nodePath() else {
-            alert("找不到 node", "设置环境变量 AGENT_BRIDGE_NODE 指向 node 可执行文件。")
+            alert(T("找不到 node"), T("设置环境变量 AGENT_BRIDGE_NODE 指向 node 可执行文件。"))
             return
         }
         guard let script = BridgeCLI.scriptPath() else {
-            alert("找不到 Bridge", "设置环境变量 AGENT_BRIDGE_BIN 指向 apps/bridge/dist/main.js。")
+            alert(T("找不到 Bridge"), T("设置环境变量 AGENT_BRIDGE_BIN 指向 apps/bridge/dist/main.js。"))
             return
         }
         let stateDir = AdminClient.stateDir
@@ -1728,7 +1886,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         do {
             try process.run()
         } catch {
-            alert("启动失败", error.localizedDescription)
+            alert(T("启动失败"), error.localizedDescription)
             return
         }
         bridgeProcess = process
@@ -1744,7 +1902,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let code = process.terminationStatus
             Task { @MainActor in
                 self?.bridgeProcess = nil
-                self?.alert("Bridge 启动失败", tail.isEmpty ? "进程已退出（代码 \(code)）" : tail)
+                self?.alert(T("Bridge 启动失败"), tail.isEmpty ? TF(T("进程已退出（代码 %d）"), code) : tail)
             }
         }
         Task {
@@ -1767,19 +1925,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func changePort() {
         let current = AdminClient.port
         let dialog = NSAlert()
-        dialog.messageText = "管理端口"
-        dialog.informativeText = "本地管理接口只监听 127.0.0.1。preview 默认 47826，生产默认 47825；留空恢复按中继环境取默认值。保存后会重启菜单栏启动的 Bridge。"
-        dialog.addButton(withTitle: "保存")
-        dialog.addButton(withTitle: "取消")
+        dialog.messageText = T("管理端口")
+        dialog.informativeText = T("本地管理接口只监听 127.0.0.1。preview 默认 47826，生产默认 47825；留空恢复按中继环境取默认值。保存后会重启菜单栏启动的 Bridge。")
+        dialog.addButton(withTitle: T("保存"))
+        dialog.addButton(withTitle: T("取消"))
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 22))
         field.stringValue = String(current)
-        field.placeholderString = "1024–65535，留空用默认"
+        field.placeholderString = T("1024–65535，留空用默认")
         dialog.accessoryView = field
         NSApp.activate(ignoringOtherApps: true)
         guard dialog.runModal() == .alertFirstButtonReturn else { return }
 
         if AdminClient.hasPortEnv {
-            alert("环境变量优先", "当前设置了 AGENT_BRIDGE_ADMIN_PORT，菜单里保存的端口不会生效；删掉该环境变量并重开 App。")
+            alert(T("环境变量优先"), T("当前设置了 AGENT_BRIDGE_ADMIN_PORT，菜单里保存的端口不会生效；删掉该环境变量并重开 App。"))
             return
         }
 
@@ -1790,13 +1948,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             target = AdminClient.defaultPort
         } else {
             guard let port = Int(raw), port >= 1024, port <= 65_535 else {
-                alert("端口不合法", "请填 1024–65535 之间的整数，或留空恢复默认。")
+                alert(T("端口不合法"), T("请填 1024–65535 之间的整数，或留空恢复默认。"))
                 return
             }
             do {
                 try AdminClient.savePort(port)
             } catch {
-                alert("保存端口失败", error.localizedDescription)
+                alert(T("保存端口失败"), error.localizedDescription)
                 return
             }
             target = port
@@ -1806,7 +1964,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 只有菜单栏自己启动的进程才能代为重启；外部实例只保存设置并提示。
         guard bridgeProcess?.isRunning == true else {
             if reachable {
-                alert("端口已保存", "当前运行的 Bridge 不是菜单栏启动的，需要手动重启后才会监听 127.0.0.1:\(target)。")
+                alert(T("端口已保存"), TF(T("当前运行的 Bridge 不是菜单栏启动的，需要手动重启后才会监听 127.0.0.1:%d。"), target))
             } else {
                 Task { await refresh() }
             }
@@ -1837,9 +1995,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func alert(_ title: String, _ message: String) {
         let alert = NSAlert()
         alert.messageText = title
-        alert.informativeText = message.isEmpty ? "（没有更多信息）" : message
+        alert.informativeText = message.isEmpty ? T("（没有更多信息）") : message
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "好")
+        alert.addButton(withTitle: T("好"))
         NSApp.activate(ignoringOtherApps: true)
         alert.runModal()
     }
@@ -1930,17 +2088,17 @@ if CommandLine.arguments.contains("--dump") {
         _ = BridgeCLI.info() // 让端口默认值按中继环境取
         do {
             let snapshot = try await AdminClient().status()
-            let devices = snapshot.devices.map { "\($0.name)(\($0.online ? "在线" : "离线"))" }
+            let devices = snapshot.devices.map { "\($0.name)(\($0.online ? T("在线") : T("离线")))" }
             print("ok relay=\(snapshot.relayOnline) connections=\(snapshot.connections.count) devices=\(devices.joined(separator: ","))")
             exit(0)
         } catch {
             print("fail \((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)")
-            print("node=\(BridgeCLI.nodePath() ?? "(未找到)")")
-            print("script=\(BridgeCLI.scriptPath() ?? "(未找到)")")
+            print("node=\(BridgeCLI.nodePath() ?? T("(未找到)"))")
+            print("script=\(BridgeCLI.scriptPath() ?? T("(未找到)"))")
             if let info = BridgeCLI.info() {
                 print("initialized=\(info.initialized) stateDir=\(info.stateDir)")
             } else {
-                print("initialized=unknown（info 无法运行）")
+                print(T("initialized=unknown（info 无法运行）"))
             }
             exit(1)
         }

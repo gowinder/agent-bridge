@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
+import { DEFAULT_COMPACTION_TRIGGER_PERCENT } from "@craftstead/protocol";
 import type {
   ContextUsage,
   HostedAgent,
@@ -48,7 +49,7 @@ import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
-import { piModelCatalog } from "./pi-models.js";
+import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
 import { piSubagentTasks } from "./pi-subagents.js";
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
@@ -213,7 +214,9 @@ interface HostedRecord {
   thinking?: string;
   /** pi 会话：新派生的子代理的思考等级（settings.json 的 `subagents.defaultThinking`）。 */
   subagentThinking?: string;
-  /** pi 会话：自动压缩阈值（settings.json 的 `compaction.reserveTokens`）；缺省跟随 pi 设置。 */
+  /** pi 会话：自动压缩触发点，占上下文窗口的百分比（1–100）；缺省用 Bridge 默认值。 */
+  compactionTriggerPercent?: number;
+  /** 旧字段：直接写死的预留 token 数；老记录里才会出现，新设置只用百分比。 */
   compactionReserveTokens?: number;
   /** pi 会话在 `/new` 之后用的新会话文件：续写要按 `--session <路径>` 而不是 `--session-id`。 */
   piSessionPath?: string;
@@ -515,6 +518,32 @@ export class HostedSessionManager {
       .map((record) => this.summary(record));
   }
 
+  /**
+   * 托管会话的转录同时也躺在对应 CLI 自己的会话目录里（pi 在 `~/.pi/agent/sessions`，
+   * sessions 整目录软链回用户目录），适配器会把同一段对话再列一遍；改过名后两边标题对不上，
+   * 历史里就是两条。这里给出 pi 要认领的原生会话 id，由会话列表把 pi 那份剔掉，
+   * 保留带改名与运行状态的托管记录。
+   */
+  hostedNativeSessionIds(): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    const claim = (adapterKey: string, id: string): void => {
+      const bucket = out.get(adapterKey) ?? new Set<string>();
+      bucket.add(id);
+      out.set(adapterKey, bucket);
+    };
+    for (const record of this.records.values()) {
+      // 只有 pi 需要认领：claude 桌面索引里的 id 是 `local_*`，不是 CLI 的 `--session-id`，
+      // 对不上；而 claude-code-cli 适配器本来就按 hosted/sessions.json 排除托管会话。
+      if (record.agent !== "pi") continue;
+      claim("pi", record.id);
+      // `/new` 之后续写的是 pi 新建的文件，id 由 pi 生成：文件名是 `<时间戳>_<id>.jsonl`。
+      const file = basename(record.piSessionPath ?? "").replace(/\.jsonl$/, "");
+      const at = file.lastIndexOf("_");
+      if (at >= 0 && at < file.length - 1) claim("pi", file.slice(at + 1));
+    }
+    return out;
+  }
+
   session(sessionId: string): SessionSummary | null {
     const record = this.record(sessionId);
     return record ? this.summary(record) : null;
@@ -530,7 +559,8 @@ export class HostedSessionManager {
       if (index >= 0) end = index;
     }
     const start = Math.max(0, end - page.limit);
-    const pageMessages = all.slice(start, end);
+    // 全文留到 message.text 再给，列表里还是截到 MAX_BLOCK_CHARS：帧大小与渲染成本不变。
+    const pageMessages = all.slice(start, end).map(trimMessageForList);
     const live = this.live.get(record.id);
     const result: MessageListResult = {
       messages: pageMessages,
@@ -605,13 +635,7 @@ export class HostedSessionManager {
               { label: "思考等级", value: record.thinking ?? "跟随 pi 设置" },
               { label: "子代理模型", value: record.subagentModel ?? "跟随 pi 设置" },
               { label: "子代理思考等级", value: record.subagentThinking ?? "跟随 pi 设置" },
-              {
-                label: "自动压缩",
-                value:
-                  record.compactionReserveTokens !== undefined
-                    ? `剩 ${record.compactionReserveTokens.toLocaleString("en-US")} tokens 时压缩`
-                    : "跟随 pi 设置（默认剩 16384）",
-              },
+              { label: "自动压缩", value: this.compactionLabel(record) },
             ]
           : []),
         ...(record.args?.length ? [{ label: "启动参数", value: record.args.join(" ") }] : []),
@@ -839,15 +863,10 @@ export class HostedSessionManager {
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    // 只改模型时思考等级与压缩阈值沿用记录里的值；都没设才把目录清掉。
-    if (model || record.subagentThinking || record.compactionReserveTokens !== undefined) {
-      if (
-        !preparePiAgentDir(agentDir, {
-          model,
-          thinking: record.subagentThinking,
-          reserveTokens: record.compactionReserveTokens,
-        })
-      ) {
+    // 只改模型时思考等级与压缩触发点沿用记录里的值；都没有覆盖项就把目录清掉。
+    const reserveTokens = this.compactionReserveFor(record);
+    if (model || record.subagentThinking || reserveTokens !== undefined) {
+      if (!preparePiAgentDir(agentDir, { model, thinking: record.subagentThinking, reserveTokens })) {
         throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理模型没有生效`);
       }
     } else {
@@ -862,48 +881,85 @@ export class HostedSessionManager {
   }
 
   /**
-   * 改这个会话的自动压缩阈值（pi 的 `compaction.reserveTokens`，只对 pi 有效）：
-   * 上下文到达「窗口 − reserveTokens」时 pi 自己压缩。
-   * pi 只在启动时读 settings.json，所以空闲进程要先停掉，下一条消息按新阈值重新打开会话。
-   * `value` 传 null 表示改回跟随 pi 自己的设置。
+   * 改这个会话的自动压缩触发点（窗口用到的百分比，只对 pi 有效）：上下文到达窗口的
+   * 这个比例时 pi 自己压缩。pi 只认 `compaction.reserveTokens`，这里按当前模型窗口
+   * 换算成它认的值；pi 只在启动时读 settings.json，所以空闲进程要先停掉。
+   * `value` 传 null 表示改回 Bridge 默认值。
    */
-  async setCompactionReserveTokens(sessionId: string, value: number | null): Promise<SessionSummary> {
+  async setCompaction(sessionId: string, value: number | null): Promise<SessionSummary> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     if (record.agent !== "pi") {
-      throw new RpcError("unsupported", "只有 pi 托管会话可以设置自动压缩阈值");
+      throw new RpcError("unsupported", "只有 pi 托管会话可以设置自动压缩触发点");
     }
-    if (value !== null && (!Number.isSafeInteger(value) || value < 0 || value > MAX_COMPACTION_RESERVE_TOKENS)) {
-      throw new RpcError(
-        "invalid_params",
-        `自动压缩阈值必须是 0 到 ${MAX_COMPACTION_RESERVE_TOKENS} 之间的整数（单位 token）`,
-      );
+    if (value !== null && (!Number.isSafeInteger(value) || value < 1 || value > 100)) {
+      throw new RpcError("invalid_params", "自动压缩触发点必须是 1 到 100 之间的整数（窗口百分比）");
     }
     const live = this.live.get(record.id);
     if (live?.busy || live?.pending || live?.piPending) {
-      throw new RpcError("conflict", "这一轮还在跑，等它结束再改自动压缩阈值");
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再改自动压缩触发点");
     }
+    const next: HostedRecord = { ...record };
+    delete next.compactionReserveTokens;
+    if (value !== null) next.compactionTriggerPercent = value;
+    else delete next.compactionTriggerPercent;
+    const reserve = this.compactionReserveFor(next);
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    if (record.subagentModel || record.subagentThinking || value !== null) {
-      if (
-        !preparePiAgentDir(agentDir, {
+    const needsDir = Boolean(record.subagentModel || record.subagentThinking || reserve !== undefined);
+    const prepared = needsDir
+      ? preparePiAgentDir(agentDir, {
           model: record.subagentModel,
           thinking: record.subagentThinking,
-          reserveTokens: value ?? undefined,
+          reserveTokens: reserve,
         })
-      ) {
-        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），自动压缩阈值没有生效`);
-      }
-    } else {
-      removePiAgentDir(agentDir);
+      : null;
+    if (needsDir && !prepared) {
+      throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），自动压缩触发点没有生效`);
     }
+    // 窗口还未知（还没跑过一轮、配置里也查不到）时先不建目录，等下次启动再算。
+    if (!prepared) removePiAgentDir(agentDir);
     if (live) this.kill(record.id);
     await this.stopInSessiond(record.id, true);
-    if (value !== null) record.compactionReserveTokens = value;
-    else delete record.compactionReserveTokens;
+    delete record.compactionReserveTokens;
+    if (value !== null) record.compactionTriggerPercent = value;
+    else delete record.compactionTriggerPercent;
     this.touch(record);
     return this.summary(record);
+  }
+
+  /** 按触发百分比换算 pi 认的 reserveTokens；窗口未知时返回 undefined（pi 用自己的默认）。 */
+  private compactionReserveFor(record: HostedRecord): number | undefined {
+    if (record.compactionReserveTokens !== undefined) return record.compactionReserveTokens;
+    const window = this.contextWindowFor(record);
+    if (window === undefined) return undefined;
+    const percent = record.compactionTriggerPercent ?? DEFAULT_COMPACTION_TRIGGER_PERCENT;
+    const trigger = Math.round((window * percent) / 100);
+    return Math.min(MAX_COMPACTION_RESERVE_TOKENS, Math.max(0, window - trigger));
+  }
+
+  /** 会话模型窗口：优先用 pi 上报过的，其次查 pi 自己的模型配置。 */
+  private contextWindowFor(record: HostedRecord): number | undefined {
+    const reported = record.context?.windowTokens;
+    if (typeof reported === "number" && reported > 0) return reported;
+    const model = record.model ?? record.observedModel ?? piDefaultModel();
+    return model ? piModelContextWindow(model) : undefined;
+  }
+
+  private compactionLabel(record: HostedRecord): string {
+    if (record.compactionReserveTokens !== undefined) {
+      const window = this.contextWindowFor(record);
+      const trigger = window === undefined ? undefined : Math.max(0, window - record.compactionReserveTokens);
+      return trigger === undefined
+        ? `预留 ${record.compactionReserveTokens.toLocaleString("en-US")} tokens 时压缩（旧设置）`
+        : `上下文约 ${trigger.toLocaleString("en-US")} tokens 时压缩（旧设置）`;
+    }
+    const percent = record.compactionTriggerPercent ?? DEFAULT_COMPACTION_TRIGGER_PERCENT;
+    const suffix = record.compactionTriggerPercent === undefined ? "（默认）" : "";
+    const window = this.contextWindowFor(record);
+    if (window === undefined) return `上下文用到窗口的 ${percent}% 时压缩${suffix}`;
+    const trigger = Math.round((window * percent) / 100);
+    return `上下文用到窗口的 ${percent}%（约 ${trigger.toLocaleString("en-US")} / ${window.toLocaleString("en-US")} tokens）时压缩${suffix}`;
   }
 
   /** 让守护进程停掉这个会话的进程（没有就不做），并等它退出；strict 时停不掉就抛错。 */
@@ -1256,7 +1312,7 @@ export class HostedSessionManager {
     const agentDir = preparePiAgentDir(this.piAgentDirOf(record.id), {
       model: record.subagentModel,
       thinking: record.subagentThinking,
-      reserveTokens: record.compactionReserveTokens,
+      reserveTokens: this.compactionReserveFor(record),
     });
     const child = this.spawnProcess(
       binary,
@@ -1453,7 +1509,7 @@ export class HostedSessionManager {
             last.role === "system" &&
             last.blocks.length === 1 &&
             last.blocks[0]?.type === "text" &&
-            last.blocks[0].text === truncate(text, MAX_BLOCK_CHARS).text
+            truncate(last.blocks[0].text, MAX_BLOCK_CHARS).text === truncate(text, MAX_BLOCK_CHARS).text
           ) {
             return;
           }
@@ -1462,7 +1518,7 @@ export class HostedSessionManager {
             sessionId: record.id,
             role: "system",
             createdAt: Date.now(),
-            blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+            blocks: [{ type: "text", text }],
           });
           this.touch(record);
         },
@@ -1556,7 +1612,7 @@ export class HostedSessionManager {
       sessionId: record.id,
       role: "system",
       createdAt: Date.now(),
-      blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+      blocks: [{ type: "text", text }],
     });
     this.touch(record);
   }
@@ -1883,7 +1939,7 @@ export class HostedSessionManager {
           sessionId: record.id,
           role: "system",
           createdAt: Date.now(),
-          blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+          blocks: [{ type: "text", text }],
         });
       }
       this.touch(record);
@@ -1960,7 +2016,7 @@ export class HostedSessionManager {
       sessionId: record.id,
       role: "user",
       createdAt: Date.now(),
-      blocks: [{ type: "text", text: truncate(text, MAX_BLOCK_CHARS).text }],
+      blocks: [{ type: "text", text }],
     });
   }
 
@@ -2022,6 +2078,9 @@ export class HostedSessionManager {
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
       ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
+      ...(record.compactionTriggerPercent !== undefined
+        ? { compactionTriggerPercent: record.compactionTriggerPercent }
+        : {}),
       ...(record.compactionReserveTokens !== undefined
         ? { compactionReserveTokens: record.compactionReserveTokens }
         : {}),
@@ -2232,6 +2291,12 @@ export class HostedSessionManager {
           ...(typeof item["subagentThinking"] === "string" && PI_THINKING_LEVELS.includes(item["subagentThinking"])
             ? { subagentThinking: item["subagentThinking"] }
             : {}),
+          ...(typeof item["compactionTriggerPercent"] === "number" &&
+          Number.isSafeInteger(item["compactionTriggerPercent"]) &&
+          item["compactionTriggerPercent"] >= 1 &&
+          item["compactionTriggerPercent"] <= 100
+            ? { compactionTriggerPercent: item["compactionTriggerPercent"] }
+            : {}),
           ...(typeof item["compactionReserveTokens"] === "number" &&
           Number.isSafeInteger(item["compactionReserveTokens"]) &&
           item["compactionReserveTokens"] >= 0 &&
@@ -2300,6 +2365,9 @@ export class HostedSessionManager {
               ...(record.subagentModel ? { subagentModel: record.subagentModel } : {}),
               ...(record.thinking ? { thinking: record.thinking } : {}),
               ...(record.subagentThinking ? { subagentThinking: record.subagentThinking } : {}),
+              ...(record.compactionTriggerPercent !== undefined
+                ? { compactionTriggerPercent: record.compactionTriggerPercent }
+                : {}),
               ...(record.compactionReserveTokens !== undefined
                 ? { compactionReserveTokens: record.compactionReserveTokens }
                 : {}),
@@ -2521,6 +2589,28 @@ function sanitizeSlashCommands(value: unknown): string[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+/** 列表只给前几千字；全文留在托管记录里，等 message.text 再拿。 */
+function trimMessageForList(message: MessageRecord): MessageRecord {
+  let changed = false;
+  const blocks = message.blocks.map((block) => {
+    if (block.type !== "text") return block;
+    if (block.text.length > MAX_BLOCK_CHARS) {
+      changed = true;
+      return { ...block, text: block.text.slice(0, MAX_BLOCK_CHARS), truncated: true };
+    }
+    // 早版本落盘时就把正文截到上限并留了标记，原文已经不在库里：
+    // 清掉标记，不给一个点了也拿不到东西的「读取全文」。
+    if (block.truncated) {
+      changed = true;
+      const copy = { ...block };
+      delete copy.truncated;
+      return copy;
+    }
+    return block;
+  });
+  return changed ? { ...message, blocks } : message;
+}
+
 function truncateTitle(text: string): string {
   const line = text.replace(/\s+/g, " ").trim();
   if (!line) return "托管会话";
@@ -2533,7 +2623,8 @@ function blocksFromContent(content: unknown): MessageBlock[] {
   for (const item of items) {
     if (!isRecord(item)) continue;
     if (item["type"] === "text" && typeof item["text"] === "string" && item["text"].trim()) {
-      blocks.push({ type: "text", ...truncate(item["text"], MAX_BLOCK_CHARS) });
+      // 文本全文留在托管记录里，列表返回前才截断。
+      blocks.push({ type: "text", text: item["text"] });
     } else if (item["type"] === "tool_use") {
       const name = typeof item["name"] === "string" ? item["name"] : "tool";
       const input = isRecord(item["input"]) ? item["input"] : {};

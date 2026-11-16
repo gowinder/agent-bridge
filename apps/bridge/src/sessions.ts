@@ -160,9 +160,9 @@ function describeActivity(request: RequestMessage): string | null {
     return `${model ? `把托管会话的子代理模型换成「${model}」` : "把托管会话的子代理模型改回跟随 pi 设置"}${suffix}`;
   }
   if (request.method === "hosted.setCompaction") {
-    const raw = params["reserveTokens"];
-    if (raw === null || raw === undefined) return `把自动压缩阈值改回跟随 pi 设置${suffix}`;
-    return `把自动压缩阈值改成剩 ${String(raw)} tokens${suffix}`;
+    const raw = params["triggerPercent"] ?? params["reserveTokens"];
+    if (raw === null || raw === undefined) return `把自动压缩触发点改回默认${suffix}`;
+    return `把自动压缩触发点改成窗口的 ${String(raw)}%${suffix}`;
   }
   if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
     const path = (stringParam(params, "path") ?? "").trim();
@@ -500,6 +500,13 @@ export class DeviceSession implements ChannelSession {
         if (before) query.before = before;
         return this.options.adapters.messages(sessionId, query);
       }
+      case "message.text": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const messageId = stringParam(params, "messageId");
+        if (!messageId) throw new RpcError("invalid_params", "messageId required");
+        return this.options.adapters.messageText(sessionId, messageId);
+      }
       case "session.rail": {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
@@ -668,11 +675,11 @@ export class DeviceSession implements ChannelSession {
       case "hosted.setCompaction": {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
-        const raw = params["reserveTokens"];
+        const raw = params["triggerPercent"];
         if (raw !== null && raw !== undefined && typeof raw !== "number") {
-          throw new RpcError("invalid_params", "reserveTokens 必须是数字或 null");
+          throw new RpcError("invalid_params", "triggerPercent 必须是数字或 null");
         }
-        return this.options.adapters.hostedSetCompactionReserveTokens(sessionId, typeof raw === "number" ? raw : null);
+        return this.options.adapters.hostedSetCompaction(sessionId, typeof raw === "number" ? raw : null);
       }
       case "push.info": {
         const info: PushInfoResult = {

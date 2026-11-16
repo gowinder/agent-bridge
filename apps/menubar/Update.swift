@@ -88,13 +88,36 @@ final class Updater {
         return (full?.isEmpty == false ? full : short) ?? "0.0.0"
     }()
 
+    /// 装的是不是预发布（`0.11.1-rc.8`）。只有这种版本才有「停留在测试版通道」这个选项。
+    static let currentVersionIsPrerelease = currentVersion.contains("-")
+
+    /// 装的是测试版时，是否只跟着预发布走、不升到正式版。默认开：装 rc 的人本来就在试新功能。
+    /// 正式版机器上恒为 false，选项也不显示。
+    static var staysOnPrereleaseChannel: Bool {
+        get {
+            guard currentVersionIsPrerelease else { return false }
+            let defaults = UserDefaults.standard
+            // 没设过就当开着，省得装完 rc 还要去勾一次。
+            if defaults.object(forKey: "prereleaseChannel") == nil { return true }
+            return defaults.bool(forKey: "prereleaseChannel")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "prereleaseChannel") }
+    }
+
     private(set) var phase: Phase = .idle
     private(set) var available: GitHubRelease?
     private(set) var lastChecked: Date?
     private(set) var lastFailure: String?
     var onChange: (() -> Void)?
 
-    /// preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
+    /// 换了更新通道后旧候选就不再适用，菜单/工具提示不该继续显示它。
+    func clearAvailable() {
+        available = nil
+        onChange?()
+    }
+
+    /// 通道判定的默认口径：preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
+    /// 装了测试版又勾了「停留在测试版通道」时，这个口径被通道开关覆盖（只看 prerelease 标志）。
     private var isPreview: Bool {
         AdminClient.isPreviewRelay(AdminClient.relayHint ?? UserDefaults.standard.string(forKey: "relayUrl"))
     }
@@ -108,12 +131,12 @@ final class Updater {
 
     var summary: String {
         switch phase {
-        case .checking: return "正在检查更新…"
-        case .downloading: return "正在下载 \(available?.tag ?? "新版本")…"
-        case .installing: return "正在安装，安装完成后会自动重启"
-        case .failed(let reason): return "更新失败：\(reason)"
+        case .checking: return T("正在检查更新…")
+        case .downloading: return TF("正在下载 %@…", available?.tag ?? T("新版本"))
+        case .installing: return T("正在安装，安装完成后会自动重启")
+        case .failed(let reason): return TF("更新失败：%@", reason)
         // 菜单顶部那行是 Bridge 的版本；这里写清楚是菜单栏 app 自己的版本，两者会分开升级。
-        case .idle: return "菜单栏 app v\(Self.currentVersion)"
+        case .idle: return TF("菜单栏 app v%@", Self.currentVersion)
         }
     }
 
@@ -128,9 +151,16 @@ final class Updater {
         }
         do {
             let releases = try await fetchReleases()
+            // 停留在测试版通道时只认 prerelease：正式版发布也不提示，避免 rc 直接被顶掉。
+            let stayOnPrerelease = Self.staysOnPrereleaseChannel
             available = releases.first { release in
-                !release.draft && (isPreview || !release.prerelease)
-                    && VersionOrder.isNewer(release.tag, than: Self.currentVersion)
+                if release.draft { return false }
+                if stayOnPrerelease {
+                    if !release.prerelease { return false }
+                } else if !isPreview && release.prerelease {
+                    return false
+                }
+                return VersionOrder.isNewer(release.tag, than: Self.currentVersion)
             }
             lastFailure = nil
         } catch {
@@ -144,7 +174,7 @@ final class Updater {
         available = release
         guard let asset = release.assets.first(where: { $0.name == "AgentBridge.dmg" })
             ?? release.assets.first(where: { $0.name.lowercased().hasSuffix(".dmg") && !$0.name.hasSuffix(".sha256") }) else {
-            phase = .failed("这个版本没有 DMG 附件")
+            phase = .failed(T("这个版本没有 DMG 附件"))
             onChange?()
             return
         }
@@ -157,7 +187,7 @@ final class Updater {
 
     private func fetchReleases() async throws -> [GitHubRelease] {
         guard let url = URL(string: "https://api.github.com/repos/\(Self.repo)/releases?per_page=20") else {
-            throw UpdateError.message("发布地址无效")
+            throw UpdateError.message(T("发布地址无效"))
         }
         var request = URLRequest(url: url)
         request.timeoutInterval = 15
@@ -165,9 +195,9 @@ final class Updater {
         request.setValue("AgentBridge-menubar", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         guard let status = (response as? HTTPURLResponse)?.statusCode else {
-            throw UpdateError.message("发布接口没有响应")
+            throw UpdateError.message(T("发布接口没有响应"))
         }
-        guard status == 200 else { throw UpdateError.message("发布接口返回 \(status)") }
+        guard status == 200 else { throw UpdateError.message(TF("发布接口返回 %d", status)) }
         return try JSONDecoder().decode([GitHubRelease].self, from: data)
     }
 
@@ -178,9 +208,9 @@ final class Updater {
             request.setValue("AgentBridge-menubar", forHTTPHeaderField: "User-Agent")
             let (temporary, response) = try await URLSession.shared.download(for: request)
             guard let status = (response as? HTTPURLResponse)?.statusCode else {
-                throw UpdateError.message("下载没有响应")
+                throw UpdateError.message(T("下载没有响应"))
             }
-            guard status == 200 else { throw UpdateError.message("下载失败（HTTP \(status)）") }
+            guard status == 200 else { throw UpdateError.message(TF("下载失败（HTTP %d）", status)) }
 
             let work = FileManager.default.temporaryDirectory
                 .appendingPathComponent("agentbridge-update-\(UUID().uuidString)", isDirectory: true)
@@ -213,7 +243,7 @@ final class Updater {
               let text = String(data: data, encoding: .utf8),
               let expected = text.split(whereSeparator: { $0 == " " || $0 == "\n" }).first.map(String.init),
               expected.count == 64 else {
-            throw UpdateError.message("校验值读取失败")
+            throw UpdateError.message(T("校验值读取失败"))
         }
         let handle = try FileHandle(forReadingFrom: dmg)
         defer { try? handle.close() }
@@ -223,7 +253,7 @@ final class Updater {
         }
         let actual = hasher.finalize().map { String(format: "%02x", $0) }.joined()
         guard actual == expected.lowercased() else {
-            throw UpdateError.message("安装包校验不一致，已放弃更新")
+            throw UpdateError.message(T("安装包校验不一致，已放弃更新"))
         }
     }
 
@@ -231,7 +261,7 @@ final class Updater {
         let app = Bundle.main.bundleURL
         let destination = app.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: destination.path) else {
-            throw UpdateError.message("没有写入 \(destination.path) 的权限；先把 AgentBridge.app 拖进「应用程序」再更新")
+            throw UpdateError.message(TF("没有写入 %@ 的权限；先把 AgentBridge.app 拖进「应用程序」再更新", destination.path))
         }
 
         let work = dmg.deletingLastPathComponent()
@@ -242,7 +272,7 @@ final class Updater {
         let staged = work.appendingPathComponent("AgentBridge.app")
         do {
             guard FileManager.default.fileExists(atPath: source.path) else {
-                throw UpdateError.message("安装包里没有 AgentBridge.app")
+                throw UpdateError.message(T("安装包里没有 AgentBridge.app"))
             }
             try await run("/bin/cp", ["-R", source.path, staged.path])
         } catch {
@@ -307,7 +337,7 @@ final class Updater {
                     continuation.resume()
                 } else {
                     let name = URL(fileURLWithPath: tool).lastPathComponent
-                    continuation.resume(throwing: UpdateError.message("\(name) 执行失败（\(finished.terminationStatus)）"))
+                    continuation.resume(throwing: UpdateError.message(TF("%@ 执行失败（%d）", name, finished.terminationStatus)))
                 }
             }
             do {

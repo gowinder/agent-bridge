@@ -1,4 +1,4 @@
-import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
+import { DEFAULT_COMPACTION_TRIGGER_PERCENT, MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -25,6 +25,7 @@ import type {
   MessageQuestion,
   MessageRecord,
   MessageSendResult,
+  MessageTextResult,
   Method,
   ModelOption,
   NextStepAction,
@@ -73,21 +74,22 @@ import { connectDevice, finishPairing, startPairing, type PairingChallenge } fro
 import type { PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
+import { langSwitchLabel, toggleLang, tr } from "./i18n";
 
 const RELAY_ERRORS: Record<string, string> = {
-  invite_expired: "邀请已过期，请在 Mac 上重新生成配对链接。",
-  invite_used: "邀请已被使用，请在 Mac 上重新生成配对链接。",
-  device_expired: "设备授权已到期，请重新配对。",
-  device_revoked: "设备已被撤销，请重新配对。",
-  bridge_offline: "Mac 上的 Bridge 没有连接中继，请确认它正在运行。",
-  channel_in_use: "连接通道已被占用，请稍后重试。",
-  invalid_credential: "凭据无效，请重新配对。",
-  not_found: "找不到该房间，请重新配对。",
-  rate_limited: "请求太频繁，稍等片刻再试。",
+  invite_expired: tr("邀请已过期，请在 Mac 上重新生成配对链接。"),
+  invite_used: tr("邀请已被使用，请在 Mac 上重新生成配对链接。"),
+  device_expired: tr("设备授权已到期，请重新配对。"),
+  device_revoked: tr("设备已被撤销，请重新配对。"),
+  bridge_offline: tr("Mac 上的 Bridge 没有连接中继，请确认它正在运行。"),
+  channel_in_use: tr("连接通道已被占用，请稍后重试。"),
+  invalid_credential: tr("凭据无效，请重新配对。"),
+  not_found: tr("找不到该房间，请重新配对。"),
+  rate_limited: tr("请求太频繁，稍等片刻再试。"),
 };
 
 function messageOf(error: unknown): string {
-  if (error instanceof RelayError) return RELAY_ERRORS[error.code] ?? `中继拒绝：${error.message}`;
+  if (error instanceof RelayError) return RELAY_ERRORS[error.code] ?? tr(`中继拒绝：{0}`, error.message);
   return error instanceof Error ? error.message : String(error);
 }
 
@@ -142,6 +144,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M8 3.4v9.2M3.4 8h9.2"/></svg>',
   device:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.2" y="3" width="11.6" height="7.6" rx="1.4"/><path d="M5.6 13.2h4.8"/></svg>',
+  download:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.4v8.2"/><path d="m4.8 7.6 3.2 3.2 3.2-3.2"/><path d="M2.8 13.2h10.4"/></svg>',
   swap:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h9.5"/><path d="m10 3 2.5 2.5L10 8"/><path d="M13 10.5H3.5"/><path d="M6 8 3.5 10.5 6 13"/></svg>',
   clip:
@@ -188,8 +192,8 @@ const ICONS = {
 
 function backButton(onClick: () => void): HTMLButtonElement {
   const node = button("", onClick, "back-btn");
-  node.append(icon("back"), el("span", { className: "back-label", text: "返回" }));
-  node.setAttribute("aria-label", "返回");
+  node.append(icon("back"), el("span", { className: "back-label", text: tr("返回") }));
+  node.setAttribute("aria-label", tr("返回"));
   return node;
 }
 
@@ -207,9 +211,9 @@ function showUpdateBanner(version: string): void {
   if (document.querySelector(".update-banner")) return;
   const bar = el("div", { className: "update-banner", attrs: { role: "status" } });
   bar.append(
-    el("span", { className: "update-text", text: "前端已更新，刷新后使用新版本" }),
+    el("span", { className: "update-text", text: tr("前端已更新，刷新后使用新版本") }),
     button(
-      "刷新",
+      tr("刷新"),
       () => {
         const url = new URL(location.href);
         url.searchParams.set("v", version);
@@ -250,7 +254,7 @@ function watchForUpdates(): void {
 }
 
 const root = document.querySelector<HTMLDivElement>("#app");
-if (!root) throw new Error("缺少 #app 容器");
+if (!root) throw new Error(tr("缺少 #app 容器"));
 const app: HTMLDivElement = root;
 
 let active: PeerClient | null = null;
@@ -290,7 +294,7 @@ let reconnectMessage: string | null = null;
 
 function progressStart(): void {
   if (!progressBar) {
-    progressBar = el("div", { className: "progress-bar", attrs: { role: "progressbar", "aria-label": "正在加载" } });
+    progressBar = el("div", { className: "progress-bar", attrs: { role: "progressbar", "aria-label": tr("正在加载") } });
     document.body.append(progressBar);
   }
   progressBar.classList.add("active");
@@ -403,7 +407,7 @@ function iosNeedsInstall(): boolean {
   return !standalone;
 }
 
-const IOS_HINT = "iPhone 需要先在 Safari 里用「添加到主屏幕」，再从主屏幕打开，才能收到后台提醒。";
+const IOS_HINT = tr("iPhone 需要先在 Safari 里用「添加到主屏幕」，再从主屏幕打开，才能收到后台提醒。");
 
 /** 有的浏览器只提供 Service Worker 推送，没有 Notification 构造器。 */
 function notificationPermission(): NotificationPermission {
@@ -466,7 +470,7 @@ function bytesKey(value: ArrayBuffer | null): string {
  * 把原因显示给用户（自动同步时静默）。
  */
 async function subscribePush(): Promise<string | null> {
-  if (!pushSupported()) return "这个浏览器不支持后台推送";
+  if (!pushSupported()) return tr("这个浏览器不支持后台推送");
   const registration = await serviceWorker();
   const info = await call<PushInfoResult>("push.info");
   let subscription = await registration.pushManager.getSubscription();
@@ -483,7 +487,7 @@ async function subscribePush(): Promise<string | null> {
   }
   const json = subscription.toJSON();
   const keys = json.keys ?? {};
-  if (!json.endpoint || !keys["p256dh"] || !keys["auth"]) return "浏览器没有给出推送地址";
+  if (!json.endpoint || !keys["p256dh"] || !keys["auth"]) return tr("浏览器没有给出推送地址");
   await call<PushSubscribeResult>("push.subscribe", {
     endpoint: json.endpoint,
     keys: { p256dh: keys["p256dh"], auth: keys["auth"] },
@@ -522,8 +526,8 @@ function notifyCompletion(session: SessionSummary): void {
   if (!notificationsOn() || pushOn()) return;
   const appName = snapshot?.apps.find((item) => item.appId === session.appId)?.name ?? "Agent Bridge";
   try {
-    const note = new Notification(session.title || "对话已完成", {
-      body: `${appName} · 回复已完成`,
+    const note = new Notification(session.title || tr("对话已完成"), {
+      body: tr(`{0} · 回复已完成`, appName),
       tag: `ab-complete-${session.sessionId}`,
     });
     note.onclick = () => {
@@ -725,32 +729,88 @@ function showHome(): void {
 
 function showPairError(message: string): void {
   const box = el("div", { className: "notice error", text: message });
-  const retry = button("重新粘贴配对链接", showHome, "btn secondary");
+  const retry = button(tr("重新粘贴配对链接"), showHome, "btn secondary");
   app.replaceChildren(
     el("main", { className: "page narrow" }, [
-      el("p", { className: "eyebrow", text: "配对" }),
-      el("h1", { className: "display", text: "配对失败" }),
+      el("p", { className: "eyebrow", text: tr("配对") }),
+      el("h1", { className: "display", text: tr("配对失败") }),
       box,
       el("div", { className: "actions" }, [retry]),
     ]),
   );
 }
 
-function flashNotice(message: string): void {
-  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" }, text: message });
+/** 超时/断线这类错误值得就地重试；参数错了之类重试也没用。 */
+function isRetryableError(error: unknown): boolean {
+  return /超时|已断开|已关闭|中继.*失败|Failed to fetch|NetworkError/i.test(messageOf(error));
+}
+
+/**
+ * 浮在最下层的临时提示。超时这类错误带上「重试」，就地重发，不用刷新整页。
+ * 带重试时留得久一点（15 秒），否则 5 秒就收。
+ */
+function flashNotice(message: string, retry?: () => void): void {
+  // 浮条固定定位、彼此完全重叠：新的顶掉旧的，否则两条摞在一起只看得到一条。
+  for (const node of document.querySelectorAll(".float-notice")) node.remove();
+  const box = el("div", { className: "notice error float-notice", attrs: { role: "status" } }, [
+    el("span", { className: "float-notice-text", text: message }),
+  ]);
+  if (retry) {
+    box.classList.add("has-action");
+    box.append(
+      button(
+        tr("重试"),
+        () => {
+          box.remove();
+          retry();
+        },
+        "btn primary small float-notice-retry",
+      ),
+    );
+  }
   document.body.append(box);
-  window.setTimeout(() => box.remove(), 5000);
+  window.setTimeout(() => box.remove(), retry ? 15_000 : 5_000);
+}
+
+/** 操作失败的统一提示：超时/断线的额外给一个「重试」。 */
+function noticeFailure(prefix: string, error: unknown, retry: () => void): void {
+  flashNotice(`${prefix}：${messageOf(error)}`, isRetryableError(error) ? retry : undefined);
+}
+
+/** 聊天页底部的状态行报错：超时就地给「重试」，不用刷新页面。 */
+function statusError(state: ChatState, error: unknown, retry: () => void): void {
+  const text = messageOf(error);
+  state.status.classList.add("error");
+  if (!isRetryableError(error)) {
+    state.status.textContent = text;
+    return;
+  }
+  state.status.replaceChildren(
+    el("span", { text }),
+    button(
+      tr("重试"),
+      () => {
+        state.retrying = true;
+        state.status.classList.remove("error");
+        state.status.textContent = tr("正在重试…");
+        retry();
+      },
+      "btn ghost small status-retry",
+    ),
+  );
 }
 
 function renderHome(): HTMLElement {
   const devices = listDevices();
   const page = el("main", { className: "page narrow" }, [
     el("header", { className: "hero" }, [
+      // 还没配对的人也要能切语言，顶栏这时候还没渲染出来。
+      el("div", { className: "hero-lang" }, [languageButton()]),
       el("p", { className: "eyebrow", text: "Agent Bridge" }),
-      el("h1", { className: "display", text: "桌面会话，从这里接管" }),
+      el("h1", { className: "display", text: tr("桌面会话，从这里接管") }),
       el("p", {
         className: "lede",
-        text: "在浏览器里浏览 Mac 上 Claude Code 与 ChatGPT 的工程与会话，并把任意一段消息转发到另一个客户端。",
+        text: tr("在浏览器里浏览 Mac 上 Claude Code 与 ChatGPT 的工程与会话，并把任意一段消息转发到另一个客户端。"),
       }),
     ]),
   ]);
@@ -761,14 +821,14 @@ function renderHome(): HTMLElement {
     section.append(
       el("p", {
         className: "notice warn",
-        text: `${expiring.length === 1 ? "有一台设备" : `有 ${expiring.length} 台设备`}的凭据将在 3 天内过期。到期后会无法连接，请在 Mac 上重新生成配对链接并重新配对。`,
+        text: tr(`{0}的凭据将在 3 天内过期。到期后会无法连接，请在 Mac 上重新生成配对链接并重新配对。`, expiring.length === 1 ? tr("有一台设备") : tr(`有 {0} 台设备`, expiring.length)),
       }),
     );
   }
-  section.append(el("h2", { className: "panel-title", text: "已配对设备" }));
+  section.append(el("h2", { className: "panel-title", text: tr("已配对设备") }));
   if (devices.length === 0) {
     section.append(
-      emptyState("还没有配对设备", "在 Mac 上运行 agent-bridge invite，把生成的配对链接粘贴到下方。"),
+      emptyState(tr("还没有配对设备"), tr("在 Mac 上运行 agent-bridge invite，把生成的配对链接粘贴到下方。")),
     );
   } else {
     const list = el("ul", { className: "device-list" });
@@ -778,23 +838,23 @@ function renderHome(): HTMLElement {
   page.append(section);
 
   const form = el("form", { className: "panel" });
-  form.append(el("h2", { className: "panel-title", text: "使用配对链接" }));
+  form.append(el("h2", { className: "panel-title", text: tr("使用配对链接") }));
   form.append(
-    el("p", { className: "hint", text: "配对秘密只在本机内存中使用，不会发送给中继以外的服务。" }),
+    el("p", { className: "hint", text: tr("配对秘密只在本机内存中使用，不会发送给中继以外的服务。") }),
   );
   const input = el("input", {
     className: "input",
-    attrs: { type: "text", placeholder: "粘贴 http…/#/pair?relay=…&room=…&invite=…", autocomplete: "off", spellcheck: "false" },
+    attrs: { type: "text", placeholder: tr("粘贴 http…/#/pair?relay=…&room=…&invite=…"), autocomplete: "off", spellcheck: "false" },
   });
   const error = el("p", { className: "notice error hidden" });
   form.append(
     input,
     error,
     el("div", { className: "actions" }, [
-      button("开始配对", () => {
+      button(tr("开始配对"), () => {
         const link = parsePairingInput(input.value);
         if (!link) {
-          error.textContent = "无法识别配对链接";
+          error.textContent = tr("无法识别配对链接");
           error.classList.remove("hidden");
           return;
         }
@@ -807,7 +867,7 @@ function renderHome(): HTMLElement {
 
   const auto = devices.length === 1 ? devices[0]! : null;
   if (auto) {
-    const status = el("p", { className: "hint", text: "正在连接已配对设备…" });
+    const status = el("p", { className: "hint", text: tr("正在连接已配对设备…") });
     page.append(status);
     void connectAndShow(auto).catch((error: unknown) => {
       status.textContent = messageOf(error);
@@ -817,16 +877,17 @@ function renderHome(): HTMLElement {
   page.append(
     el("p", { className: "hint bookmark-hint" }, [
       el("a", { attrs: { href: location.origin + "/" }, text: location.host }),
-      " 可以收藏或添加到主屏幕，下次直接打开，不必再粘贴配对链接。",
+      tr(" 可以收藏或添加到主屏幕，下次直接打开，不必再粘贴配对链接。"),
     ]),
   );
+
   if (justPaired) {
     justPaired = false;
     page.append(
       el("p", { className: "hint bookmark-hint" }, [
-        "配对完成，",
-        el("a", { attrs: { href: craftsteadLanding(true) }, text: "回到 Craftstead 落地页" }),
-        " 查看已配对状态。",
+        tr("配对完成，"),
+        el("a", { attrs: { href: craftsteadLanding(true) }, text: tr("回到 Craftstead 落地页") }),
+        tr(" 查看已配对状态。"),
       ]),
     );
   }
@@ -843,14 +904,14 @@ function renderDeviceRow(device: DeviceMeta): HTMLElement {
     ]),
     el("div", { className: "row-actions" }, [
       status,
-      button("连接", () => {
+      button(tr("连接"), () => {
         void connectAndShow(device).catch((error: unknown) => {
           status.textContent = messageOf(error);
           status.classList.add("error");
         });
       }, "btn small"),
-      button("移除", () => {
-        if (!window.confirm(`移除「${device.bridge?.name ?? device.name}」？这台设备的配对凭据会从浏览器里删掉，要连回来得重新配对。`)) {
+      button(tr("移除"), () => {
+        if (!window.confirm(tr(`移除「{0}」？这台设备的配对凭据会从浏览器里删掉，要连回来得重新配对。`, device.bridge?.name ?? device.name))) {
           return;
         }
         void removeDevice(device.relayUrl, device.roomId).then(() => showHome());
@@ -860,7 +921,7 @@ function renderDeviceRow(device: DeviceMeta): HTMLElement {
   if (soon) {
     row.append(el("p", {
       className: "hint warn",
-      text: "这台设备的凭据即将过期，到期后就无法连接。请在 Mac 上重新生成配对链接并重新配对。",
+      text: tr("这台设备的凭据即将过期，到期后就无法连接。请在 Mac 上重新生成配对链接并重新配对。"),
     }));
   }
   return row;
@@ -869,9 +930,9 @@ function renderDeviceRow(device: DeviceMeta): HTMLElement {
 async function beginPairing(link: PairingLink): Promise<void> {
   app.replaceChildren(
     el("main", { className: "page narrow" }, [
-      el("p", { className: "eyebrow", text: "配对" }),
-      el("h1", { className: "display", text: "正在建立加密通道" }),
-      el("p", { className: "lede", text: "通过中继与 Mac 上的 Bridge 握手，稍候…" }),
+      el("p", { className: "eyebrow", text: tr("配对") }),
+      el("h1", { className: "display", text: tr("正在建立加密通道") }),
+      el("p", { className: "lede", text: tr("通过中继与 Mac 上的 Bridge 握手，稍候…") }),
     ]),
   );
   let challenge: PairingChallenge;
@@ -898,10 +959,10 @@ function showConfirm(challenge: PairingChallenge): void {
     });
   }
   const error = el("p", { className: "notice error hidden" });
-  const confirm = button("确认码一致，完成配对", () => {
+  const confirm = button(tr("确认码一致，完成配对"), () => {
     const name = nameInput.value.trim();
     if (!name) {
-      error.textContent = "请输入设备名称";
+      error.textContent = tr("请输入设备名称");
       error.classList.remove("hidden");
       return;
     }
@@ -922,20 +983,20 @@ function showConfirm(challenge: PairingChallenge): void {
         error.classList.remove("hidden");
       });
   }, "btn primary");
-  const cancel = button("取消", () => {
+  const cancel = button(tr("取消"), () => {
     challenge.connection.close();
     showHome();
   }, "btn secondary");
 
   app.replaceChildren(
     el("main", { className: "page narrow" }, [
-      el("p", { className: "eyebrow", text: "配对" }),
-      el("h1", { className: "display", text: "核对确认码" }),
-      el("p", { className: "lede", text: "Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。" }),
+      el("p", { className: "eyebrow", text: tr("配对") }),
+      el("h1", { className: "display", text: tr("核对确认码") }),
+      el("p", { className: "lede", text: tr("Mac 上 Bridge 的终端应显示同一确认码。不一致说明通道被篡改，请取消。") }),
       el("div", { className: "code", text: challenge.confirmCode }),
       el("p", { className: "hint", text: relayTargetText(challenge.link.relayUrl) }),
-      el("label", { className: "field" }, [el("span", { text: "设备名称" }), nameInput]),
-      el("p", { className: "hint", text: "浏览器拿不到电脑名称，默认值只能取设备类型、系统版本和浏览器；改成你认得出的名字，Mac 菜单栏和其它设备都会按它显示，之后也能随时改。" }),
+      el("label", { className: "field" }, [el("span", { text: tr("设备名称") }), nameInput]),
+      el("p", { className: "hint", text: tr("浏览器拿不到电脑名称，默认值只能取设备类型、系统版本和浏览器；改成你认得出的名字，Mac 菜单栏和其它设备都会按它显示，之后也能随时改。") }),
       error,
       el("div", { className: "actions" }, [confirm, cancel]),
     ]),
@@ -951,10 +1012,10 @@ function relayTargetText(relayUrl: string): string {
   try {
     url = new URL(relayUrl);
   } catch {
-    return `中继：${relayUrl}，注意：不是你当前所在的站点`;
+    return tr(`中继：{0}，注意：不是你当前所在的站点`, relayUrl);
   }
-  if (url.origin === location.origin) return `中继：${url.host}（本站）`;
-  return `中继：${url.host}，注意：不是你当前所在的站点`;
+  if (url.origin === location.origin) return tr(`中继：{0}（本站）`, url.host);
+  return tr(`中继：{0}，注意：不是你当前所在的站点`, url.host);
 }
 
 const DEVICE_NAME_KEY = "ab.deviceName";
@@ -989,10 +1050,10 @@ interface NameParts {
 function nameParts(): NameParts {
   const ua = navigator.userAgent;
   const touch = navigator.maxTouchPoints > 1;
-  let kind = "浏览器";
+  let kind = tr("浏览器");
   if (/iPhone/.test(ua)) kind = "iPhone";
   else if (/iPad/.test(ua) || (/Macintosh/.test(ua) && touch)) kind = "iPad";
-  else if (/Android/.test(ua)) kind = "Android 设备";
+  else if (/Android/.test(ua)) kind = tr("Android 设备");
   else if (/Macintosh|Mac OS X/.test(ua)) kind = "Mac";
   else if (/Windows/.test(ua)) kind = "Windows";
   else if (/Linux/.test(ua)) kind = "Linux";
@@ -1084,13 +1145,13 @@ function browserLabel(): string {
 async function ensureSecrets(device: DeviceMeta): Promise<DeviceSecrets> {
   if (!hasVault()) {
     // 还没有口令：先把老版本的明文迁移进加密存储；没有可迁移的凭据就只能重新配对。
-    if (!getDeviceSecrets(device)) throw new Error("本地没有这台设备的凭据，需要重新配对");
+    if (!getDeviceSecrets(device)) throw new Error(tr("本地没有这台设备的凭据，需要重新配对"));
     await ensureVault();
   } else if (needsUnlock()) {
     await ensureVault();
   }
   const found = getDeviceSecrets(device);
-  if (!found) throw new Error("本地没有这台设备的凭据，需要重新配对");
+  if (!found) throw new Error(tr("本地没有这台设备的凭据，需要重新配对"));
   return found;
 }
 
@@ -1098,8 +1159,8 @@ async function ensureSecrets(device: DeviceMeta): Promise<DeviceSecrets> {
 async function ensureVault(): Promise<void> {
   if (!hasVault()) {
     const created = await passwordDialog({
-      title: "设置凭据密码",
-      hint: "设备私钥会用这个密码加密后保存在本机，密码不会离开浏览器。忘记密码只能重新配对。",
+      title: tr("设置凭据密码"),
+      hint: tr("设备私钥会用这个密码加密后保存在本机，密码不会离开浏览器。忘记密码只能重新配对。"),
       confirm: true,
       submit: async (password) => {
         try {
@@ -1110,19 +1171,19 @@ async function ensureVault(): Promise<void> {
         }
       },
     });
-    if (created === null) throw new LockedError("未设置密码，操作已取消");
+    if (created === null) throw new LockedError(tr("未设置密码，操作已取消"));
     // 另一个标签页抢先设好了口令：接着走解锁流程，而不是覆盖那份存储。
     if (needsUnlock()) return ensureVault();
     return;
   }
   if (!needsUnlock()) return;
   const password = await passwordDialog({
-    title: "解锁设备凭据",
-    hint: "设备私钥已加密保存在本机。输入密码后 30 分钟内不需要再次输入。",
+    title: tr("解锁设备凭据"),
+    hint: tr("设备私钥已加密保存在本机。输入密码后 30 分钟内不需要再次输入。"),
     submit: unlock,
     // 密码不可找回，唯一出路是清空本机凭据后重新配对，所以给一个显式出口。
     forgot: async () => {
-      if (!window.confirm("清除本机保存的所有设备凭据？之后需要重新配对。")) return false;
+      if (!window.confirm(tr("清除本机保存的所有设备凭据？之后需要重新配对。"))) return false;
       await resetCredentials();
       return true;
     },
@@ -1144,12 +1205,12 @@ function passwordDialog(options: {
       attrs: {
         type: "password",
         autocomplete: options.confirm ? "new-password" : "current-password",
-        placeholder: "密码",
+        placeholder: tr("密码"),
       },
     }) as HTMLInputElement;
     const again = el("input", {
       className: "input",
-      attrs: { type: "password", autocomplete: "new-password", placeholder: "再输入一次" },
+      attrs: { type: "password", autocomplete: "new-password", placeholder: tr("再输入一次") },
     }) as HTMLInputElement;
     const error = el("p", { className: "notice error hidden" });
     const mask = el("div", { className: "sheet-mask" });
@@ -1163,10 +1224,10 @@ function passwordDialog(options: {
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === "Escape") finish(null);
     };
-    const submit = button("继续", () => {
+    const submit = button(tr("继续"), () => {
       void run();
     }, "btn primary");
-    const cancel = button("取消", () => finish(null), "btn secondary");
+    const cancel = button(tr("取消"), () => finish(null), "btn secondary");
     const fail = (message: string): void => {
       error.textContent = message;
       error.classList.remove("hidden");
@@ -1176,8 +1237,8 @@ function passwordDialog(options: {
     const run = async (): Promise<void> => {
       if (busy) return;
       const value = input.value;
-      if (value.length < 8) return fail("密码至少 8 位");
-      if (options.confirm && again.value !== value) return fail("两次输入的密码不一致");
+      if (value.length < 8) return fail(tr("密码至少 8 位"));
+      if (options.confirm && again.value !== value) return fail(tr("两次输入的密码不一致"));
       busy = true;
       submit.disabled = true;
       try {
@@ -1198,15 +1259,15 @@ function passwordDialog(options: {
       if (event.target === mask) finish(null);
     });
 
-    const fields = [el("label", { className: "field" }, [el("span", { text: "密码" }), input])];
+    const fields = [el("label", { className: "field" }, [el("span", { text: tr("密码") }), input])];
     if (options.confirm) {
-      fields.push(el("label", { className: "field" }, [el("span", { text: "确认密码" }), again]));
+      fields.push(el("label", { className: "field" }, [el("span", { text: tr("确认密码") }), again]));
     }
     const leading = el("div", {});
     const forgot = options.forgot;
     if (forgot) {
       leading.append(
-        button("忘记密码", () => {
+        button(tr("忘记密码"), () => {
           if (busy) return;
           busy = true;
           void (async () => {
@@ -1279,9 +1340,9 @@ async function setSessionPinned(session: SessionSummary, pinned: boolean): Promi
     const result = await call<SessionGetResult>("session.pin", { sessionId: session.sessionId, pinned });
     patchSession(result.session);
     await renderRoute();
-    flashNotice(pinned ? "已置顶，排在列表最前面" : "已取消置顶");
+    flashNotice(pinned ? tr("已置顶，排在列表最前面") : tr("已取消置顶"));
   } catch (error) {
-    flashNotice(`置顶失败：${messageOf(error)}`);
+    flashNotice(tr(`置顶失败：{0}`, messageOf(error)));
   }
 }
 
@@ -1295,31 +1356,31 @@ async function setSessionArchived(session: SessionSummary, archived: boolean): P
     const route = parseRoute();
     if (archived && route.level === "chat" && route.sessionId === session.sessionId) {
       navigate({ level: "sessions", appId: session.appId, projectId: session.projectId });
-      flashNotice("已归档，可在「显示已归档」里找回");
+      flashNotice(tr("已归档，可在「显示已归档」里找回"));
       return;
     }
     await renderRoute();
-    flashNotice(archived ? "已归档，可在「显示已归档」里找回" : "已取消归档");
+    flashNotice(archived ? tr("已归档，可在「显示已归档」里找回") : tr("已取消归档"));
   } catch (error) {
-    flashNotice(`归档失败：${messageOf(error)}`);
+    flashNotice(tr(`归档失败：{0}`, messageOf(error)));
   }
 }
 
 async function deleteHostedSession(session: SessionSummary): Promise<void> {
-  if (!window.confirm(`删除「${session.title}」？进程会停掉，Bridge 这边的聊天记录也会删掉，无法恢复。`)) return;
+  if (!window.confirm(tr(`删除「{0}」？进程会停掉，Bridge 这边的聊天记录也会删掉，无法恢复。`, session.title))) return;
   try {
     await call("hosted.delete", { sessionId: session.sessionId });
     dropSession(session.sessionId);
     const route = parseRoute();
     if (route.level === "chat" && route.sessionId === session.sessionId) {
       navigate({ level: "sessions", appId: session.appId, projectId: session.projectId });
-      flashNotice("已删除");
+      flashNotice(tr("已删除"));
       return;
     }
     await renderRoute();
-    flashNotice("已删除");
+    flashNotice(tr("已删除"));
   } catch (error) {
-    flashNotice(`删除失败：${messageOf(error)}`);
+    flashNotice(tr(`删除失败：{0}`, messageOf(error)));
   }
 }
 
@@ -1330,7 +1391,7 @@ async function deleteHostedSession(session: SessionSummary): Promise<void> {
 function renameSessionSheet(summary: SessionSummary, onSaved: (session: SessionSummary) => void): void {
   const input = el("input", {
     className: "input",
-    attrs: { type: "text", maxlength: "60", placeholder: "会话名称" },
+    attrs: { type: "text", maxlength: "60", placeholder: tr("会话名称") },
   }) as HTMLInputElement;
   input.value = summary.title;
   const error = el("p", { className: "notice error hidden" });
@@ -1365,15 +1426,15 @@ function renameSessionSheet(summary: SessionSummary, onSaved: (session: SessionS
       fail(messageOf(failure));
     }
   };
-  const save = button("保存", () => {
+  const save = button(tr("保存"), () => {
     void submit(input.value.trim() || null);
   }, "btn primary");
   const reset = summary.originalTitle
-    ? button("恢复原名", () => {
+    ? button(tr("恢复原名"), () => {
         void submit(null);
       }, "btn ghost")
     : null;
-  const cancel = button("取消", finish, "btn secondary");
+  const cancel = button(tr("取消"), finish, "btn secondary");
 
   trackIme(input);
   input.addEventListener("keydown", (event) => {
@@ -1387,12 +1448,12 @@ function renameSessionSheet(summary: SessionSummary, onSaved: (session: SessionS
   mask.append(
     el(
       "aside",
-      { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": "重命名会话" } },
+      { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("重命名会话") } },
       [
-        el("header", { className: "sheet-head" }, [el("h2", { className: "sheet-title", text: "重命名会话" })]),
-        el("label", { className: "field" }, [el("span", { text: "显示名称" }), input]),
+        el("header", { className: "sheet-head" }, [el("h2", { className: "sheet-title", text: tr("重命名会话") })]),
+        el("label", { className: "field" }, [el("span", { text: tr("显示名称") }), input]),
         ...(summary.originalTitle
-          ? [el("p", { className: "sheet-note", text: `原名：${summary.originalTitle}` })]
+          ? [el("p", { className: "sheet-note", text: tr(`原名：{0}`, summary.originalTitle) })]
           : []),
         error,
         el("footer", { className: "sheet-foot" }, [
@@ -1415,17 +1476,17 @@ function showLocked(device: DeviceMeta): void {
   chatResumeKey = null;
   app.replaceChildren(
     el("main", { className: "page narrow" }, [
-      el("p", { className: "eyebrow", text: "凭据已锁定" }),
-      el("h1", { className: "display", text: "需要解锁" }),
+      el("p", { className: "eyebrow", text: tr("凭据已锁定") }),
+      el("h1", { className: "display", text: tr("需要解锁") }),
       el("p", {
         className: "lede",
-        text: "设备私钥已加密保存在本机，超过 30 分钟没有使用就需要重新输入密码。",
+        text: tr("设备私钥已加密保存在本机，超过 30 分钟没有使用就需要重新输入密码。"),
       }),
       el("div", { className: "actions" }, [
-        button("输入密码", () => {
+        button(tr("输入密码"), () => {
           void connectAndShow(device);
         }, "btn primary"),
-        button("返回", () => showHome(), "btn secondary"),
+        button(tr("返回"), () => showHome(), "btn secondary"),
       ]),
     ]),
   );
@@ -1436,13 +1497,13 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   const soft = connected !== null;
   if (soft) {
     progressStart();
-    setReconnecting(attempt <= 1 ? "连接已断开，正在重连…" : `第 ${attempt} 次重连中…`);
+    setReconnecting(attempt <= 1 ? tr("连接已断开，正在重连…") : tr(`第 {0} 次重连中…`, attempt));
   } else {
     app.replaceChildren(
       el("main", { className: "page narrow" }, [
-        el("p", { className: "eyebrow", text: "连接" }),
-        el("h1", { className: "display", text: attempt === 0 ? "正在连接" : "正在重连" }),
-        el("p", { className: "lede", text: "正在与 Mac 建立加密通道…" }),
+        el("p", { className: "eyebrow", text: tr("连接") }),
+        el("h1", { className: "display", text: attempt === 0 ? tr("正在连接") : tr("正在重连") }),
+        el("p", { className: "lede", text: tr("正在与 Mac 建立加密通道…") }),
       ]),
     );
   }
@@ -1460,7 +1521,7 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
     }
     if (attempt >= 5) {
       progressDone();
-      setReconnecting("重连失败，30 秒后继续重试…");
+      setReconnecting(tr("重连失败，30 秒后继续重试…"));
       throw error;
     }
     scheduleRetry(device, attempt + 1, messageOf(error));
@@ -1478,7 +1539,7 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   const infoResponse = await opened.client.request("host.info");
   const devicesResponse = await opened.client.request("device.list");
   if (!infoResponse.ok || !devicesResponse.ok) {
-    throw new Error(infoResponse.error?.message ?? devicesResponse.error?.message ?? "读取主机信息失败");
+    throw new Error(infoResponse.error?.message ?? devicesResponse.error?.message ?? tr("读取主机信息失败"));
   }
   connected = {
     device,
@@ -1501,7 +1562,7 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
       showHome();
       return;
     }
-    setReconnecting("连接已断开，正在重连…");
+    setReconnecting(tr("连接已断开，正在重连…"));
     scheduleRetry(device, 1);
   });
 }
@@ -1510,14 +1571,14 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
   const gen = generation;
   const delay = Math.min(1000 * 2 ** (attempt - 1), 30_000);
   if (connected) {
-    setReconnecting(message ?? `连接已断开，${Math.round(delay / 1000)} 秒后重连…`);
+    setReconnecting(message ?? tr(`连接已断开，{0} 秒后重连…`, Math.round(delay / 1000)));
   } else {
     progressDone();
     app.replaceChildren(
       el("main", { className: "page narrow" }, [
-        el("p", { className: "eyebrow", text: "连接" }),
-        el("h1", { className: "display", text: "连接已断开" }),
-        el("p", { className: "lede", text: message ?? `加密通道中断，${Math.round(delay / 1000)} 秒后重连…` }),
+        el("p", { className: "eyebrow", text: tr("连接") }),
+        el("h1", { className: "display", text: tr("连接已断开") }),
+        el("p", { className: "lede", text: message ?? tr(`加密通道中断，{0} 秒后重连…`, Math.round(delay / 1000)) }),
       ]),
     );
   }
@@ -1532,9 +1593,9 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
 }
 
 async function call<T>(method: Method, params?: unknown, timeoutMs = 20_000): Promise<T> {
-  if (!active) throw new Error("连接已断开");
+  if (!active) throw new Error(tr("连接已断开"));
   const response = await active.request(method, params, timeoutMs);
-  if (!response.ok) throw new Error(response.error?.message ?? `${method} 失败`);
+  if (!response.ok) throw new Error(response.error?.message ?? tr(`{0} 失败`, method));
   return response.result as T;
 }
 
@@ -1546,7 +1607,7 @@ function blobBase64(blob: Blob): Promise<string> {
       const comma = text.indexOf(",");
       resolve(comma >= 0 ? text.slice(comma + 1) : "");
     };
-    reader.onerror = () => reject(reader.error ?? new Error("读取文件失败"));
+    reader.onerror = () => reject(reader.error ?? new Error(tr("读取文件失败")));
     reader.readAsDataURL(blob);
   });
 }
@@ -1658,31 +1719,31 @@ interface Crumb {
 
 function crumbsFor(route: Route): Crumb[] {
   const data = snapshot;
-  const crumbs: Crumb[] = [{ label: "客户端", href: hashFor({ level: "clients" }) }];
-  if (route.level === "devices") return [{ label: "已授权设备" }];
+  const crumbs: Crumb[] = [{ label: tr("客户端"), href: hashFor({ level: "clients" }) }];
+  if (route.level === "devices") return [{ label: tr("已授权设备") }];
   if (route.level === "clients") return [];
   const app = data?.apps.find((item) => item.appId === route.appId);
   crumbs.push(
     route.level === "projects"
-      ? { label: app?.name ?? "客户端" }
-      : { label: app?.name ?? "客户端", href: hashFor({ level: "projects", appId: route.appId }) },
+      ? { label: app?.name ?? tr("客户端") }
+      : { label: app?.name ?? tr("客户端"), href: hashFor({ level: "projects", appId: route.appId }) },
   );
   if (route.level === "sessions" || route.level === "chat") {
     const project = data?.projects.find((item) => item.projectId === route.projectId);
     crumbs.push(
       route.level === "sessions"
-        ? { label: project?.name ?? "工程" }
-        : { label: project?.name ?? "工程", href: hashFor({ level: "sessions", appId: route.appId, projectId: route.projectId }) },
+        ? { label: project?.name ?? tr("工程") }
+        : { label: project?.name ?? tr("工程"), href: hashFor({ level: "sessions", appId: route.appId, projectId: route.projectId }) },
     );
   }
   if (route.level === "chat") {
     const session = data?.sessions.find((item) => item.sessionId === route.sessionId);
     crumbs.push(
       route.taskId
-        ? { label: session?.title ?? "会话", href: hashFor({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: route.sessionId }) }
-        : { label: session?.title ?? "会话" },
+        ? { label: session?.title ?? tr("会话"), href: hashFor({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: route.sessionId }) }
+        : { label: session?.title ?? tr("会话") },
     );
-    if (route.taskId) crumbs.push({ label: "后台任务" });
+    if (route.taskId) crumbs.push({ label: tr("后台任务") });
   }
   return crumbs;
 }
@@ -1760,7 +1821,7 @@ function agentLabel(kind: string): string {
   if (kind === "antigravity" || kind === "antigravity-desktop") return "Antigravity";
   if (kind === "dsh") return "DeepSeek";
   if (kind === "pi") return "pi";
-  if (kind === "hosted") return "托管";
+  if (kind === "hosted") return tr("托管");
   return "Claude";
 }
 
@@ -1782,13 +1843,13 @@ function dockStatePills(session: SessionSummary): HTMLElement[] {
   const pills: HTMLElement[] = [];
   if (session.busy) {
     pills.push(
-      el("span", { className: "pill tiny busy" }, [el("span", { className: "spinner" }), document.createTextNode("运行中")]),
+      el("span", { className: "pill tiny busy" }, [el("span", { className: "spinner" }), document.createTextNode(tr("运行中"))]),
     );
   } else if (session.needsDecision) {
-    pills.push(el("span", { className: "pill tiny warn", text: "待回答" }));
+    pills.push(el("span", { className: "pill tiny warn", text: tr("待回答") }));
   }
   if (unreadAt(session.sessionId) !== undefined) {
-    pills.push(el("span", { className: "pill tiny unread", text: "未读" }));
+    pills.push(el("span", { className: "pill tiny unread", text: tr("未读") }));
   }
   return pills;
 }
@@ -1821,7 +1882,7 @@ function dockTree(route: Route): HTMLElement {
   const wrap = el("div", { className: "dock-list" });
   const data = snapshot;
   if (!data) {
-    wrap.append(el("p", { className: "hint", text: "正在读取会话…" }));
+    wrap.append(el("p", { className: "hint", text: tr("正在读取会话…") }));
     return wrap;
   }
   const active = dockActive(route);
@@ -1858,7 +1919,7 @@ function dockTree(route: Route): HTMLElement {
       const rest = sessions.length - DOCK_SESSIONS_PER_PROJECT;
       if (rest > 0) {
         projectNode.append(
-          button(`还有 ${rest} 条…`, () => {
+          button(tr(`还有 {0} 条…`, rest), () => {
             navigate({ level: "sessions", appId: project.appId, projectId: project.projectId });
           }, "dock-more"),
         );
@@ -1868,7 +1929,7 @@ function dockTree(route: Route): HTMLElement {
     wrap.append(appNode);
     rendered += 1;
   }
-  if (rendered === 0) wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
+  if (rendered === 0) wrap.append(el("p", { className: "hint", text: tr("还没有会话。") }));
   return wrap;
 }
 
@@ -1877,13 +1938,13 @@ function dockHistory(): HTMLElement {
   const wrap = el("div", { className: "dock-list" });
   const data = snapshot;
   if (!data) {
-    wrap.append(el("p", { className: "hint", text: "正在读取会话…" }));
+    wrap.append(el("p", { className: "hint", text: tr("正在读取会话…") }));
     return wrap;
   }
   const active = dockActive(parseRoute());
   const sessions = visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
   if (sessions.length === 0) {
-    wrap.append(el("p", { className: "hint", text: "还没有会话。" }));
+    wrap.append(el("p", { className: "hint", text: tr("还没有会话。") }));
     return wrap;
   }
   for (const session of sessions) {
@@ -1929,8 +1990,8 @@ let composerRef: HTMLTextAreaElement | null = null;
 
 function todoKindLabel(kind: TodoKind): string {
   if (kind === "bug") return "bug";
-  if (kind === "feature") return "功能";
-  return "其他";
+  if (kind === "feature") return tr("功能");
+  return tr("其他");
 }
 
 /** 待办写进输入框的文案：分类放在前面，跟手写的时候一样的习惯。 */
@@ -1943,7 +2004,7 @@ function todoPrompt(item: TodoItem): string {
 function fillComposer(text: string): boolean {
   const input = composerRef;
   if (!input || !input.isConnected) {
-    flashNotice("先打开一个会话，再把待办填进输入框");
+    flashNotice(tr("先打开一个会话，再把待办填进输入框"));
     return false;
   }
   const current = input.value.trimEnd();
@@ -1958,8 +2019,8 @@ function fillComposer(text: string): boolean {
 /** 左侧 dock 的待办：未完成的在上面，最近完成的在下面。 */
 function dockTodos(): HTMLElement {
   const wrap = el("div", { className: "dock-todos" });
-  const select = el("select", { className: "todo-kind", attrs: { "aria-label": "待办分类" } });
-  for (const [value, label] of [["feature", "功能"], ["bug", "bug"], ["other", "其他"]] as const) {
+  const select = el("select", { className: "todo-kind", attrs: { "aria-label": tr("待办分类") } });
+  for (const [value, label] of [["feature", tr("功能")], ["bug", "bug"], ["other", tr("其他")]] as const) {
     const option = el("option", { text: label, attrs: { value } });
     if (todoDraft.kind === value) option.selected = true;
     select.append(option);
@@ -1970,7 +2031,7 @@ function dockTodos(): HTMLElement {
 
   const input = el("input", {
     className: "todo-input",
-    attrs: { type: "text", placeholder: "记一条待办…", maxlength: "500" },
+    attrs: { type: "text", placeholder: tr("记一条待办…"), maxlength: "500" },
   });
   input.value = todoDraft.title;
   input.addEventListener("input", () => {
@@ -1981,14 +2042,14 @@ function dockTodos(): HTMLElement {
   const list = el("div", { className: "todo-list" });
   const addButton = button("", () => void add(), "btn primary todo-add");
   addButton.append(icon("plus"));
-  addButton.setAttribute("aria-label", "添加待办");
-  addButton.setAttribute("title", "添加待办");
+  addButton.setAttribute("aria-label", tr("添加待办"));
+  addButton.setAttribute("title", tr("添加待办"));
 
   const refresh = async (): Promise<void> => {
     try {
       const result = await call<TodoListResult>("todo.list");
       if (!result || !Array.isArray(result.open) || !Array.isArray(result.done)) {
-        throw new Error("这个 Bridge 还不支持待办，需要更新 App");
+        throw new Error(tr("这个 Bridge 还不支持待办，需要更新 App"));
       }
       todoCache = result;
       todoError = "";
@@ -2037,7 +2098,7 @@ function dockTodos(): HTMLElement {
   };
 
   const remove = async (item: TodoItem): Promise<void> => {
-    if (!window.confirm(`删除待办「${item.title}」？`)) return;
+    if (!window.confirm(tr(`删除待办「{0}」？`, item.title))) return;
     try {
       await call("todo.remove", { todoId: item.todoId });
       await refresh();
@@ -2056,7 +2117,7 @@ function dockTodos(): HTMLElement {
   const row = (item: TodoItem): HTMLElement => {
     const done = item.checkedAt !== null;
     if (item.todoId === editingTodoId) return editRow(item, done);
-    const main = el("button", { className: "todo-main", attrs: { type: "button", title: "填到输入框" } }, [
+    const main = el("button", { className: "todo-main", attrs: { type: "button", title: tr("填到输入框") } }, [
       el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
       el("span", { className: "todo-title", text: item.title }),
     ]);
@@ -2071,17 +2132,17 @@ function dockTodos(): HTMLElement {
       return node;
     };
     const actions = el("div", { className: "todo-actions" }, [
-      ...(done ? [action("refresh", "标记未完成", () => void setChecked(item, false))] : []),
-      action("pencil", "编辑", () => startEdit(item)),
-      action("trash", "删除待办", () => void remove(item)),
+      ...(done ? [action("refresh", tr("标记未完成"), () => void setChecked(item, false))] : []),
+      action("pencil", tr("编辑"), () => startEdit(item)),
+      action("trash", tr("删除待办"), () => void remove(item)),
     ]);
     return el("div", { className: `todo-item${done ? " is-done" : ""}` }, [main, actions]);
   };
 
   /** 就地编辑：标题、分类都能改，改完才发 RPC。 */
   const editRow = (item: TodoItem, done: boolean): HTMLElement => {
-    const select = el("select", { className: "todo-kind", attrs: { "aria-label": "待办分类" } });
-    for (const [value, label] of [["feature", "功能"], ["bug", "bug"], ["other", "其他"]] as const) {
+    const select = el("select", { className: "todo-kind", attrs: { "aria-label": tr("待办分类") } });
+    for (const [value, label] of [["feature", tr("功能")], ["bug", "bug"], ["other", tr("其他")]] as const) {
       const option = el("option", { text: label, attrs: { value } });
       if (todoEditDraft.kind === value) option.selected = true;
       select.append(option);
@@ -2092,7 +2153,7 @@ function dockTodos(): HTMLElement {
 
     const input = el("input", {
       className: "todo-edit-input",
-      attrs: { type: "text", maxlength: "500", "aria-label": "待办内容" },
+      attrs: { type: "text", maxlength: "500", "aria-label": tr("待办内容") },
     });
     input.value = todoEditDraft.title;
     input.addEventListener("input", () => {
@@ -2135,12 +2196,12 @@ function dockTodos(): HTMLElement {
 
     const saveButton = button("", () => void save(), "btn primary todo-save");
     saveButton.append(icon("check"));
-    saveButton.setAttribute("aria-label", "保存");
-    saveButton.setAttribute("title", "保存");
+    saveButton.setAttribute("aria-label", tr("保存"));
+    saveButton.setAttribute("title", tr("保存"));
     const cancelButton = button("", cancel, "btn ghost todo-save");
     cancelButton.append(icon("close"));
-    cancelButton.setAttribute("aria-label", "取消");
-    cancelButton.setAttribute("title", "取消");
+    cancelButton.setAttribute("aria-label", tr("取消"));
+    cancelButton.setAttribute("title", tr("取消"));
 
     const form = el("div", { className: `todo-edit${done ? " is-done" : ""}` }, [
       select,
@@ -2167,18 +2228,18 @@ function dockTodos(): HTMLElement {
     if (todoError) parts.push(el("p", { className: "hint warn", text: todoError }));
     const data = todoCache;
     if (!data) {
-      if (!todoError) parts.push(el("p", { className: "hint", text: "正在读取待办…" }));
+      if (!todoError) parts.push(el("p", { className: "hint", text: tr("正在读取待办…") }));
     } else {
       if (data.open.length === 0) {
-        parts.push(el("p", { className: "hint", text: "没有待办。" }));
+        parts.push(el("p", { className: "hint", text: tr("没有待办。") }));
       } else {
         parts.push(el("div", { className: "todo-group" }, data.open.map(row)));
       }
       if (data.done.length > 0) {
-        parts.push(el("p", { className: "todo-heading", text: "最近完成" }));
+        parts.push(el("p", { className: "todo-heading", text: tr("最近完成") }));
         parts.push(el("div", { className: "todo-group" }, data.done.map(row)));
         const hidden = data.doneTotal - data.done.length;
-        if (hidden > 0) parts.push(el("p", { className: "hint todo-hidden", text: `还有 ${hidden} 条已完成` }));
+        if (hidden > 0) parts.push(el("p", { className: "hint todo-hidden", text: tr(`还有 {0} 条已完成`, hidden) }));
       }
     }
     list.replaceChildren(...parts);
@@ -2193,14 +2254,21 @@ function dockTodos(): HTMLElement {
 
   paintList();
   void refresh();
-  wrap.append(el("div", { className: "todo-form" }, [select, input, addButton]), list);
+  wrap.append(
+    el("p", {
+      className: "hint todo-note",
+      text: tr("待办存在 Bridge 自己的数据库里，换浏览器、清缓存都不会丢；换一台主机就是另一个库。"),
+    }),
+    el("div", { className: "todo-form" }, [select, input, addButton]),
+    list,
+  );
   return wrap;
 }
 
 /** 桌面宽屏左侧的 dock：结构树、历史与待办三个 tab，选中的 tab 记在 localStorage。 */
 function dockSidebar(route: Route): HTMLElement {
   let tab = readDockTab();
-  const nav = el("nav", { className: "dock", attrs: { "aria-label": "会话导航" } });
+  const nav = el("nav", { className: "dock", attrs: { "aria-label": tr("会话导航") } });
   const tabs = el("div", { className: "dock-tabs", attrs: { role: "tablist" } });
   const body = el("div", { className: "dock-body" });
   const makeTab = (id: DockTab, label: string): HTMLButtonElement => {
@@ -2213,9 +2281,9 @@ function dockSidebar(route: Route): HTMLElement {
     });
     return node;
   };
-  const treeTab = makeTab("tree", "结构");
-  const historyTab = makeTab("history", "历史");
-  const todoTab = makeTab("todo", "待办");
+  const treeTab = makeTab("tree", tr("结构"));
+  const historyTab = makeTab("history", tr("历史"));
+  const todoTab = makeTab("todo", tr("待办"));
   tabs.append(treeTab, historyTab, todoTab);
   const paint = (): void => {
     for (const [id, node] of [
@@ -2337,11 +2405,11 @@ function rememberSession(summary: SessionSummary): void {
 
 function recentTime(at: number): string {
   const minutes = Math.floor((Date.now() - at) / 60_000);
-  if (minutes < 1) return "刚刚";
-  if (minutes < 60) return `${minutes} 分钟前`;
+  if (minutes < 1) return tr("刚刚");
+  if (minutes < 60) return tr(`{0} 分钟前`, minutes);
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时前`;
-  return `${Math.floor(hours / 24)} 天前`;
+  if (hours < 24) return tr(`{0} 小时前`, hours);
+  return tr(`{0} 天前`, Math.floor(hours / 24));
 }
 
 function recentProjectName(projectId: string): string {
@@ -2361,7 +2429,7 @@ function recentSessionsButton(): HTMLElement | null {
       type: "button",
       "aria-haspopup": "menu",
       "aria-expanded": "false",
-      "aria-label": "最近访问的会话",
+      "aria-label": tr("最近访问的会话"),
     },
   });
   const titles = sessions.slice(0, 6).map((item) => item.title);
@@ -2404,10 +2472,10 @@ function recentSessionsButton(): HTMLElement | null {
     menu.replaceChildren();
     const items = readRecentSessions();
     if (items.length === 0) {
-      menu.append(el("div", { className: "recent-empty", text: "还没有访问记录" }));
+      menu.append(el("div", { className: "recent-empty", text: tr("还没有访问记录") }));
       return;
     }
-    menu.append(el("div", { className: "recent-menu-title", text: "最近访问" }));
+    menu.append(el("div", { className: "recent-menu-title", text: tr("最近访问") }));
     for (const item of items.slice(0, 12)) {
       const app = snapshot?.apps.find((candidate) => candidate.appId === item.appId);
       const meta = [app ? shortAgentName(app) : item.appId, recentProjectName(item.projectId), recentTime(item.at)];
@@ -2461,7 +2529,7 @@ function recentSessionsButton(): HTMLElement | null {
 function previousSessionButton(): HTMLElement | null {
   const prev = previousTrailEntry();
   if (!prev) return null;
-  const label = prev.step === "back" ? "上一个对话" : "回到刚才";
+  const label = prev.step === "back" ? tr("上一个对话") : tr("回到刚才");
   const node = button(
     "",
     () => {
@@ -2489,7 +2557,7 @@ function agentSwitcher(route: Route): HTMLElement | null {
       type: "button",
       "aria-haspopup": "menu",
       "aria-expanded": "false",
-      "aria-label": "切换 Agent",
+      "aria-label": tr("切换 Agent"),
     },
   });
   trigger.append(
@@ -2540,7 +2608,7 @@ function agentSwitcher(route: Route): HTMLElement | null {
     entry.setAttribute("role", "menuitem");
     entry.append(
       el("span", { className: "agent-menu-name", text: item.name }),
-      el("span", { className: "agent-menu-state", text: active ? "当前" : statusLabel(item.status) }),
+      el("span", { className: "agent-menu-state", text: active ? tr("当前") : statusLabel(item.status) }),
     );
     menu.append(entry);
   }
@@ -2563,7 +2631,7 @@ function craftsteadLanding(paired: boolean): string {
 function renderTopbar(crumbs: Crumb[]): HTMLElement {
   // 预览部署在预览域上，回链也停在预览官网，别把试用的人送去生产。
   const landing = craftsteadLanding(true);
-  const nav = el("nav", { className: "crumbs", attrs: { "aria-label": "位置" } });
+  const nav = el("nav", { className: "crumbs", attrs: { "aria-label": tr("位置") } });
   crumbs.forEach((crumb, index) => {
     if (index > 0) nav.append(el("span", { className: "crumb-sep", text: "/" }));
     if (crumb.href && index < crumbs.length - 1) {
@@ -2600,8 +2668,9 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
         el("span", { text: connected.info.name }),
         el("span", { className: "conn-version", text: `v${connected.info.version}` }),
       ]),
-      button("设备", () => navigate({ level: "devices" }), "btn ghost small"),
-      button("断开", showHome, "btn ghost small"),
+      languageButton(),
+      button(tr("设备"), () => navigate({ level: "devices" }), "btn ghost small"),
+      button(tr("断开"), showHome, "btn ghost small"),
     );
     right.append(topbarOverflow(secondary));
   }
@@ -2639,7 +2708,7 @@ function topbarOverflow(panel: HTMLElement): HTMLElement {
   toggle.append(icon("more"));
   toggle.setAttribute("aria-haspopup", "true");
   toggle.setAttribute("aria-expanded", "false");
-  toggle.setAttribute("aria-label", "更多操作");
+  toggle.setAttribute("aria-label", tr("更多操作"));
 
   const wrap = el("div", { className: "topbar-more-wrap" }, [toggle, panel]);
 
@@ -2663,6 +2732,16 @@ function topbarOverflow(panel: HTMLElement): HTMLElement {
 }
 
 /**
+ * 中英切换：按钮上直接写目标语言（当前中文就显示 English），点了整页重载。
+ */
+function languageButton(): HTMLButtonElement {
+  const node = button(langSwitchLabel(), () => toggleLang(), "btn ghost small lang-btn");
+  node.setAttribute("aria-label", tr("切换语言"));
+  node.title = tr("切换语言");
+  return node;
+}
+
+/**
  * Completion notifications need the browser's permission, which only a user gesture can
  * request in Safari; the topbar button is that gesture, and it also switches them off.
  */
@@ -2672,14 +2751,14 @@ function notifyButton(): HTMLButtonElement | null {
   const denied = notificationPermission() === "denied";
   const enabled = notificationsOn();
   const node = button("", () => void toggleNotifications(), `btn ghost small notify-btn${enabled ? " is-on" : ""}`);
-  node.append(icon(enabled ? "bell" : "bellOff"), el("span", { text: enabled ? "提醒已开" : "开启提醒" }));
+  node.append(icon(enabled ? "bell" : "bellOff"), el("span", { text: enabled ? tr("提醒已开") : tr("开启提醒") }));
   node.title = !notificationsSupported()
     ? IOS_HINT
     : denied
-      ? "通知已被浏览器禁止，请在站点设置中允许通知"
+      ? tr("通知已被浏览器禁止，请在站点设置中允许通知")
       : enabled
-        ? "关闭完成与待回答提醒"
-        : "开启浏览器提醒：对话完成或等你回答时推送到通知中心";
+        ? tr("关闭完成与待回答提醒")
+        : tr("开启浏览器提醒：对话完成或等你回答时推送到通知中心");
   return node;
 }
 
@@ -2699,7 +2778,7 @@ async function toggleNotifications(): Promise<void> {
     return;
   }
   if (notificationPermission() === "denied") {
-    window.alert(`通知已被浏览器禁止。请在浏览器的站点设置中允许通知，然后刷新页面。\n\n${IOS_HINT}`);
+    window.alert(tr(`通知已被浏览器禁止。请在浏览器的站点设置中允许通知，然后刷新页面。\n\n{0}`, IOS_HINT));
     return;
   }
   if (notificationPermission() !== "granted") {
@@ -2724,7 +2803,7 @@ async function toggleNotifications(): Promise<void> {
       problem = messageOf(error);
     }
   } else {
-    problem = "这个浏览器只能在页面打开时提醒";
+    problem = tr("这个浏览器只能在页面打开时提醒");
   }
   if (problem) window.alert(`${problem}。\n\n${IOS_HINT}`);
   void renderRoute(true);
@@ -2761,7 +2840,7 @@ async function renderRoute(soft = false): Promise<void> {
     } catch (error) {
       progressDone();
       if (token !== renderToken) return;
-      renderShell(errorView("读取失败", messageOf(error)), crumbsFor(route));
+      renderShell(errorView(tr("读取失败"), messageOf(error)), crumbsFor(route));
       return;
     }
     progressDone();
@@ -2884,11 +2963,11 @@ function renderClients(): void {
   const route: Route = { level: "clients" };
   const totalProjects = data.projects.length;
   const totalSessions = data.sessions.length;
-  document.title = "客户端 · Agent Bridge";
+  document.title = tr("客户端 · Agent Bridge");
 
   const list = el("ul", { className: "list" });
   if (data.apps.length === 0) {
-    list.append(el("li", {}, [emptyState("没有可用的客户端", "Bridge 没有发现任何桌面适配器。")]));
+    list.append(el("li", {}, [emptyState(tr("没有可用的客户端"), tr("Bridge 没有发现任何桌面适配器。"))]));
   }
   for (const item of data.apps) {
     const projects = data.projects.filter((project) => project.appId === item.appId);
@@ -2900,7 +2979,7 @@ function renderClients(): void {
         el("strong", { className: "row-title", text: item.name }),
         el("span", {
           className: "meta",
-          text: `${projects.length} 个工程 · ${sessions.length} 个会话${unread > 0 ? ` · ${unread} 未读` : ""} · 枚举${completenessLabel(item.capabilities.enumerate)} · 读取${completenessLabel(item.capabilities.read)} · ${item.capabilities.send ? "可发送" : "不可发送"}`,
+          text: tr(`{0} 个工程 · {1} 个会话{2} · 枚举{3} · 读取{4} · {5}`, projects.length, sessions.length, unread > 0 ? tr(` · {0} 未读`, unread) : "", completenessLabel(item.capabilities.enumerate), completenessLabel(item.capabilities.read), item.capabilities.send ? tr("可发送") : tr("不可发送")),
         }),
         ...(item.capabilities.reason || item.capabilities.sendDetail
           ? [el("span", { className: "meta dim", text: item.capabilities.reason ?? item.capabilities.sendDetail ?? "" })]
@@ -2915,10 +2994,10 @@ function renderClients(): void {
 
   renderShell(
     el("main", { className: "main" }, [
-      viewHead("客户端", "已连接的客户端", `${data.apps.length} 个客户端 · ${totalProjects} 个工程 · ${totalSessions} 个会话`),
+      viewHead(tr("客户端"), tr("已连接的客户端"), tr(`{0} 个客户端 · {1} 个工程 · {2} 个会话`, data.apps.length, totalProjects, totalSessions)),
       ...(connected ? [selfDeviceCard()] : []),
       list,
-      button("刷新列表", () => {
+      button(tr("刷新列表"), () => {
         snapshot = null;
         void renderRoute();
       }, "btn ghost"),
@@ -2930,12 +3009,12 @@ function renderClients(): void {
 function renderProjects(route: Route & { level: "projects" }): void {
   const data = snapshot!;
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = `${appInfo?.name ?? "客户端"} · Agent Bridge`;
+  document.title = tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端"));
   const projects = data.projects.filter((project) => project.appId === route.appId);
 
   const list = el("ul", { className: "list" });
   if (projects.length === 0) {
-    list.append(el("li", {}, [emptyState("这个客户端还没有工程", "桌面应用里创建或打开一个工程后，再回来刷新。")]));
+    list.append(el("li", {}, [emptyState(tr("这个客户端还没有工程"), tr("桌面应用里创建或打开一个工程后，再回来刷新。"))]));
   }
   for (const project of projects) {
     const sessions = data.sessions.filter((session) => session.projectId === project.projectId);
@@ -2948,7 +3027,7 @@ function renderProjects(route: Route & { level: "projects" }): void {
       ]),
       el("span", {
         className: "row-count",
-        text: `${sessions.length || project.sessionCount} 个会话${unread > 0 ? ` · ${unread} 未读` : ""}`,
+        text: tr(`{0} 个会话{1}`, sessions.length || project.sessionCount, unread > 0 ? tr(` · {0} 未读`, unread) : ""),
       }),
       icon("chevron", "icon chev"),
     ]);
@@ -2968,17 +3047,17 @@ function renderProjects(route: Route & { level: "projects" }): void {
       el("section", { className: "view-head" }, [
         backButton(() => navigate({ level: "clients" })),
         el("div", { className: "view-head-main" }, [
-          el("p", { className: "eyebrow", text: appInfo?.name ?? "客户端" }),
-          el("h1", { className: "display", text: "工程" }),
+          el("p", { className: "eyebrow", text: appInfo?.name ?? tr("客户端") }),
+          el("h1", { className: "display", text: tr("工程") }),
           el("p", {
             className: "meta",
-            text: `${projects.length} 个工程，按会话数量排列${isHosted ? "；托管目录可在本页添加" : ""}`,
+            text: tr(`{0} 个工程，按会话数量排列{1}`, projects.length, isHosted ? tr("；托管目录可在本页添加") : ""),
           }),
         ]),
         ...(addForm
           ? [
               button(
-                "添加目录",
+                tr("添加目录"),
                 () => {
                   addForm.hidden = !addForm.hidden;
                   if (!addForm.hidden) addForm.querySelector("input")?.focus();
@@ -2988,7 +3067,7 @@ function renderProjects(route: Route & { level: "projects" }): void {
             ]
           : []),
         button(
-          "刷新",
+          tr("刷新"),
           () => {
             snapshot = null;
             void renderRoute();
@@ -3009,18 +3088,18 @@ function hostedAddDirForm(onAdded: () => void): HTMLElement {
     className: "input mono",
     attrs: { type: "text", placeholder: "/Users/you/code/project", spellcheck: "false", autocomplete: "off" },
   });
-  const status = el("p", { className: "hint", text: "填这台 Mac 上已存在的绝对路径，添加后即可从这里新建托管会话。" });
-  const form = el("div", { className: "add-dir" }, [input, button("添加", () => void submitPath(), "btn primary small"), status]);
+  const status = el("p", { className: "hint", text: tr("填这台 Mac 上已存在的绝对路径，添加后即可从这里新建托管会话。") });
+  const form = el("div", { className: "add-dir" }, [input, button(tr("添加"), () => void submitPath(), "btn primary small"), status]);
   form.hidden = true;
   const submitPath = async (): Promise<void> => {
     const path = input.value.trim();
     if (!path) {
       status.classList.add("error");
-      status.textContent = "先填目录路径。";
+      status.textContent = tr("先填目录路径。");
       return;
     }
     status.classList.remove("error");
-    status.textContent = "正在添加…";
+    status.textContent = tr("正在添加…");
     try {
       await call<HostedDirsResult>("hosted.addDir", { path });
       onAdded();
@@ -3042,7 +3121,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const data = snapshot!;
   const project = data.projects.find((item) => item.projectId === route.projectId);
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = `${project?.name ?? "工程"} · Agent Bridge`;
+  document.title = tr(`{0} · Agent Bridge`, project?.name ?? tr("工程"));
   const projectSessions = data.sessions.filter((session) => session.projectId === route.projectId);
   const archivedCount = projectSessions.filter((session) => session.archived).length;
   const sessions = visibleSessions(projectSessions, showArchived);
@@ -3086,10 +3165,10 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(
       el("li", {}, [
         isHosted
-          ? emptyState("还没有托管会话", "点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 或 pi 进程。")
+          ? emptyState(tr("还没有托管会话"), tr("点「新建托管会话」，由这台 Mac 上的 Bridge 启动一个 Claude Code 或 pi 进程。"))
           : canCreateDesktop
-            ? emptyState("这个工程还没有会话", `点「新对话」，由这台 Mac 上的 Bridge 启动一次 ${appInfo?.name ?? "桌面客户端"}。`)
-            : emptyState("这个工程还没有会话", "在桌面应用里开始一次对话后，再回来刷新。"),
+            ? emptyState(tr("这个工程还没有会话"), tr(`点「新对话」，由这台 Mac 上的 Bridge 启动一次 {0}。`, appInfo?.name ?? tr("桌面客户端")))
+            : emptyState(tr("这个工程还没有会话"), tr("在桌面应用里开始一次对话后，再回来刷新。")),
       ]),
     );
   }
@@ -3097,21 +3176,21 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     const busy = session.busy === true;
     const unread = unreadAt(session.sessionId) !== undefined;
     const state = busy
-      ? "正在执行"
+      ? tr("正在执行")
       : session.hosted
         ? session.canSend
           ? session.live
-            ? "Bridge 托管进程运行中"
-            : "Bridge 托管，发送时自动恢复"
-          : (session.sendBlockedReason ?? "只读")
+            ? tr("Bridge 托管进程运行中")
+            : tr("Bridge 托管，发送时自动恢复")
+          : (session.sendBlockedReason ?? tr("只读"))
         : session.canSend
           ? session.live
-            ? "桌面运行中，可发送"
+            ? tr("桌面运行中，可发送")
             : sendStateLabel(session)
-          : (session.sendBlockedReason ?? "只读");
+          : (session.sendBlockedReason ?? tr("只读"));
     // 托管会话的模型和权限模式在列表里也常驻显示，不必点进侧栏才知道。
     const hostedFacts = session.hosted
-      ? ` · 模型 ${hostedModelLabel(session.model)} · ${hostedModeFact(session)}`
+      ? tr(` · 模型 {0} · {1}`, hostedModelLabel(session.model), hostedModeFact(session))
       : "";
     const row = el("button", { className: "row", attrs: { type: "button" } }, [
       el(
@@ -3127,7 +3206,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           document.createTextNode(session.title),
         ]),
         ...(session.originalTitle
-          ? [el("span", { className: "row-original", text: `原名：${session.originalTitle}` })]
+          ? [el("span", { className: "row-original", text: tr(`原名：{0}`, session.originalTitle) })]
           : []),
         el("span", {
           className: "meta",
@@ -3137,11 +3216,11 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       busy
         ? el("span", { className: "pill busy" }, [
             el("span", { className: "spinner" }),
-            document.createTextNode("执行中"),
+            document.createTextNode(tr("执行中")),
           ])
         : el("span", { className: session.canSend ? "pill ok" : "pill", text: sendStateLabel(session) }),
-      ...(unread ? [el("span", { className: "pill unread", text: "未读" })] : []),
-      ...(session.archived ? [el("span", { className: "pill", text: "已归档" })] : []),
+      ...(unread ? [el("span", { className: "pill unread", text: tr("未读") })] : []),
+      ...(session.archived ? [el("span", { className: "pill", text: tr("已归档") })] : []),
       icon("chevron", "icon chev"),
     ]);
     row.addEventListener("click", () =>
@@ -3151,17 +3230,17 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     const actions = el("div", { className: "row-menu" }, [
       rowAction(
         session.pinned ? icon("pinOff") : icon("pin"),
-        session.pinned ? "取消置顶" : "置顶",
+        session.pinned ? tr("取消置顶") : tr("置顶"),
         () => void setSessionPinned(session, !session.pinned),
       ),
       ...(session.hosted
         ? [
             rowAction(
               session.archived ? icon("unarchive") : icon("archive"),
-              session.archived ? "取消归档" : "归档",
+              session.archived ? tr("取消归档") : tr("归档"),
               () => void setSessionArchived(session, !session.archived),
             ),
-            rowAction(icon("trash"), "删除", () => void deleteHostedSession(session), "danger"),
+            rowAction(icon("trash"), tr("删除"), () => void deleteHostedSession(session), "danger"),
           ]
         : []),
     ]);
@@ -3173,9 +3252,9 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     createHosted.append(
       el("span", {
         className: "create-label-full",
-        text: canCreateHosted ? "新建托管会话" : "新对话",
+        text: canCreateHosted ? tr("新建托管会话") : tr("新对话"),
       }),
-      el("span", { className: "create-label-short", text: "新建" }),
+      el("span", { className: "create-label-short", text: tr("新建") }),
     );
   }
 
@@ -3184,19 +3263,19 @@ function renderSessions(route: Route & { level: "sessions" }): void {
       el("section", { className: "view-head" }, [
         backButton(() => navigate({ level: "projects", appId: route.appId })),
         el("div", { className: "view-head-main" }, [
-          el("p", { className: "eyebrow", text: `${appInfo?.name ?? "客户端"}${project?.cwd ? ` · ${project.cwd}` : ""}` }),
-          el("h1", { className: "display", text: project?.name ?? "会话" }),
+          el("p", { className: "eyebrow", text: tr(`{0}{1}`, appInfo?.name ?? tr("客户端"), project?.cwd ? ` · ${project.cwd}` : "") }),
+          el("h1", { className: "display", text: project?.name ?? tr("会话") }),
           el("p", {
             className: "meta",
             text: isHosted
-              ? `${sessions.length} 个会话 · 由这台 Mac 上的 Bridge 托管，不出现在桌面应用`
-              : `${sessions.length} 个会话 · 置顶在前，其余按最近更新${createDetail ? " · 无法新建对话" : ""}`,
+              ? tr(`{0} 个会话 · 由这台 Mac 上的 Bridge 托管，不出现在桌面应用`, sessions.length)
+              : tr(`{0} 个会话 · 置顶在前，其余按最近更新{1}`, sessions.length, createDetail ? tr(" · 无法新建对话") : ""),
           }),
         ]),
         ...(archivedCount > 0
           ? [
               button(
-                showArchived ? `隐藏已归档（${archivedCount}）` : `显示已归档（${archivedCount}）`,
+                showArchived ? tr(`隐藏已归档（{0}）`, archivedCount) : tr(`显示已归档（{0}）`, archivedCount),
                 () => {
                   showArchived = !showArchived;
                   void renderRoute();
@@ -3210,13 +3289,13 @@ function renderSessions(route: Route & { level: "sessions" }): void {
           ? [
               el("button", {
                 className: "btn ghost small create-btn",
-                text: "新对话",
+                text: tr("新对话"),
                 attrs: { type: "button", disabled: "", title: createDetail },
               }),
             ]
           : []),
         button(
-          "刷新",
+          tr("刷新"),
           () => {
             snapshot = null;
             void renderRoute();
@@ -3235,28 +3314,28 @@ function renderSessions(route: Route & { level: "sessions" }): void {
 /** 权限模式的说明文案；bridge 只下发部分模式，未知值不显示说明。 */
 const HOSTED_MODE_HELP: Record<string, { short: string; detail: string }> = {
   manual: {
-    short: "每次操作都要确认",
-    detail: "文件编辑、shell 命令、联网访问都会停下来等你确认。最安全的日常模式。",
+    short: tr("每次操作都要确认"),
+    detail: tr("文件编辑、shell 命令、联网访问都会停下来等你确认。最安全的日常模式。"),
   },
   acceptEdits: {
-    short: "工作目录内编辑免确认",
-    detail: "工作目录内的文件编辑，以及 mkdir/rm/mv/cp/sed 等常见文件命令自动放行；目录外路径、受保护路径（.git/.claude 等）和其它 shell 命令仍要确认。",
+    short: tr("工作目录内编辑免确认"),
+    detail: tr("工作目录内的文件编辑，以及 mkdir/rm/mv/cp/sed 等常见文件命令自动放行；目录外路径、受保护路径（.git/.claude 等）和其它 shell 命令仍要确认。"),
   },
   plan: {
-    short: "先出计划不动手",
-    detail: "只读代码并给出计划，不修改源码；计划批准后才按选定方式执行。不是完全只读。",
+    short: tr("先出计划不动手"),
+    detail: tr("只读代码并给出计划，不修改源码；计划批准后才按选定方式执行。不是完全只读。"),
   },
   dontAsk: {
-    short: "不问，需要确认的直接拒绝",
-    detail: "不会弹出确认：凡是需要确认的操作一律自动拒绝，只运行只读命令和已预先授权的操作。无人值守时最安全，但联网、写文件常被拒。",
+    short: tr("不问，需要确认的直接拒绝"),
+    detail: tr("不会弹出确认：凡是需要确认的操作一律自动拒绝，只运行只读命令和已预先授权的操作。无人值守时最安全，但联网、写文件常被拒。"),
   },
   auto: {
-    short: "分类器自动判定",
-    detail: "由分类器逐个审查动作：明显危险的被拦下并说明原因，其余自动放行；只有少数情况仍会询问。",
+    short: tr("分类器自动判定"),
+    detail: tr("由分类器逐个审查动作：明显危险的被拦下并说明原因，其余自动放行；只有少数情况仍会询问。"),
   },
   bypassPermissions: {
-    short: "跳过权限检查",
-    detail: "不再询问、跳过安全检查，deny 规则和 sandbox（文件/网络隔离）仍然生效。只应在隔离环境里用。",
+    short: tr("跳过权限检查"),
+    detail: tr("不再询问、跳过安全检查，deny 规则和 sandbox（文件/网络隔离）仍然生效。只应在隔离环境里用。"),
   },
 };
 
@@ -3268,23 +3347,23 @@ function hostedModeShort(mode: string | undefined): string {
 
 /** 托管会话的权限事实：pi 没有权限模式，写引擎名，免得显示一个不生效的 manual。 */
 function hostedModeFact(session: SessionSummary): string {
-  return session.hostedAgent === "pi" ? "pi 托管" : `权限 ${hostedModeShort(session.permissionMode)}`;
+  return session.hostedAgent === "pi" ? tr("pi 托管") : tr(`权限 {0}`, hostedModeShort(session.permissionMode));
 }
 
 /** 托管会话的模型：记录过就用记录值，否则说明沿用 CLI 默认。 */
 function hostedModelLabel(model: string | undefined): string {
-  return model ? model : "CLI 默认";
+  return model ? model : tr("CLI 默认");
 }
 
 function effortLabel(level: string): string {
   const known: Record<string, string> = {
-    off: "关闭",
-    minimal: "最少",
-    low: "低",
-    medium: "中",
-    high: "高",
-    xhigh: "更高",
-    max: "最高",
+    off: tr("关闭"),
+    minimal: tr("最少"),
+    low: tr("低"),
+    medium: tr("中"),
+    high: tr("高"),
+    xhigh: tr("更高"),
+    max: tr("最高"),
   };
   return known[level] ? `${known[level]}（${level}）` : level;
 }
@@ -3348,24 +3427,24 @@ function hostedCreatePanel(
   },
 ): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
-  const status = el("p", { className: "hint", text: "正在读取 Bridge 允许的目录与权限模式…" });
-  const agent = el("select", { className: "input", attrs: { "aria-label": "托管引擎" } });
+  const status = el("p", { className: "hint", text: tr("正在读取 Bridge 允许的目录与权限模式…") });
+  const agent = el("select", { className: "input", attrs: { "aria-label": tr("托管引擎") } });
   agent.append(el("option", { text: "Claude Code", attrs: { value: "claude" } }));
   const mode = el("select", { className: "input" });
   const modeHint = el("p", { className: "hint" });
-  const model = el("select", { className: "input", attrs: { "aria-label": "模型" } });
-  model.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
-  const effort = el("select", { className: "input", attrs: { "aria-label": "思考程度" } });
-  effort.append(el("option", { text: "CLI 默认", attrs: { value: "" } }));
+  const model = el("select", { className: "input", attrs: { "aria-label": tr("模型") } });
+  model.append(el("option", { text: tr("CLI 默认"), attrs: { value: "" } }));
+  const effort = el("select", { className: "input", attrs: { "aria-label": tr("思考程度") } });
+  effort.append(el("option", { text: tr("CLI 默认"), attrs: { value: "" } }));
   // pi 的主模型：清单来自 pi 自己的模型配置（hosted.options 的 piModels）。
-  const piModel = el("select", { className: "input", attrs: { "aria-label": "pi 模型" } });
-  piModel.append(el("option", { text: "pi 默认", attrs: { value: "" } }));
+  const piModel = el("select", { className: "input", attrs: { "aria-label": tr("pi 模型") } });
+  piModel.append(el("option", { text: tr("pi 默认"), attrs: { value: "" } }));
   piModel.addEventListener("change", () => {
     draft.piModel = piModel.value;
   });
   // 子代理模型只认 pi 认识的模型名：清单来自 hosted.options 的 piModels，读不到才手填。
-  const subagentSelect = el("select", { className: "input", attrs: { "aria-label": "子代理模型" } });
-  subagentSelect.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  const subagentSelect = el("select", { className: "input", attrs: { "aria-label": tr("子代理模型") } });
+  subagentSelect.append(el("option", { text: tr("跟随 pi 设置"), attrs: { value: "" } }));
   subagentSelect.hidden = true;
   subagentSelect.addEventListener("change", () => {
     draft.subagentModel = subagentSelect.value;
@@ -3374,10 +3453,10 @@ function hostedCreatePanel(
     className: "input mono",
     attrs: {
       type: "text",
-      placeholder: "例如 group/dsgroup；留空跟随 pi 设置",
+      placeholder: tr("例如 group/dsgroup；留空跟随 pi 设置"),
       spellcheck: "false",
       autocomplete: "off",
-      "aria-label": "子代理模型",
+      "aria-label": tr("子代理模型"),
     },
   });
   subagentModel.value = draft.subagentModel;
@@ -3385,8 +3464,8 @@ function hostedCreatePanel(
     draft.subagentModel = subagentModel.value;
   });
   // pi 的思考等级：主模型用 `--thinking`，子代理写进 settings.json 的 defaultThinking。
-  const piThinking = el("select", { className: "input", attrs: { "aria-label": "pi 思考等级" } });
-  piThinking.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  const piThinking = el("select", { className: "input", attrs: { "aria-label": tr("pi 思考等级") } });
+  piThinking.append(el("option", { text: tr("跟随 pi 设置"), attrs: { value: "" } }));
   piThinking.append(
     ...PI_THINKING_LEVELS.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })),
   );
@@ -3394,8 +3473,8 @@ function hostedCreatePanel(
   piThinking.addEventListener("change", () => {
     draft.piThinking = piThinking.value;
   });
-  const subagentThinking = el("select", { className: "input", attrs: { "aria-label": "子代理思考等级" } });
-  subagentThinking.append(el("option", { text: "跟随 pi 设置", attrs: { value: "" } }));
+  const subagentThinking = el("select", { className: "input", attrs: { "aria-label": tr("子代理思考等级") } });
+  subagentThinking.append(el("option", { text: tr("跟随 pi 设置"), attrs: { value: "" } }));
   subagentThinking.append(
     ...PI_THINKING_LEVELS.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })),
   );
@@ -3404,11 +3483,11 @@ function hostedCreatePanel(
     draft.subagentThinking = subagentThinking.value;
   });
   let piModelList: ModelOption[] = [];
-  const optionsHint = el("p", { className: "hint", text: "正在读取本机 CLI 支持的模型与思考程度…" });
-  const effortHint = el("p", { className: "hint", text: "思考程度越高，回答更细致，但更慢也更费额度。" });
+  const optionsHint = el("p", { className: "hint", text: tr("正在读取本机 CLI 支持的模型与思考程度…") });
+  const effortHint = el("p", { className: "hint", text: tr("思考程度越高，回答更细致，但更慢也更费额度。") });
   const title = el("input", {
     className: "input",
-    attrs: { type: "text", placeholder: "标题（可选）", maxlength: "60" },
+    attrs: { type: "text", placeholder: tr("标题（可选）"), maxlength: "60" },
   });
   model.addEventListener("change", () => {
     draft.model = model.value;
@@ -3422,13 +3501,13 @@ function hostedCreatePanel(
   });
   const argsInput = el("input", {
     className: "input",
-    attrs: { type: "text", placeholder: "例如 --agent mix-agent，回车添加", "aria-label": "启动参数" },
+    attrs: { type: "text", placeholder: tr("例如 --agent mix-agent，回车添加"), "aria-label": tr("启动参数") },
   });
   const argsList = el("div", { className: "arg-list" });
   const renderArgs = (): void => {
     const prefs = loadHostedArgPrefs();
     if (prefs.length === 0) {
-      argsList.replaceChildren(el("p", { className: "hint", text: "还没有保存过启动参数。" }));
+      argsList.replaceChildren(el("p", { className: "hint", text: tr("还没有保存过启动参数。") }));
       return;
     }
     argsList.replaceChildren(
@@ -3446,8 +3525,8 @@ function hostedCreatePanel(
           saveHostedArgPrefs();
           renderArgs();
         }, "arg-remove");
-        remove.title = "删除这个参数";
-        remove.setAttribute("aria-label", `删除 ${pref.value}`);
+        remove.title = tr("删除这个参数");
+        remove.setAttribute("aria-label", tr(`删除 {0}`, pref.value));
         return el("div", { className: "arg-row" }, [
           el("label", { className: "arg-check" }, [box, el("span", { className: "arg-value", text: pref.value })]),
           remove,
@@ -3477,13 +3556,13 @@ function hostedCreatePanel(
     argsInput.value = "";
   });
   renderArgs();
-  const submit = button("创建", () => {
+  const submit = button(tr("创建"), () => {
     const cwd = project.cwd;
     if (!cwd) return;
     submit.disabled = true;
     status.classList.remove("error");
     const piSelected = draft.agent === "pi";
-    status.textContent = `正在启动 ${piSelected ? "pi" : "Claude Code"}…`;
+    status.textContent = tr(`正在启动 {0}…`, piSelected ? "pi" : "Claude Code");
     const permissionMode = (mode.value || "manual") as HostedPermissionMode;
     const extraArgs = loadHostedArgPrefs().filter((item) => item.enabled).map((item) => item.value);
     const chosenModel = piSelected ? draft.piModel.trim() : model.value.trim();
@@ -3528,18 +3607,18 @@ function hostedCreatePanel(
     draft.mode = mode.value;
     syncModeHint();
   });
-  const modeField = el("label", { className: "field" }, [el("span", { text: "权限模式" }), mode]);
-  const modelField = el("label", { className: "field" }, [el("span", { text: "模型" }), model]);
-  const piModelField = el("label", { className: "field" }, [el("span", { text: "模型" }), piModel]);
-  const piThinkingField = el("label", { className: "field" }, [el("span", { text: "思考等级" }), piThinking]);
-  const effortField = el("label", { className: "field" }, [el("span", { text: "思考程度" }), effort]);
+  const modeField = el("label", { className: "field" }, [el("span", { text: tr("权限模式") }), mode]);
+  const modelField = el("label", { className: "field" }, [el("span", { text: tr("模型") }), model]);
+  const piModelField = el("label", { className: "field" }, [el("span", { text: tr("模型") }), piModel]);
+  const piThinkingField = el("label", { className: "field" }, [el("span", { text: tr("思考等级") }), piThinking]);
+  const effortField = el("label", { className: "field" }, [el("span", { text: tr("思考程度") }), effort]);
   const subagentField = el("label", { className: "field" }, [
-    el("span", { text: "子代理模型（可选）" }),
+    el("span", { text: tr("子代理模型（可选）") }),
     subagentSelect,
     subagentModel,
   ]);
   const subagentThinkingField = el("label", { className: "field" }, [
-    el("span", { text: "子代理思考等级（可选）" }),
+    el("span", { text: tr("子代理思考等级（可选）") }),
     subagentThinking,
   ]);
   const subagentHint = el("p", { className: "hint" });
@@ -3558,10 +3637,10 @@ function hostedCreatePanel(
     subagentSelect.hidden = !useSelect;
     subagentModel.hidden = useSelect;
     argsHint.textContent = pi
-      ? "打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。"
-      : "打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。";
+      ? tr("打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。")
+      : tr("打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。");
     agentHint.textContent = pi
-      ? "pi 用 `pi --mode rpc` 常驻，斜杠命令、扩展提问与换模型都能在网页里用。"
+      ? tr("pi 用 `pi --mode rpc` 常驻，斜杠命令、扩展提问与换模型都能在网页里用。")
       : "";
     agentHint.hidden = !pi;
   };
@@ -3570,12 +3649,12 @@ function hostedCreatePanel(
     syncAgent();
   });
   form.append(
-    el("p", { className: "panel-title", text: "新建 Bridge 托管会话" }),
+    el("p", { className: "panel-title", text: tr("新建 Bridge 托管会话") }),
     el("label", { className: "field" }, [
-      el("span", { text: "工作目录（仅限 Mac 上的允许列表）" }),
+      el("span", { text: tr("工作目录（仅限 Mac 上的允许列表）") }),
       el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
     ]),
-    el("label", { className: "field" }, [el("span", { text: "托管引擎" }), agent]),
+    el("label", { className: "field" }, [el("span", { text: tr("托管引擎") }), agent]),
     agentHint,
     modeField,
     modeHint,
@@ -3588,9 +3667,9 @@ function hostedCreatePanel(
     subagentField,
     subagentThinkingField,
     subagentHint,
-    el("div", { className: "field" }, [el("span", { text: "启动参数（可选）" }), argsInput, argsList]),
+    el("div", { className: "field" }, [el("span", { text: tr("启动参数（可选）") }), argsInput, argsList]),
     argsHint,
-    el("label", { className: "field" }, [el("span", { text: "标题" }), title]),
+    el("label", { className: "field" }, [el("span", { text: tr("标题") }), title]),
     status,
     el("div", { className: "row-actions" }, [submit]),
   );
@@ -3598,14 +3677,14 @@ function hostedCreatePanel(
   void call<HostedOptionsResult>("hosted.options")
     .then((info) => {
       const groups: Array<[string, ModelOption[]]> = [
-        ["自定义", info.models.filter((item) => item.section === "custom")],
-        ["常用", info.models.filter((item) => (item.section ?? "main") === "main")],
-        ["更多", info.models.filter((item) => item.section === "overflow")],
+        [tr("自定义"), info.models.filter((item) => item.section === "custom")],
+        [tr("常用"), info.models.filter((item) => (item.section ?? "main") === "main")],
+        [tr("更多"), info.models.filter((item) => item.section === "overflow")],
       ];
-      const modelNodes: Array<Node | string> = [el("option", { text: "CLI 默认", attrs: { value: "" } })];
+      const modelNodes: Array<Node | string> = [el("option", { text: tr("CLI 默认"), attrs: { value: "" } })];
       // 之前选过、这次清单里没有的模型（换了 CLI 版本）也留着，别把草稿静默改掉。
       if (draft.model && !info.models.some((item) => item.id === draft.model)) {
-        modelNodes.push(el("option", { text: `${draft.model}（清单里没有）`, attrs: { value: draft.model } }));
+        modelNodes.push(el("option", { text: tr(`{0}（清单里没有）`, draft.model), attrs: { value: draft.model } }));
       }
       for (const [label, group] of groups) {
         if (group.length === 0) continue;
@@ -3616,9 +3695,9 @@ function hostedCreatePanel(
       model.replaceChildren(...modelNodes);
       model.value = draft.model;
 
-      const effortNodes: Array<Node | string> = [el("option", { text: "CLI 默认", attrs: { value: "" } })];
+      const effortNodes: Array<Node | string> = [el("option", { text: tr("CLI 默认"), attrs: { value: "" } })];
       if (draft.effort && !info.efforts.includes(draft.effort)) {
-        effortNodes.push(el("option", { text: `${draft.effort}（当前 CLI 不认）`, attrs: { value: draft.effort } }));
+        effortNodes.push(el("option", { text: tr(`{0}（当前 CLI 不认）`, draft.effort), attrs: { value: draft.effort } }));
       }
       effortNodes.push(...info.efforts.map((level) => el("option", { text: effortLabel(level), attrs: { value: level } })));
       effort.replaceChildren(...effortNodes);
@@ -3632,7 +3711,7 @@ function hostedCreatePanel(
         const nodes: Array<Node | string> = [el("option", { text: fallback, attrs: { value: "" } })];
         // 之前选过、这次清单里没有的模型（换了 pi 配置）也留着，别把草稿静默改掉。
         if (current && !piModelList.some((item) => item.id === current)) {
-          nodes.push(el("option", { text: `${current}（清单里没有）`, attrs: { value: current } }));
+          nodes.push(el("option", { text: tr(`{0}（清单里没有）`, current), attrs: { value: current } }));
         }
         // pi 的清单可能上百项，按 provider 分组，选项里只写模型名（id 在 value 里）。
         const groups = new Map<string, ModelOption[]>();
@@ -3659,20 +3738,20 @@ function hostedCreatePanel(
         }
         return nodes;
       };
-      piModel.replaceChildren(...piOptionNodes(draft.piModel, "pi 默认"));
+      piModel.replaceChildren(...piOptionNodes(draft.piModel, tr("pi 默认")));
       piModel.value = draft.piModel;
-      subagentSelect.replaceChildren(...piOptionNodes(draft.subagentModel, "跟随 pi 设置"));
+      subagentSelect.replaceChildren(...piOptionNodes(draft.subagentModel, tr("跟随 pi 设置")));
       subagentSelect.value = draft.subagentModel;
       subagentHint.textContent =
         piModelList.length > 0
-          ? "只影响之后新派生的子代理，主模型不动。"
-          : "读不到 pi 的模型配置，先手填 `厂商/模型`；留空跟随 pi 设置。";
+          ? tr("只影响之后新派生的子代理，主模型不动。")
+          : tr("读不到 pi 的模型配置，先手填 `厂商/模型`；留空跟随 pi 设置。");
 
       const agentOptions = info.agents ?? [{ id: "claude" as const, label: "Claude Code", available: true }];
       agent.replaceChildren(
         ...agentOptions.map((item) =>
           el("option", {
-            text: item.available ? item.label : `${item.label}（不可用）`,
+            text: item.available ? item.label : tr(`{0}（不可用）`, item.label),
             attrs: {
               value: item.id,
               ...(item.available ? {} : { disabled: "" }),
@@ -3688,7 +3767,7 @@ function hostedCreatePanel(
     })
     .catch((error) => {
       optionsHint.classList.add("error");
-      optionsHint.textContent = `读不到模型与思考程度：${messageOf(error)}`;
+      optionsHint.textContent = tr(`读不到模型与思考程度：{0}`, messageOf(error));
     });
   void call<HostedDirsResult>("hosted.dirs")
     .then((config) => {
@@ -3706,10 +3785,10 @@ function hostedCreatePanel(
       const idle = Math.round(config.idleTimeoutMs / 60_000);
       const bypassNote = config.allowBypassPermissions
         ? ""
-        : "；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）";
+        : tr("；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）");
       status.textContent = config.enabled
-        ? `只在 ${project.cwd ?? ""} 中运行；网页断开不会结束进程，空闲 ${idle} 分钟后自动停止，再发消息时 resume。${bypassNote}`
-        : (config.note ?? "Bridge 还没有配置可托管的目录。");
+        ? tr(`只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}`, project.cwd ?? "", idle, bypassNote)
+        : (config.note ?? tr("Bridge 还没有配置可托管的目录。"));
       submit.disabled = !config.enabled;
     })
     .catch((error) => {
@@ -3726,22 +3805,22 @@ function desktopCreatePanel(project: ProjectInfo, appInfo: AppInfo, draft: { tex
   const status = el("p", { className: "hint", text: appInfo.capabilities.createDetail ?? "" });
   const text = el("textarea", {
     className: "input",
-    attrs: { rows: "4", placeholder: "第一条消息", "aria-label": "第一条消息" },
+    attrs: { rows: "4", placeholder: tr("第一条消息"), "aria-label": tr("第一条消息") },
   });
   text.value = draft.text;
   text.addEventListener("input", () => {
     draft.text = text.value;
   });
-  const submit = button("创建", () => {
+  const submit = button(tr("创建"), () => {
     const message = text.value.trim();
     if (!message) {
       status.classList.add("error");
-      status.textContent = "先写下第一条消息";
+      status.textContent = tr("先写下第一条消息");
       return;
     }
     submit.disabled = true;
     status.classList.remove("error");
-    status.textContent = `正在启动 ${appInfo.name}…`;
+    status.textContent = tr(`正在启动 {0}…`, appInfo.name);
     void call<SessionCreateResult>(
       "session.create",
       { appId: appInfo.appId, projectId: project.projectId, text: message },
@@ -3768,12 +3847,12 @@ function desktopCreatePanel(project: ProjectInfo, appInfo: AppInfo, draft: { tex
   }, "btn small");
   form.addEventListener("submit", (event) => event.preventDefault());
   form.append(
-    el("p", { className: "panel-title", text: `新建 ${appInfo.name} 会话` }),
+    el("p", { className: "panel-title", text: tr(`新建 {0} 会话`, appInfo.name) }),
     el("label", { className: "field" }, [
-      el("span", { text: "工作目录" }),
+      el("span", { text: tr("工作目录") }),
       el("input", { className: "input", attrs: { type: "text", value: project.cwd ?? "", readOnly: "" } }),
     ]),
-    el("label", { className: "field" }, [el("span", { text: "第一条消息" }), text]),
+    el("label", { className: "field" }, [el("span", { text: tr("第一条消息") }), text]),
     status,
     el("div", { className: "row-actions" }, [submit]),
   );
@@ -3786,10 +3865,10 @@ function selfDeviceCard(): HTMLElement {
   const showName = (): void => {
     const name = connected?.device.name ?? "";
     panel.replaceChildren(
-      el("h2", { className: "panel-title", text: "本设备" }),
-      el("p", { className: "hint", text: "这台浏览器在 Bridge 里的名字，Mac 菜单栏和其它设备都按它显示。" }),
+      el("h2", { className: "panel-title", text: tr("本设备") }),
+      el("p", { className: "hint", text: tr("这台浏览器在 Bridge 里的名字，Mac 菜单栏和其它设备都按它显示。") }),
       el("div", { className: "row-main" }, [el("strong", { className: "row-title", text: name })]),
-      el("div", { className: "actions" }, [button("改名", showForm, "btn ghost small")]),
+      el("div", { className: "actions" }, [button(tr("改名"), showForm, "btn ghost small")]),
     );
   };
   const showForm = (): void => {
@@ -3798,10 +3877,10 @@ function selfDeviceCard(): HTMLElement {
       attrs: { type: "text", value: connected?.device.name ?? "", maxlength: "64" },
     });
     const error = el("p", { className: "notice error hidden" });
-    const save = button("保存", () => {
+    const save = button(tr("保存"), () => {
       const name = input.value.trim();
       if (!name) {
-        error.textContent = "请输入设备名称";
+        error.textContent = tr("请输入设备名称");
         error.classList.remove("hidden");
         return;
       }
@@ -3815,10 +3894,10 @@ function selfDeviceCard(): HTMLElement {
         });
     }, "btn small");
     panel.replaceChildren(
-      el("h2", { className: "panel-title", text: "本设备" }),
-      el("label", { className: "field" }, [el("span", { text: "设备名称" }), input]),
+      el("h2", { className: "panel-title", text: tr("本设备") }),
+      el("label", { className: "field" }, [el("span", { text: tr("设备名称") }), input]),
       error,
-      el("div", { className: "actions" }, [save, button("取消", showName, "btn ghost small")]),
+      el("div", { className: "actions" }, [save, button(tr("取消"), showName, "btn ghost small")]),
     );
     input.focus();
     input.select();
@@ -3829,7 +3908,7 @@ function selfDeviceCard(): HTMLElement {
 
 function renderDevices(): void {
   const state = connected!;
-  document.title = "已授权设备 · Agent Bridge";
+  document.title = tr("已授权设备 · Agent Bridge");
   const list = el("ul", { className: "list" });
   const status = el("p", { className: "hint" });
   for (const item of state.devices) {
@@ -3843,13 +3922,13 @@ function renderDevices(): void {
       el("li", { className: "device-row" }, [
         label,
         el("div", { className: "row-actions" }, revoked
-          ? [el("span", { className: "pill", text: "已撤销" })]
+          ? [el("span", { className: "pill", text: tr("已撤销") })]
           : self
             ? [
-              el("span", { className: "pill", text: "本机" }),
-              button("重命名", () => beginRename(item, label), "btn ghost small"),
+              el("span", { className: "pill", text: tr("本机") }),
+              button(tr("重命名"), () => beginRename(item, label), "btn ghost small"),
             ]
-            : [el("span", { className: "meta", text: "在 Mac 上撤销" })]),
+            : [el("span", { className: "meta", text: tr("在 Mac 上撤销") })]),
       ]),
     );
   }
@@ -3860,14 +3939,14 @@ function renderDevices(): void {
         backButton(() => navigate({ level: "clients" })),
         el("div", { className: "view-head-main" }, [
           el("p", { className: "eyebrow", text: state.info.name }),
-          el("h1", { className: "display", text: "已授权设备" }),
-          el("p", { className: "meta", text: `Bridge ${state.info.version} · 前端 ${APP_VERSION} · ${state.info.platform} · 通道已加密（Noise IK）` }),
+          el("h1", { className: "display", text: tr("已授权设备") }),
+          el("p", { className: "meta", text: tr(`Bridge {0} · 前端 {1} · {2} · 通道已加密（Noise IK）`, state.info.version, APP_VERSION, state.info.platform) }),
         ]),
       ]),
       list,
       status,
       el("div", { className: "actions" }, [
-        button("刷新", () => {
+        button(tr("刷新"), () => {
           const device = state.device;
           void connectAndShow(device).catch((error: unknown) => {
             status.textContent = messageOf(error);
@@ -3885,7 +3964,7 @@ function renderDevices(): void {
  */
 async function renameSelfDevice(name: string): Promise<void> {
   const local = connected?.device;
-  if (!local) throw new Error("还没有连接 Bridge");
+  if (!local) throw new Error(tr("还没有连接 Bridge"));
   await call<{ ok: boolean }>("device.rename", { deviceId: local.deviceId, name });
   local.name = name;
   for (const item of connected?.devices ?? []) {
@@ -3902,10 +3981,10 @@ function beginRename(item: DeviceSummary, label: HTMLElement): void {
     attrs: { type: "text", value: item.name, maxlength: "64" },
   });
   const error = el("p", { className: "notice error hidden" });
-  const save = button("保存", () => {
+  const save = button(tr("保存"), () => {
     const name = input.value.trim();
     if (!name) {
-      error.textContent = "请输入设备名称";
+      error.textContent = tr("请输入设备名称");
       error.classList.remove("hidden");
       return;
     }
@@ -3920,7 +3999,7 @@ function beginRename(item: DeviceSummary, label: HTMLElement): void {
         error.classList.remove("hidden");
       });
   }, "btn small");
-  const cancel = button("取消", () => renderDevices(), "btn ghost small");
+  const cancel = button(tr("取消"), () => renderDevices(), "btn ghost small");
   label.replaceChildren(
     input,
     el("div", { className: "actions" }, [save, cancel]),
@@ -3938,16 +4017,16 @@ function initials(name: string): string {
 }
 
 function completenessLabel(value: string): string {
-  return value === "complete" ? "完整" : value === "partial" ? "部分" : value === "unknown" ? "未知" : "不可用";
+  return value === "complete" ? tr("完整") : value === "partial" ? tr("部分") : value === "unknown" ? tr("未知") : tr("不可用");
 }
 
 function statusLabel(status: AppInfo["status"]): string {
-  return status === "ready" ? "可用" : status === "needs_permission" ? "需要授权" : "不可用";
+  return status === "ready" ? tr("可用") : status === "needs_permission" ? tr("需要授权") : tr("不可用");
 }
 
 function hostedControlButton(summary: SessionSummary): HTMLButtonElement {
   const node = button(
-    summary.live ? "停止进程" : "恢复进程",
+    summary.live ? tr("停止进程") : tr("恢复进程"),
     () => {
       node.disabled = true;
       const method: Method = summary.live ? "hosted.stop" : "hosted.resume";
@@ -3964,27 +4043,27 @@ function hostedControlButton(summary: SessionSummary): HTMLButtonElement {
     "btn ghost small",
   );
   node.title = summary.live
-    ? "结束这台 Mac 上的托管进程；会话记录保留，之后可恢复"
-    : "在这台 Mac 上 resume 这个托管会话";
+    ? tr("结束这台 Mac 上的托管进程；会话记录保留，之后可恢复")
+    : tr("在这台 Mac 上 resume 这个托管会话");
   return node;
 }
 
 function sendStateLabel(session: SessionSummary): string {
   if (session.hosted) {
-    if (!session.canSend) return "只读";
-    return session.live ? "托管运行中" : "可恢复";
+    if (!session.canSend) return tr("只读");
+    return session.live ? tr("托管运行中") : tr("可恢复");
   }
-  if (session.live) return "桌面运行中";
-  if (!session.canSend) return "只读";
-  return "可发送";
+  if (session.live) return tr("桌面运行中");
+  if (!session.canSend) return tr("只读");
+  return tr("可发送");
 }
 
 function timeLabel(timestamp: number): string {
-  if (!timestamp) return "时间未知";
+  if (!timestamp) return tr("时间未知");
   const diff = Date.now() - timestamp;
-  if (diff < 60_000) return "刚刚";
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 60_000) return tr("刚刚");
+  if (diff < 3_600_000) return tr(`{0} 分钟前`, Math.floor(diff / 60_000));
+  if (diff < 86_400_000) return tr(`{0} 小时前`, Math.floor(diff / 3_600_000));
   return new Date(timestamp).toLocaleDateString();
 }
 
@@ -4023,6 +4102,8 @@ interface ChatState {
   compaction?: { pending: boolean; error?: string; note?: string };
   /** 已经作答的问题（按块文本 + 问题文本索引）；重绘后仍显示「已发送」，避免重复提交。 */
   answers?: Map<string, string[]>;
+  /** 点击了状态行的「重试」：成功后要把「正在重试…」收回去。 */
+  retrying?: boolean;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -4034,7 +4115,11 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const project = data.projects.find((item) => item.projectId === route.projectId);
   if (!summary) {
     renderShell(
-      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。"),
+      errorView(tr("找不到这个会话"), tr("它可能已经从桌面应用中删除，返回列表刷新试试。"), () => {
+        // 快照里没有它：先重拉一次再判断，否则只是用同一份旧快照重画同一个错误页。
+        snapshot = null;
+        void renderRoute();
+      }),
       crumbsFor(route),
     );
     return;
@@ -4051,13 +4136,13 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     void loadOlderPage(state);
   }, "icon-btn composer-tool");
   loadOlder.append(icon("history"));
-  loadOlder.setAttribute("aria-label", "加载更早的消息");
-  loadOlder.title = "加载更早的消息";
+  loadOlder.setAttribute("aria-label", tr("加载更早的消息"));
+  loadOlder.title = tr("加载更早的消息");
   loadOlder.disabled = true;
 
   const contextButton = el("button", {
     className: "icon-btn context-btn",
-    attrs: { type: "button", "aria-label": "上下文用量", title: "上下文用量", "aria-expanded": "false" },
+    attrs: { type: "button", "aria-label": tr("上下文用量"), title: tr("上下文用量"), "aria-expanded": "false" },
   });
   contextButton.hidden = true;
   const contextPop = el("div", { className: "context-pop" });
@@ -4085,7 +4170,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     className: "input composer-input",
     attrs: {
       rows: "1",
-      placeholder: canSend ? "发送到这个会话…" : (sendBlockedReason ?? "该会话当前不可发送"),
+      placeholder: canSend ? tr("发送到这个会话…") : (sendBlockedReason ?? tr("该会话当前不可发送")),
     },
   });
   input.value = draftFor(summary.sessionId);
@@ -4198,12 +4283,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     if (sendButton.disabled) return;
     void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
   };
-  const sendButton = button("发送", submit, "btn primary");
+  const sendButton = button(tr("发送"), submit, "btn primary");
   sendButton.disabled = !canSend;
 
   // 托管会话的回合可以从网页直接停：进程留着，CLI 收到 interrupt 后回到可输入状态。
-  const stopButton = button("停止", () => void stopTurn(), "btn secondary stop-turn");
-  stopButton.title = "停止当前回合（会话和进程保留）";
+  const stopButton = button(tr("停止"), () => void stopTurn(), "btn secondary stop-turn");
+  stopButton.title = tr("停止当前回合（会话和进程保留）");
   stopButton.hidden = true;
   stopButton.disabled = true;
   state.stopButton = stopButton;
@@ -4212,7 +4297,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     if (stopping || !state.busy) return;
     stopping = true;
     stopButton.disabled = true;
-    state.status.textContent = "正在停止当前回合…";
+    state.status.textContent = tr("正在停止当前回合…");
     try {
       const result = await call<HostedInterruptResult>("hosted.interrupt", {
         sessionId: state.session.sessionId,
@@ -4221,9 +4306,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       if (result.interrupted) {
         state.busy = false;
         state.interrupted = true;
-        state.status.textContent = "已停止当前回合";
+        state.status.textContent = tr("已停止当前回合");
       } else {
-        state.status.textContent = "当前没有在跑的回合";
+        state.status.textContent = tr("当前没有在跑的回合");
       }
       renderMessages(state);
     } catch (error) {
@@ -4238,7 +4323,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const fileInput = el("input", { className: "file-input", attrs: { type: "file", multiple: "" } });
   const attachButton = el("button", {
     className: "icon-btn attach-btn",
-    attrs: { type: "button", title: "添加图片或文件", "aria-label": "添加图片或文件" },
+    attrs: { type: "button", title: tr("添加图片或文件"), "aria-label": tr("添加图片或文件") },
   }, [icon("clip")]);
   attachButton.addEventListener("click", () => fileInput.click());
 
@@ -4246,8 +4331,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     void refreshTail(state);
   }, "icon-btn composer-tool");
   refreshButton.append(icon("refresh"));
-  refreshButton.setAttribute("aria-label", "刷新消息");
-  refreshButton.title = "刷新消息";
+  refreshButton.setAttribute("aria-label", tr("刷新消息"));
+  refreshButton.title = tr("刷新消息");
 
   const onContextKey = (event: KeyboardEvent): void => {
     if (event.key === "Escape") closeContext();
@@ -4279,12 +4364,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const collapseButton = el("button", {
     className: "icon-btn composer-collapse",
-    attrs: { type: "button", "aria-label": "收起输入区", title: "收起输入区" },
+    attrs: { type: "button", "aria-label": tr("收起输入区"), title: tr("收起输入区") },
   }, [icon("chevron", "icon composer-chev")]);
   collapseButton.addEventListener("click", () => setCollapsed(true, true));
 
   const restore = button("", () => setCollapsed(false, true), "composer-restore");
-  restore.append(icon("pencil"), el("span", { text: "写消息…" }));
+  restore.append(icon("pencil"), el("span", { text: tr("写消息…") }));
 
   const composer = el("form", { className: "composer" }, [
     attachList,
@@ -4324,12 +4409,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
           item.status === "uploading"
             ? `${Math.round(item.progress * 100)}%`
             : item.status === "error"
-              ? (item.error ?? "上传失败")
+              ? (item.error ?? tr("上传失败"))
               : sizeLabel(item.attachment?.size ?? 0);
         chip.append(el("span", { className: "attach-chip-state", text: stateText }));
         const remove = el("button", {
           className: "attach-chip-remove",
-          attrs: { type: "button", "aria-label": `移除 ${item.name}` },
+          attrs: { type: "button", "aria-label": tr(`移除 {0}`, item.name) },
         }, [icon("close")]);
         remove.addEventListener("click", () => {
           const index = pending.indexOf(item);
@@ -4338,7 +4423,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
           updateSendState();
           if (pending.length === 0) status.textContent = "";
           else if (pending.every((entry) => entry.status === "ready")) {
-            status.textContent = `${pending.length} 个附件已就绪`;
+            status.textContent = tr(`{0} 个附件已就绪`, pending.length);
           }
         });
         chip.append(remove);
@@ -4350,15 +4435,15 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   async function addFiles(files: File[]): Promise<void> {
     for (const file of files) {
       if (pending.length >= MAX_ATTACHMENTS) {
-        status.textContent = `附件最多 ${MAX_ATTACHMENTS} 个`;
+        status.textContent = tr(`附件最多 {0} 个`, MAX_ATTACHMENTS);
         break;
       }
       if (file.size === 0) {
-        status.textContent = `${file.name} 是空文件`;
+        status.textContent = tr(`{0} 是空文件`, file.name);
         continue;
       }
       if (file.size > MAX_ATTACHMENT_BYTES) {
-        status.textContent = `${file.name} 超过 25 MB`;
+        status.textContent = tr(`{0} 超过 25 MB`, file.name);
         continue;
       }
       const item: PendingAttachment = {
@@ -4373,7 +4458,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       renderAttachments();
       updateSendState();
       status.classList.remove("error");
-      status.textContent = `正在上传 ${file.name}…`;
+      status.textContent = tr(`正在上传 {0}…`, file.name);
       try {
         const attachment = await uploadAttachment(state.session.sessionId, file, (ratio) => {
           item.progress = ratio;
@@ -4395,7 +4480,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     }
     if (!pending.some((item) => item.status !== "ready")) {
       status.classList.remove("error");
-      status.textContent = pending.length > 0 ? `${pending.length} 个附件已就绪` : "";
+      status.textContent = pending.length > 0 ? tr(`{0} 个附件已就绪`, pending.length) : "";
     }
   }
 
@@ -4450,7 +4535,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     className: "model-chip",
     attrs: {
       type: "button",
-      "aria-label": "当前模型",
+      "aria-label": tr("当前模型"),
       "aria-expanded": "false",
       "aria-haspopup": "true",
     },
@@ -4491,7 +4576,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
         el("span", { className: "model-item-name", text: item.name }),
         ...(item.id ? [el("span", { className: "model-item-id", text: item.id })] : []),
       ]),
-      ...(current ? [el("span", { className: "model-item-tag", text: "当前" })] : []),
+      ...(current ? [el("span", { className: "model-item-tag", text: tr("当前") })] : []),
     ];
     if (canSwitch && !current) {
       // 托管会话可以从网页直接换模型：换完停掉进程，下一条消息按新模型 resume。
@@ -4508,7 +4593,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   /** 子代理模型一行；id 为空表示「跟随 pi 设置」，选它就把覆盖清掉。 */
   const subagentRow = (item: ModelOption, current: boolean, pick: (id: string) => void): HTMLElement =>
-    modelRow(item, current, true, pick, "子代理用");
+    modelRow(item, current, true, pick, tr("子代理用"));
 
   const paintModels = (info: SessionModelsResult): void => {
     const label = info.currentName ?? info.current;
@@ -4519,13 +4604,11 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     }
     modelButton.hidden = false;
     modelButton.replaceChildren(
-      el("span", { className: "model-chip-label", text: "模型" }),
-      el("span", { className: "model-chip-value", text: label ?? "未知" }),
+      el("span", { className: "model-chip-label", text: tr("模型") }),
+      el("span", { className: "model-chip-value", text: label ?? tr("未知") }),
       icon("chevron", "icon model-chev"),
     );
-    modelButton.title = `当前模型：${label ?? "未知"}${
-      info.canSwitchSubagent ? ` · 子代理：${info.subagentModel ?? "跟随 pi 设置"}` : ""
-    }`;
+    modelButton.title = tr(`当前模型：{0}{1}`, label ?? tr("未知"), info.canSwitchSubagent ? tr(` · 子代理：{0}`, info.subagentModel ?? tr("跟随 pi 设置")) : "");
     const rows: HTMLElement[] = [];
     for (const section of ["main", "custom", "overflow"] as const) {
       const items = info.models.filter((item) => (item.section ?? "main") === section);
@@ -4533,19 +4616,19 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       rows.push(
         el("p", {
           className: "model-pop-group",
-          text: section === "main" ? "常用" : section === "custom" ? "自定义" : "更多",
+          text: section === "main" ? tr("常用") : section === "custom" ? tr("自定义") : tr("更多"),
         }),
       );
       for (const item of items) {
-        rows.push(modelRow(item, item.id === info.current, info.canSwitch, applyModel, "切换模型"));
+        rows.push(modelRow(item, item.id === info.current, info.canSwitch, applyModel, tr("切换模型")));
       }
     }
     // pi 的子代理模型是单独的设置：只影响之后新派生的子代理，主模型不动。
     if (info.canSwitchSubagent) {
-      rows.push(el("p", { className: "model-pop-group", text: "子代理模型" }));
+      rows.push(el("p", { className: "model-pop-group", text: tr("子代理模型") }));
       rows.push(
         subagentRow(
-          { id: "", name: "跟随 pi 设置", section: undefined },
+          { id: "", name: tr("跟随 pi 设置"), section: undefined },
           !info.subagentModel,
           applySubagentModel,
         ),
@@ -4579,9 +4662,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       await call("hosted.setModel", { sessionId: route.sessionId, model });
       modelsKey = "";
       await loadModels();
-      flashNotice(`模型已换成 ${model}，下一条消息按新模型运行`);
+      flashNotice(tr(`模型已换成 {0}，下一条消息按新模型运行`, model));
     } catch (error) {
-      flashNotice(`换模型失败：${messageOf(error)}`);
+      flashNotice(tr(`换模型失败：{0}`, messageOf(error)));
     }
   }
 
@@ -4592,9 +4675,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       await call("hosted.setSubagentModel", { sessionId: route.sessionId, model: model || null });
       modelsKey = "";
       await loadModels();
-      flashNotice(model ? `子代理模型已换成 ${model}，新派生的子代理按它运行` : "子代理模型改回跟随 pi 设置");
+      flashNotice(model ? tr(`子代理模型已换成 {0}，新派生的子代理按它运行`, model) : tr("子代理模型改回跟随 pi 设置"));
     } catch (error) {
-      flashNotice(`换子代理模型失败：${messageOf(error)}`);
+      flashNotice(tr(`换子代理模型失败：{0}`, messageOf(error)));
     }
   }
 
@@ -4617,31 +4700,29 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const headToggle = button("", () => {
     const isCollapsed = head.classList.toggle("is-collapsed");
     headToggle.setAttribute("aria-expanded", String(!isCollapsed));
-    headToggle.setAttribute("aria-label", isCollapsed ? "展开会话信息" : "收起会话信息");
+    headToggle.setAttribute("aria-label", isCollapsed ? tr("展开会话信息") : tr("收起会话信息"));
     headToggle.replaceChildren(
       icon("chevron", "icon head-chev"),
-      el("span", { text: isCollapsed ? "展开" : "收起" }),
+      el("span", { text: isCollapsed ? tr("展开") : tr("收起") }),
     );
   }, "head-toggle");
   headToggle.setAttribute("aria-expanded", String(!collapsed));
-  headToggle.setAttribute("aria-label", collapsed ? "展开会话信息" : "收起会话信息");
-  headToggle.append(icon("chevron", "icon head-chev"), el("span", { text: collapsed ? "展开" : "收起" }));
+  headToggle.setAttribute("aria-label", collapsed ? tr("展开会话信息") : tr("收起会话信息"));
+  headToggle.append(icon("chevron", "icon head-chev"), el("span", { text: collapsed ? tr("展开") : tr("收起") }));
   const railToggle = button("", () => {
     const open = !rail.root.classList.contains("is-open");
     rail.setOpen(open);
     writeRailOpen(open);
   }, "icon-btn rail-toggle");
-  railToggle.append(icon("rail", "icon"), el("span", { className: "rail-toggle-label", text: "侧栏" }));
-  railToggle.setAttribute("aria-label", "显示会话侧栏");
-  railToggle.title = "显示环境、上下文、连接器与后台任务";
+  railToggle.append(icon("rail", "icon"), el("span", { className: "rail-toggle-label", text: tr("侧栏") }));
+  railToggle.setAttribute("aria-label", tr("显示会话侧栏"));
+  railToggle.title = tr("显示环境、上下文、连接器与后台任务");
 
   const chatMeta = summary.hosted
-    ? `${timeLabel(summary.updatedAt)}更新 · 由 Bridge 托管，不出现在桌面应用 · 模型 ${hostedModelLabel(
+    ? tr(`{0}更新 · 由 Bridge 托管，不出现在桌面应用 · 模型 {1} · {2} · {3}{4}`, timeLabel(summary.updatedAt), hostedModelLabel(
         summary.model,
-      )} · ${hostedModeFact(summary)} · ${
-        summary.live ? "进程运行中" : "进程已停止，发送时自动恢复"
-      }${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`
-    : `${timeLabel(summary.updatedAt)}更新 · ${summary.live ? "桌面正在运行这个会话" : summary.canSend ? "桌面未运行该会话，发送时自动打开" : "桌面未打开"}${summary.canSend ? "" : ` · ${summary.sendBlockedReason ?? "只读"}`}`;
+      ), hostedModeFact(summary), summary.live ? tr("进程运行中") : tr("进程已停止，发送时自动恢复"), summary.canSend ? "" : tr(` · {0}`, summary.sendBlockedReason ?? tr("只读")))
+    : tr(`{0}更新 · {1}{2}`, timeLabel(summary.updatedAt), summary.live ? tr("桌面正在运行这个会话") : summary.canSend ? tr("桌面未运行该会话，发送时自动打开") : tr("桌面未打开"), summary.canSend ? "" : tr(` · {0}`, summary.sendBlockedReason ?? tr("只读")));
   // Bridge 侧覆盖了显示名时同时展示原名，回源应用里仍能认出这条会话。
   const rename = button("", () => {
     renameSessionSheet(summary, (renamed) => {
@@ -4657,38 +4738,38 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     });
   }, "icon-btn rename-btn");
   rename.append(icon("pencil"));
-  rename.setAttribute("aria-label", "重命名会话");
-  rename.title = "重命名会话";
+  rename.setAttribute("aria-label", tr("重命名会话"));
+  rename.title = tr("重命名会话");
 
   const pinButton = button("", () => void setSessionPinned(summary, !summary.pinned), "icon-btn pin-btn");
   pinButton.append(icon(summary.pinned ? "pinOff" : "pin"));
-  pinButton.setAttribute("aria-label", summary.pinned ? "取消置顶" : "置顶会话");
+  pinButton.setAttribute("aria-label", summary.pinned ? tr("取消置顶") : tr("置顶会话"));
   pinButton.setAttribute("aria-pressed", String(summary.pinned === true));
-  pinButton.title = summary.pinned ? "取消置顶" : "置顶会话";
+  pinButton.title = summary.pinned ? tr("取消置顶") : tr("置顶会话");
   const archiveButton = summary.hosted
     ? button("", () => void setSessionArchived(summary, !summary.archived), "icon-btn archive-btn")
     : null;
   if (archiveButton) {
     archiveButton.append(icon(summary.archived ? "unarchive" : "archive"));
-    archiveButton.setAttribute("aria-label", summary.archived ? "取消归档" : "归档会话");
-    archiveButton.title = summary.archived ? "取消归档" : "归档会话";
+    archiveButton.setAttribute("aria-label", summary.archived ? tr("取消归档") : tr("归档会话"));
+    archiveButton.title = summary.archived ? tr("取消归档") : tr("归档会话");
   }
   const deleteButton = summary.hosted
     ? button("", () => void deleteHostedSession(summary), "icon-btn danger delete-btn")
     : null;
   if (deleteButton) {
     deleteButton.append(icon("trash"));
-    deleteButton.setAttribute("aria-label", "删除会话");
-    deleteButton.title = "删除会话（停进程、删聊天记录）";
+    deleteButton.setAttribute("aria-label", tr("删除会话"));
+    deleteButton.title = tr("删除会话（停进程、删聊天记录）");
   }
 
   head.append(
     back,
     el("div", { className: "view-head-main" }, [
-      el("p", { className: "eyebrow", text: `${data.apps.find((item) => item.appId === route.appId)?.name ?? "客户端"} · ${project?.name ?? "工程"}` }),
+      el("p", { className: "eyebrow", text: tr(`{0} · {1}`, data.apps.find((item) => item.appId === route.appId)?.name ?? tr("客户端"), project?.name ?? tr("工程")) }),
       el("h1", { className: "display chat-title", text: summary.title }),
       (() => {
-        const metaText = `${chatMeta}${summary.originalTitle ? ` · 原名：${summary.originalTitle}` : ""}`;
+        const metaText = tr(`{0}{1}`, chatMeta, summary.originalTitle ? tr(` · 原名：{0}`, summary.originalTitle) : "");
         // 桌面端头部只留一行，说明会被省略号截断，完整内容挂在 title 上。
         return el("p", { className: "meta", text: metaText, attrs: { title: metaText } });
       })(),
@@ -4728,8 +4809,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   rail.onChange = (open) => {
     main.classList.toggle("has-rail", open);
     railToggle.setAttribute("aria-pressed", String(open));
-    railToggle.setAttribute("aria-label", open ? "隐藏会话侧栏" : "显示会话侧栏");
-    railToggle.title = open ? "隐藏会话侧栏" : "显示环境、上下文、连接器与后台任务";
+    railToggle.setAttribute("aria-label", open ? tr("隐藏会话侧栏") : tr("显示会话侧栏"));
+    railToggle.title = open ? tr("隐藏会话侧栏") : tr("显示环境、上下文、连接器与后台任务");
   };  renderShell(main, crumbsFor(route));
   if (rail.root.classList.contains("is-open")) void refreshRail(rail.state);
   const form = app.querySelector<HTMLFormElement>(".composer");
@@ -4786,20 +4867,24 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   const summary = data.sessions.find((item) => item.sessionId === route.sessionId);
   if (!summary) {
     renderShell(
-      errorView("找不到这个会话", "它可能已经从桌面应用中删除，返回列表刷新试试。"),
+      errorView(tr("找不到这个会话"), tr("它可能已经从桌面应用中删除，返回列表刷新试试。"), () => {
+        // 快照里没有它：先重拉一次再判断，否则只是用同一份旧快照重画同一个错误页。
+        snapshot = null;
+        void renderRoute();
+      }),
       crumbsFor(route),
     );
     return;
   }
-  document.title = `后台任务 · ${summary.title} · Agent Bridge`;
+  document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
   markRead(summary.sessionId);
   previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
   previewSessionId = summary.sessionId;
 
-  const note = el("p", { className: "hint", text: "正在读取子任务记录…" });
+  const note = el("p", { className: "hint", text: tr("正在读取子任务记录…") });
   const list = el("div", { className: "transcript-body" });
   const status = el("p", { className: "hint" });
-  const loadOlder = button("加载更早", () => void older(), "btn secondary small");
+  const loadOlder = button(tr("加载更早"), () => void older(), "btn secondary small");
   loadOlder.hidden = true;
 
   const back = backButton(() =>
@@ -4813,7 +4898,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   const head = el("section", { className: "view-head chat-head" }, [
     back,
     el("div", { className: "view-head-main" }, [
-      el("p", { className: "eyebrow", text: "后台任务 · 子代理记录" }),
+      el("p", { className: "eyebrow", text: tr("后台任务 · 子代理记录") }),
       el("h1", { className: "display chat-title", text: route.taskId }),
       el("p", { className: "meta", text: summary.title }),
     ]),
@@ -4836,7 +4921,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
   const paint = (): void => {
     list.replaceChildren();
     if (messages.length === 0) {
-      list.append(emptyState("没有可读取的记录", "这个子任务可能只做了工具调用，或者记录尚未写入。"));
+      list.append(emptyState(tr("没有可读取的记录"), tr("这个子任务可能只做了工具调用，或者记录尚未写入。")));
       return;
     }
     let turn: MessageRecord[] = [];
@@ -4892,7 +4977,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     note.textContent = first.note ?? "";
     loadOlder.hidden = !first.nextBefore;
     paint();
-    document.title = `后台任务 · ${summary.title} · Agent Bridge`;
+    document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
   } else {
     note.textContent = "";
   }
@@ -4906,10 +4991,10 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       const meta = head.querySelector<HTMLElement>(".chat-head .meta");
       if (meta) {
         const parts = [summary.title, railTaskMeta(task)];
-        if (task.updatedAt) parts.push(`${timeLabel(task.updatedAt)}更新`);
+        if (task.updatedAt) parts.push(tr(`{0}更新`, timeLabel(task.updatedAt)));
         meta.textContent = parts.join(" · ");
       }
-      document.title = `后台任务 · ${task.name}`;
+      document.title = tr(`后台任务 · {0}`, task.name);
     }
   } catch {
     // the rail is decoration here; the record itself already loaded
@@ -5034,14 +5119,14 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
   };
   const close = el("button", {
     className: "icon-btn",
-    attrs: { type: "button", "aria-label": "关闭侧栏", title: "关闭侧栏" },
+    attrs: { type: "button", "aria-label": tr("关闭侧栏"), title: tr("关闭侧栏") },
   }, [icon("close")]);
   const tabBar = el("div", { className: "rail-tabs", attrs: { role: "tablist" } });
   state.tabBar = tabBar;
   const labels: Array<[RailTab, string]> = [
-    ["overview", "概览"],
-    ["files", "文件"],
-    ["shell", "命令"],
+    ["overview", tr("概览")],
+    ["files", tr("文件")],
+    ["shell", tr("命令")],
   ];
   for (const [tab, label] of labels) {
     const node = button(label, () => selectRailTab(state, tab), "rail-tab");
@@ -5052,12 +5137,12 @@ function createRail(sessionId: string, appId: string, projectCwd: string | undef
     tabBar.append(node);
   }
   paintRailHint(state);
-  const root = el("aside", { className: "rail", attrs: { "aria-label": "会话侧栏" } });
+  const root = el("aside", { className: "rail", attrs: { "aria-label": tr("会话侧栏") } });
   // The header's toggle reads state.root when clicked, so bind the real node before building it.
   state.root = root;
   root.append(
     el("div", { className: "rail-head" }, [
-      el("span", { className: "rail-title", text: "会话侧栏" }),
+      el("span", { className: "rail-title", text: tr("会话侧栏") }),
       el("div", { className: "rail-head-actions" }, [railExpandButton(state), close]),
     ]),
     tabBar,
@@ -5121,11 +5206,11 @@ function paintRailHint(state: RailState): void {
   const terminal = state.devtools?.terminal.enabled === true;
   const hint =
     files && terminal
-      ? "文件浏览与命令执行已开启"
+      ? tr("文件浏览与命令执行已开启")
       : files
-        ? "文件浏览已开启"
+        ? tr("文件浏览已开启")
         : terminal
-          ? "命令执行已开启"
+          ? tr("命令执行已开启")
           : undefined;
   if (hint) state.tabBar.dataset["hint"] = hint;
   else delete state.tabBar.dataset["hint"];
@@ -5172,16 +5257,16 @@ function paintRail(state: RailState, result: SessionRailResult): void {
   state.signature = signature;
   const scroll = state.body.scrollTop;
   state.body.replaceChildren(
-    railSection("环境", result.environment.map(railRow)),
-    railSection("上下文", [railContext(result.context)]),
+    railSection(tr("环境"), result.environment.map(railRow)),
+    railSection(tr("上下文"), [railContext(result.context)]),
     railSection(
-      "连接器",
+      tr("连接器"),
       result.servers.length > 0
         ? [el("div", { className: "rail-chips" }, result.servers.map((server) => railChip(server)))]
-        : [el("p", { className: "rail-empty", text: "没有挂载 MCP 连接器" })],
+        : [el("p", { className: "rail-empty", text: tr("没有挂载 MCP 连接器") })],
       result.servers.length,
     ),
-    railSection("后台任务", railTasks(state, result.tasks), result.tasks.length),
+    railSection(tr("后台任务"), railTasks(state, result.tasks), result.tasks.length),
   );
   if (result.note) state.body.append(el("p", { className: "rail-note", text: result.note }));
   state.body.scrollTop = scroll;
@@ -5194,14 +5279,14 @@ async function openFilesPane(state: RailState): Promise<void> {
   if (!state.devtools?.files.enabled) {
     state.files = null;
     state.panes.files.replaceChildren(
-      el("p", { className: "rail-empty", text: "文件浏览未开启，请在 Mac 菜单栏的「远程工具」中打开。" }),
+      el("p", { className: "rail-empty", text: tr("文件浏览未开启，请在 Mac 菜单栏的「远程工具」中打开。") }),
     );
     return;
   }
   if (!state.projectRoot) {
     state.files = null;
     state.panes.files.replaceChildren(
-      el("p", { className: "rail-empty", text: "这个会话没有项目目录，无法浏览文件。" }),
+      el("p", { className: "rail-empty", text: tr("这个会话没有项目目录，无法浏览文件。") }),
     );
     return;
   }
@@ -5219,7 +5304,7 @@ async function openFilesPane(state: RailState): Promise<void> {
     error: null,
     loading: false,
   };
-  paintFiles(state, "正在读取项目目录…");
+  paintFiles(state, tr("正在读取项目目录…"));
   await loadFileRoots(state);
 }
 
@@ -5227,15 +5312,15 @@ async function loadFileRoots(state: RailState): Promise<void> {
   const files = state.files;
   if (!files) return;
   files.loading = true;
-  paintFiles(state, "正在读取项目目录…");
+  paintFiles(state, tr("正在读取项目目录…"));
   try {
-    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    if (!state.projectRoot) throw new Error(tr("这个会话没有项目目录"));
     const result = await call<FsRootsResult>("fs.roots", {
       sessionId: state.sessionId,
       root: state.projectRoot,
     });
     files.roots = result.roots;
-    files.error = result.roots.length === 0 ? "没有可浏览的项目目录" : null;
+    files.error = result.roots.length === 0 ? tr("没有可浏览的项目目录") : null;
   } catch (error) {
     files.error = messageOf(error);
   }
@@ -5254,9 +5339,9 @@ async function listFiles(state: RailState, path: string): Promise<void> {
   if (!files) return;
   files.loading = true;
   files.preview = null;
-  paintFiles(state, "正在读取…");
+  paintFiles(state, tr("正在读取…"));
   try {
-    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    if (!state.projectRoot) throw new Error(tr("这个会话没有项目目录"));
     const result = await call<FsListResult>("fs.list", {
       sessionId: state.sessionId,
       root: state.projectRoot,
@@ -5277,9 +5362,9 @@ async function openFile(state: RailState, path: string): Promise<void> {
   const files = state.files;
   if (!files) return;
   files.loading = true;
-  paintFiles(state, "正在读取文件…");
+  paintFiles(state, tr("正在读取文件…"));
   try {
-    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    if (!state.projectRoot) throw new Error(tr("这个会话没有项目目录"));
     files.preview = await call<FsReadResult>("fs.read", {
       sessionId: state.sessionId,
       root: state.projectRoot,
@@ -5298,14 +5383,23 @@ function railExpandButton(state: RailState): HTMLButtonElement {
   return classToggleButton(
     state.root,
     "is-expanded",
-    "全屏侧栏",
-    "退出全屏侧栏",
+    tr("全屏侧栏"),
+    tr("退出全屏侧栏"),
   );
 }
 
 /** In the file preview header: only the reader goes fullscreen, no rail chrome. */
+/** 侧栏预览头部的小图标按钮：和全屏按钮同一行、同样尺寸。 */
+function railIconButton(name: Parameters<typeof icon>[0], title: string, onClick: () => void): HTMLButtonElement {
+  const node = button("", onClick, "icon-btn rail-icon-btn");
+  node.append(icon(name, "icon"));
+  node.title = title;
+  node.setAttribute("aria-label", title);
+  return node;
+}
+
 function previewFullButton(state: RailState): HTMLButtonElement {
-  return classToggleButton(state.root, "is-preview-full", "全屏查看文件", "退出全屏查看");
+  return classToggleButton(state.root, "is-preview-full", tr("全屏查看文件"), tr("退出全屏查看"));
 }
 
 const toggleTargets = new WeakMap<HTMLButtonElement, HTMLElement>();
@@ -5375,13 +5469,13 @@ function paintFiles(state: RailState, placeholder?: string): void {
     else void loadFileRoots(state);
   }, "icon-btn rail-icon-btn");
   refresh.append(icon("refresh", "icon"));
-  refresh.title = "刷新目录";
+  refresh.title = tr("刷新目录");
   bar.append(refresh);
   pane.append(bar);
 
   if (files.root) pane.append(fileCrumbs(state));
   if (files.loading) {
-    pane.append(el("p", { className: "rail-empty", text: placeholder ?? "正在读取…" }));
+    pane.append(el("p", { className: "rail-empty", text: placeholder ?? tr("正在读取…") }));
     return;
   }
   if (files.error) {
@@ -5389,7 +5483,7 @@ function paintFiles(state: RailState, placeholder?: string): void {
     return;
   }
   if (files.entries.length === 0) {
-    pane.append(el("p", { className: "rail-empty", text: "这个目录是空的" }));
+    pane.append(el("p", { className: "rail-empty", text: tr("这个目录是空的") }));
     return;
   }
   const list = el("div", { className: "rail-files" });
@@ -5404,7 +5498,7 @@ function fileCrumbs(state: RailState): HTMLElement {
   if (files.parent) {
     const up = button("", () => void listFiles(state, files.parent!), "rail-crumb rail-crumb-up");
     up.append(icon("back"));
-    up.title = "上一级";
+    up.title = tr("上一级");
     bar.append(up);
   }
   bar.append(button(root.name || "/", () => void listFiles(state, root.path), "rail-crumb"));
@@ -5441,11 +5535,25 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     paintFiles(state);
   }, "icon-btn rail-icon-btn");
   back.append(icon("back"));
-  back.title = "返回目录";
+  back.title = tr("返回目录");
+  const hasText = typeof file.text === "string" && file.text.length > 0;
+  const copy = railIconButton("copy", tr("复制文件内容"), () => {
+    if (!hasText) return;
+    void navigator.clipboard.writeText(file.text ?? "").then(
+      () => {
+        copy.replaceChildren(icon("check", "icon"));
+        window.setTimeout(() => copy.replaceChildren(icon("copy", "icon")), 1_500);
+      },
+      () => flashNotice(tr("复制失败：浏览器拒绝了剪贴板访问")),
+    );
+  });
+  copy.disabled = !hasText;
   wrap.append(
     el("div", { className: "rail-filebar" }, [
       back,
       el("span", { className: "rail-filebar-name", text: file.name, attrs: { title: file.path } }),
+      railIconButton("download", tr(`下载 {0}`, file.name), () => downloadPreviewFile(file, file.name)),
+      copy,
       previewFullButton(state),
     ]),
   );
@@ -5458,7 +5566,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
     );
   } else if (file.mime === "text/markdown") {
     const body = el("div", { className: "markdown rail-markdown" });
-    body.append(renderMarkdown(file.text ?? ""));
+    body.append(renderMarkdown(file.text ?? "", MARKDOWN_OPTIONS));
     wrap.append(body);
   } else {
     wrap.append(el("pre", { className: "rail-preview-text", text: file.text ?? "" }));
@@ -5466,7 +5574,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
   wrap.append(
     el("p", {
       className: "rail-note",
-      text: `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`,
+      text: tr(`{0} · {1}{2}`, sizeLabel(file.size), new Date(file.mtime).toLocaleString(), file.truncated ? tr(" · 只显示前 1 MB") : ""),
     }),
   );
   return wrap;
@@ -5480,14 +5588,14 @@ async function openShellPane(state: RailState): Promise<void> {
   if (!state.devtools?.terminal.enabled) {
     state.shell = null;
     pane.replaceChildren(
-      el("p", { className: "rail-empty", text: "命令执行未开启，请在 Mac 菜单栏的「远程工具」中打开。" }),
+      el("p", { className: "rail-empty", text: tr("命令执行未开启，请在 Mac 菜单栏的「远程工具」中打开。") }),
     );
     return;
   }
   if (!state.projectRoot) {
     state.shell = null;
     pane.replaceChildren(
-      el("p", { className: "rail-empty", text: "这个会话没有项目目录，无法执行命令。" }),
+      el("p", { className: "rail-empty", text: tr("这个会话没有项目目录，无法执行命令。") }),
     );
     return;
   }
@@ -5500,10 +5608,10 @@ async function openShellPane(state: RailState): Promise<void> {
   const cwdLine = el("p", { className: "shell-cwd" });
   const input = el("input", {
     className: "input shell-input",
-    attrs: { type: "text", placeholder: "输入命令后回车", autocomplete: "off", spellcheck: "false" },
+    attrs: { type: "text", placeholder: tr("输入命令后回车"), autocomplete: "off", spellcheck: "false" },
   });
-  const run = button("执行", () => void runShell(state), "btn primary shell-run");
-  const stop = button("停止", () => void stopShell(state), "btn secondary shell-stop");
+  const run = button(tr("执行"), () => void runShell(state), "btn primary shell-run");
+  const stop = button(tr("停止"), () => void stopShell(state), "btn secondary shell-stop");
   stop.hidden = true;
   const form = el("form", { className: "shell-form" }, [input, run, stop]);
   form.addEventListener("submit", (event) => {
@@ -5525,7 +5633,7 @@ async function openShellPane(state: RailState): Promise<void> {
   });
   const cwd = state.projectRoot;
   pane.append(
-    el("p", { className: "rail-empty shell-hint", text: "在项目目录里执行单条命令，输出实时返回。远程工具关闭后立刻不可用。" }),
+    el("p", { className: "rail-empty shell-hint", text: tr("在项目目录里执行单条命令，输出实时返回。远程工具关闭后立刻不可用。") }),
     cwdLine,
     output,
     form,
@@ -5583,9 +5691,9 @@ function queueShellEvent(data: ShellEventData): void {
 function applyShellEvent(run: ShellRun, data: ShellEventData): void {
   if (data.type === "exit") {
     run.done = true;
-    const tail = data.killed ? "已终止" : `退出码 ${data.code ?? data.signal ?? "?"}`;
+    const tail = data.killed ? tr("已终止") : tr(`退出码 {0}`, data.code ?? data.signal ?? "?");
     run.text = capShellText(
-      `${run.text}\n[${tail}${data.truncated ? "，输出已截断" : ""} · ${(data.durationMs / 1000).toFixed(1)}s]\n`,
+      tr(`{0}\n[{1}{2} · {3}s]\n`, run.text, tail, data.truncated ? tr("，输出已截断") : "", (data.durationMs / 1000).toFixed(1)),
     );
   } else {
     run.text = capShellText(run.text + data.data);
@@ -5620,7 +5728,7 @@ async function runShell(state: RailState): Promise<void> {
   shell.output.textContent = capShellText(`${shell.output.textContent ?? ""}$ ${command}\n`);
   shell.output.scrollTop = shell.output.scrollHeight;
   try {
-    if (!state.projectRoot) throw new Error("这个会话没有项目目录");
+    if (!state.projectRoot) throw new Error(tr("这个会话没有项目目录"));
     const result = await call<ShellExecResult>(
       "shell.exec",
       { sessionId: state.sessionId, root: state.projectRoot, command, cwd: shell.cwd },
@@ -5657,7 +5765,7 @@ async function stopShell(state: RailState): Promise<void> {
   try {
     await call<ShellCancelResult>("shell.cancel", { execId });
     const run = shellRuns.get(execId);
-    if (run) run.text = capShellText(`${run.text}\n^C 已请求停止\n`);
+    if (run) run.text = capShellText(tr(`{0}\n^C 已请求停止\n`, run.text));
     syncShellPane(state);
   } catch (error) {
     shell.notice = `${messageOf(error)}\n`;
@@ -5670,7 +5778,7 @@ function interruptShellRuns(): void {
   for (const run of shellRuns.values()) {
     if (run.done) continue;
     run.done = true;
-    run.text = capShellText(`${run.text}\n[连接已断开，命令已终止]\n`);
+    run.text = capShellText(tr(`{0}\n[连接已断开，命令已终止]\n`, run.text));
   }
   const rail = currentRail;
   if (rail?.state.shell) {
@@ -5703,13 +5811,13 @@ function railChip(server: { name: string; detail?: string }): HTMLElement {
 }
 
 function railContext(context: ContextUsage | undefined): HTMLElement {
-  if (!context) return el("p", { className: "rail-empty", text: "这个会话还没有上下文用量" });
+  if (!context) return el("p", { className: "rail-empty", text: tr("这个会话还没有上下文用量") });
   const window = Math.max(1, context.windowTokens);
   const ratio = Math.min(1, context.usedTokens / window);
   const percent = Math.max(2, Math.round(ratio * 100));
   const meter = el("div", {
     className: "rail-meter",
-    attrs: { role: "img", "aria-label": `上下文已用 ${percent}%` },
+    attrs: { role: "img", "aria-label": tr(`上下文已用 {0}%`, percent) },
   }, [el("span", { className: "rail-meter-fill", attrs: { style: `width:${percent}%` } })]);
   const wrap = el("div", { className: "rail-context" }, [
     el("div", { className: "rail-context-line" }, [
@@ -5718,7 +5826,7 @@ function railContext(context: ContextUsage | undefined): HTMLElement {
     ]),
     meter,
   ]);
-  if (context.windowEstimated) wrap.append(el("p", { className: "rail-note", text: "窗口大小为估算值" }));
+  if (context.windowEstimated) wrap.append(el("p", { className: "rail-note", text: tr("窗口大小为估算值") }));
   return wrap;
 }
 
@@ -5727,7 +5835,7 @@ function railTasks(state: RailState, tasks: RailTask[]): Node[] {
     return [
       el("p", {
         className: "rail-empty",
-        text: state.appId === "codex" ? "Codex 线程没有可读取的子任务记录" : "没有正在运行的后台任务",
+        text: state.appId === "codex" ? tr("Codex 线程没有可读取的子任务记录") : tr("没有正在运行的后台任务"),
       }),
     ];
   }
@@ -5762,13 +5870,14 @@ function railTaskMeta(task: RailTask): string {
   const parts: string[] = [];
   if (task.agentType) parts.push(task.agentType);
   if (task.model) parts.push(task.model);
-  if (task.status === "running") parts.push("运行中");
-  if (typeof task.depth === "number" && task.depth > 1) parts.push(`第 ${task.depth} 层`);
-  return parts.join(" · ") || (task.status === "running" ? "运行中" : "已结束");
+  if (task.status === "running") parts.push(tr("运行中"));
+  if (typeof task.depth === "number" && task.depth > 1) parts.push(tr(`第 {0} 层`, task.depth));
+  return parts.join(" · ") || (task.status === "running" ? tr("运行中") : tr("已结束"));
 }
 
-async function refreshTail(state: ChatState): Promise<MessageListResult | null> {
-  if (state.loading) return null;
+async function refreshTail(state: ChatState, force = false): Promise<MessageListResult | null> {
+  // force：用户点了「重试」，轮询那一轮还在飞也不能把这次默默丢弃。
+  if (state.loading && !force) return null;
   const startedAt = Date.now();
   state.loading = true;
   try {
@@ -5811,8 +5920,8 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
         compactChanged = true;
       } else if (state.compact?.pending) {
         // 先前确认的压缩请求已经不在客户端的待办里：完成或失效，按完成提示。
-        state.compact = { pending: false, note: "已压缩上下文" };
-        state.status.textContent = "客户端已完成上下文压缩";
+        state.compact = { pending: false, note: tr("已压缩上下文") };
+        state.status.textContent = tr("客户端已完成上下文压缩");
         compactChanged = true;
       }
     }
@@ -5834,9 +5943,15 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
       renderMessages(state);
     }
     if (state.rail?.root.classList.contains("is-open")) void refreshRail(state.rail);
+    // 手动重试成功了：把「正在重试…」与 error 类收回去，不要永久留着。
+    if (state.retrying) {
+      state.retrying = false;
+      state.status.classList.remove("error");
+      state.status.textContent = "";
+    }
     return result;
   } catch (error) {
-    if (active) state.status.textContent = messageOf(error);
+    if (active) statusError(state, error, () => void refreshTail(state, true));
     return null;
   } finally {
     state.loading = false;
@@ -5845,7 +5960,7 @@ async function refreshTail(state: ChatState): Promise<MessageListResult | null> 
 
 function stepTitle(text: string): string {
   const line = (text.split("\n")[0] ?? "").trim();
-  return line.length > 76 ? `${line.slice(0, 76)}…` : line || "过程";
+  return line.length > 76 ? `${line.slice(0, 76)}…` : line || tr("过程");
 }
 
 function processFold(steps: string[]): HTMLDetailsElement {
@@ -5853,7 +5968,7 @@ function processFold(steps: string[]): HTMLDetailsElement {
   fold.append(
     el("summary", { className: "turn-steps-summary" }, [
       icon("chevron", "icon turn-chev"),
-      el("span", { text: `执行过程 · ${steps.length} 步` }),
+      el("span", { text: tr(`执行过程 · {0} 步`, steps.length) }),
     ]),
     el(
       "div",
@@ -5898,7 +6013,7 @@ function paintContext(state: ChatState): void {
   const radius = 7;
   const circumference = 2 * Math.PI * radius;
   btn.className = `icon-btn context-btn ${level}`.trim();
-  btn.title = `上下文已用 ${percent}%`;
+  btn.title = tr(`上下文已用 {0}%`, percent);
   btn.innerHTML = `<svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true">
     <circle class="context-track" cx="10" cy="10" r="${radius}" fill="none" stroke-width="2.6"/>
     <circle class="context-arc" cx="10" cy="10" r="${radius}" fill="none" stroke-width="2.6" stroke-linecap="round" transform="rotate(-90 10 10)" stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${(circumference * (1 - ratio)).toFixed(2)}"/>
@@ -5919,7 +6034,7 @@ function paintContext(state: ChatState): void {
       })(),
     ]),
     ...(usage.model
-      ? [el("p", { className: "context-model", text: `${usage.model}${usage.windowEstimated ? " · 窗口按 200k 估算" : ""}` })]
+      ? [el("p", { className: "context-model", text: tr(`{0}{1}`, usage.model, usage.windowEstimated ? tr(" · 窗口按 200k 估算") : "") })]
       : []),
     ...(usage.details && usage.details.length > 0
       ? [el("dl", { className: "context-details" }, usage.details.flatMap((detail) => [
@@ -5966,7 +6081,7 @@ function contextCompactActions(state: ChatState): HTMLElement {
     const pending = state.compact?.pending === true;
     const btn = el("button", {
       className: "context-action",
-      text: pending ? "压缩中…" : "压缩上下文",
+      text: pending ? tr("压缩中…") : tr("压缩上下文"),
       attrs: { type: "button" },
     });
     btn.disabled = pending;
@@ -5976,7 +6091,7 @@ function contextCompactActions(state: ChatState): HTMLElement {
     } else if (state.compact?.note) {
       hint.textContent = state.compact.note;
     } else {
-      hint.textContent = "由桌面客户端自己压缩，摘要会写回该会话。";
+      hint.textContent = tr("由桌面客户端自己压缩，摘要会写回该会话。");
     }
     btn.addEventListener("click", () => {
       void runCompact(state);
@@ -5986,25 +6101,25 @@ function contextCompactActions(state: ChatState): HTMLElement {
   }
   const btn = el("button", {
     className: "context-action",
-    text: "复制 /compact",
+    text: tr("复制 /compact"),
     attrs: { type: "button" },
   });
-  hint.textContent = "浏览器无法直接操作客户端输入框；复制后粘贴到输入框发送。";
+  hint.textContent = tr("浏览器无法直接操作客户端输入框；复制后粘贴到输入框发送。");
   btn.addEventListener("click", () => {
     if (!navigator.clipboard) {
-      hint.textContent = "当前页面不能写剪贴板，请在客户端输入框手动输入 /compact";
+      hint.textContent = tr("当前页面不能写剪贴板，请在客户端输入框手动输入 /compact");
       hint.classList.add("is-error");
       return;
     }
     void navigator.clipboard.writeText("/compact").then(
       () => {
-        btn.textContent = "已复制";
+        btn.textContent = tr("已复制");
         setTimeout(() => {
-          btn.textContent = "复制 /compact";
+          btn.textContent = tr("复制 /compact");
         }, 1_500);
       },
       () => {
-        hint.textContent = "复制失败，请在客户端输入框手动输入 /compact";
+        hint.textContent = tr("复制失败，请在客户端输入框手动输入 /compact");
         hint.classList.add("is-error");
       },
     );
@@ -6014,82 +6129,103 @@ function contextCompactActions(state: ChatState): HTMLElement {
 }
 
 /**
- * pi 托管会话的自动压缩阈值：pi 只在上下文剩这么多 token 时触发压缩，
- * 默认 16384。阈值只能写在会话语义目录的 settings.json 里，改完会重启 pi 进程。
+ * pi 托管会话的自动压缩触发点：上下文用到模型窗口的这个百分比时 pi 自己压缩。
+ * pi 原生只认「预留多少 token」，大窗口模型几乎永远不触发，所以这里按百分比填，
+ * 由 Bridge 按当前模型窗口换算。改完会重启 pi 进程。
  */
 function contextCompactionSetting(state: ChatState): HTMLElement {
   const row = el("div", { className: "context-actions" });
   const pending = state.compaction?.pending === true;
-  const current = state.session.compactionReserveTokens;
+  const current = state.session.compactionTriggerPercent;
+  const legacy = state.session.compactionReserveTokens;
+  const window = state.context?.windowTokens;
+  const percent = typeof current === "number" ? current : DEFAULT_COMPACTION_TRIGGER_PERCENT;
   const input = el("input", {
     className: "context-input",
-    attrs: { type: "number", min: "0", step: "1024", inputmode: "numeric", placeholder: "16384", "data-persist": "compaction" },
+    attrs: {
+      type: "number",
+      min: "1",
+      max: "100",
+      step: "1",
+      inputmode: "numeric",
+      placeholder: String(DEFAULT_COMPACTION_TRIGGER_PERCENT),
+      "data-persist": "compaction",
+    },
   });
   if (typeof current === "number") input.value = String(current);
   input.disabled = pending;
-  input.setAttribute("aria-label", "自动压缩阈值（剩余 tokens）");
+  input.setAttribute("aria-label", tr("自动压缩触发点（窗口百分比）"));
   const save = el("button", {
     className: "context-action",
-    text: pending ? "保存中…" : "保存阈值",
+    text: pending ? tr("保存中…") : tr("保存"),
     attrs: { type: "button" },
   });
   save.disabled = pending;
   const follow = el("button", {
     className: "context-action",
-    text: "跟随 pi",
+    text: tr("恢复默认"),
     attrs: { type: "button" },
   });
   follow.disabled = pending;
+  const triggerLabel = window ? Math.round((window * percent) / 100).toLocaleString("en-US") : undefined;
   const hint = el("p", { className: "context-hint" });
   if (state.compaction?.error) {
     hint.textContent = state.compaction.error;
     hint.classList.add("is-error");
   } else if (state.compaction?.note) {
     hint.textContent = state.compaction.note;
+  } else if (typeof legacy === "number") {
+    // 老记录里存的是固定预留量：按当前窗口折算成触发点，避免两套说法并存。
+    hint.textContent = window
+      ? tr(`当前按旧设置预留 {0} tokens（约窗口用到 {1}%）；填百分比保存即换成新算法。`, legacy.toLocaleString("en-US"), Math.round(((window - legacy) / window) * 100))
+      : tr(`当前按旧设置预留 {0} tokens；填百分比保存即换成新算法。`, legacy.toLocaleString("en-US"));
+  } else if (typeof current === "number") {
+    hint.textContent = window
+      ? tr(`当前：窗口用到 {0}%（约 {1} / {2} tokens）时压缩；改完重启 pi 进程，下一条消息生效。`, current, triggerLabel ?? "", window.toLocaleString("en-US"))
+      : tr(`当前：窗口用到 {0}% 时压缩（窗口大小未知，启动后按实际模型换算）；改完重启 pi 进程，下一条消息生效。`, current);
   } else {
-    hint.textContent =
-      typeof current === "number"
-        ? `当前剩 ${current} tokens 时压缩；改完重启 pi 进程，下一条消息生效。`
-        : "当前跟随 pi 设置（默认剩 16384 tokens 时压缩）；改完重启 pi 进程，下一条消息生效。";
+    hint.textContent = window
+      ? tr(`当前：默认窗口用到 {0}%（约 {1} / {2} tokens）时压缩；改完重启 pi 进程，下一条消息生效。`, DEFAULT_COMPACTION_TRIGGER_PERCENT, triggerLabel ?? "", window.toLocaleString("en-US"))
+      : tr(`当前：默认窗口用到 {0}% 时压缩；改完重启 pi 进程，下一条消息生效。`, DEFAULT_COMPACTION_TRIGGER_PERCENT);
   }
   save.addEventListener("click", () => {
     const raw = input.value.trim();
-    const tokens = Number(raw);
-    if (!raw || !Number.isSafeInteger(tokens) || tokens < 0) {
-      hint.textContent = "填一个不小于 0 的整数（tokens）";
+    const value = Number(raw);
+    if (!raw || !Number.isSafeInteger(value) || value < 1 || value > 100) {
+      hint.textContent = tr("填 1 到 100 之间的整数（百分比）");
       hint.classList.add("is-error");
       return;
     }
-    void runSetCompaction(state, tokens);
+    void runSetCompaction(state, value);
   });
   follow.addEventListener("click", () => {
     void runSetCompaction(state, null);
   });
   row.append(
-    el("p", { className: "context-label", text: "自动压缩阈值" }),
+    el("p", { className: "context-label", text: tr("自动压缩触发点（窗口百分比）") }),
     el("div", { className: "context-compaction-row" }, [input, save, follow]),
     hint,
   );
   return row;
 }
 
-async function runSetCompaction(state: ChatState, tokens: number | null): Promise<void> {
+async function runSetCompaction(state: ChatState, percent: number | null): Promise<void> {
   if (state.compaction?.pending) return;
   state.compaction = { pending: true };
   paintContext(state);
   try {
     const result = await call<SessionGetResult>(
       "hosted.setCompaction",
-      { sessionId: state.session.sessionId, reserveTokens: tokens },
+      { sessionId: state.session.sessionId, triggerPercent: percent },
       60_000,
     );
     state.session = result.session;
     state.compaction = {
       pending: false,
       note:
-        tokens === null
-          ? "已改回跟随 pi 设置，下一条消息生效。"
-          : `已设为剩 ${tokens} tokens 时压缩，下一条消息生效。`,
+        percent === null
+          ? tr(`已恢复默认触发点（窗口用到 {0}%），下一条消息生效。`, DEFAULT_COMPACTION_TRIGGER_PERCENT)
+          : tr(`已设为窗口用到 {0}% 时压缩，下一条消息生效。`, percent),
     };
   } catch (error) {
     state.compaction = { pending: false, error: messageOf(error) };
@@ -6109,11 +6245,11 @@ async function runCompact(state: ChatState): Promise<void> {
       130_000,
     );
     if (result.compacted) {
-      state.compact = { pending: false, note: result.detail ?? "已压缩上下文" };
-      state.status.textContent = result.detail ?? "已在客户端压缩上下文";
+      state.compact = { pending: false, note: result.detail ?? tr("已压缩上下文") };
+      state.status.textContent = result.detail ?? tr("已在客户端压缩上下文");
       void refreshTail(state);
     } else {
-      state.compact = { pending: false, error: result.detail ?? "客户端没有执行压缩" };
+      state.compact = { pending: false, error: result.detail ?? tr("客户端没有执行压缩") };
     }
   } catch (error) {
     state.compact = { pending: false, error: messageOf(error) };
@@ -6125,8 +6261,8 @@ function queuedBubble(item: QueuedMessage): HTMLElement {
   const bubble = el("article", { className: "message user is-queued" });
   bubble.append(
     el("div", { className: "message-meta" }, [
-      el("span", { className: "role user", text: "用户" }),
-      el("span", { className: "pill tiny", text: item.held ? "排队中" : "已发送" }),
+      el("span", { className: "role user", text: tr("用户") }),
+      el("span", { className: "pill tiny", text: item.held ? tr("排队中") : tr("已发送") }),
       el("span", { className: "meta mono", text: new Date(item.at).toLocaleTimeString() }),
     ]),
     el("div", { className: "message-text", text: item.display }),
@@ -6138,21 +6274,33 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
   const bubble = el("article", { className: `message ${message.role}` });
   const hasText = message.blocks.some((block) => block.type === "text");
   const meta = el("div", { className: "message-meta" }, [
-    el("span", { className: `role ${message.role}`, text: message.role === "user" ? "用户" : message.role === "assistant" ? "助手" : "系统" }),
-    ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
+    el("span", { className: `role ${message.role}`, text: message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统") }),
+    ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
     ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
   ]);
-  if (hasText && session) meta.append(messageActions([copyButton(textBlocks([message])), shareButton(session, message)]));
+  if (hasText && session) {
+    meta.append(
+      messageActions([
+        copyButton(copySource(session.sessionId, [message])),
+        shareButton(session, message),
+        downloadButton(session, [message]),
+      ]),
+    );
+  }
   bubble.append(meta);
   for (const block of message.blocks) {
     bubble.append(
       block.type === "tool"
-        ? el("div", { className: "message-tool", text: block.truncated ? `${block.text}\n…（已截断）` : block.text })
+        ? el("div", { className: "message-tool", text: block.truncated ? tr(`{0}\n…（已截断）`, block.text) : block.text })
         : block.type === "next-step"
           ? nextStepBox(block, null)
           : block.type === "ask"
             ? askBox(block)
-            : markdownBlock(block.text, block.truncated),
+            : markdownBlock(
+                block.text,
+                block.truncated,
+                session ? () => void openMessageFullText(session.sessionId, message) : null,
+              ),
     );
   }
   return bubble;
@@ -6204,7 +6352,7 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
       el("div", { className: "ask-question-head" }, [
         ...(question.header ? [el("span", { className: "ask-header", text: question.header })] : []),
         el("span", { className: "ask-question-text", text: question.question }),
-        ...(question.multiSelect ? [el("span", { className: "ask-multi", text: "多选" })] : []),
+        ...(question.multiSelect ? [el("span", { className: "ask-multi", text: tr("多选") })] : []),
       ]),
     );
     if (question.options.length > 0) {
@@ -6213,7 +6361,7 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
       picks.set(question.question, picked);
       const choices: HTMLButtonElement[] = [];
       const submit = selectable && question.multiSelect && !batch
-        ? el("button", { className: "ask-submit", text: "提交选择", attrs: { type: "button" } })
+        ? el("button", { className: "ask-submit", text: tr("提交选择"), attrs: { type: "button" } })
         : null;
       for (const option of question.options) {
         const children = [
@@ -6288,7 +6436,7 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
   }
 
   if (batch && canAnswer) {
-    const submit = el("button", { className: "ask-submit", text: "提交答案", attrs: { type: "button" } });
+    const submit = el("button", { className: "ask-submit", text: tr("提交答案"), attrs: { type: "button" } });
     submit.disabled = true;
     submit.addEventListener("click", () => {
       const answers = questions.map((question) => ({ key: askKey(block, question), labels: labelsOf(question) }));
@@ -6307,16 +6455,16 @@ function askBox(block: MessageBlock, state: ChatState | null = null): HTMLElemen
       className: "ask-note",
       text:
         answered.length > 0
-          ? `已发送：${answered.flat().join("、")}`
+          ? tr(`已发送：{0}`, answered.flat().join("、"))
           : canAnswer
             ? batch
-              ? "逐个选好后点「提交答案」，会作为一条消息发到会话；桌面上的提问框不会自动关闭。"
+              ? tr("逐个选好后点「提交答案」，会作为一条消息发到会话；桌面上的提问框不会自动关闭。")
               : state?.session.askChannel === "herdr"
-                ? "点选后会在终端面板里替你按键选中这个选项。"
-                : "点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。"
+                ? tr("点选后会在终端面板里替你按键选中这个选项。")
+                : tr("点选后会把选项当消息发到会话；桌面上的提问框不会自动关闭。")
             : state?.session.askChannel === "herdr"
-              ? "这个提问有多道题或是多选，请在终端里回答"
-              : (state?.session.sendBlockedReason ?? "请在桌面端回答这个提问"),
+              ? tr("这个提问有多道题或是多选，请在终端里回答")
+              : (state?.session.sendBlockedReason ?? tr("请在桌面端回答这个提问")),
     }),
   );
   return box;
@@ -6332,14 +6480,14 @@ async function submitAskAnswers(
   if (!state) return;
   for (const item of buttons) item.disabled = true;
   state.status.classList.remove("error");
-  state.status.textContent = "正在发送选择…";
+  state.status.textContent = tr("正在发送选择…");
   try {
     const result = await call<MessageSendResult>("message.send", {
       sessionId: state.session.sessionId,
       text,
     }, 60_000);
     if (!result.accepted) {
-      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.textContent = result.detail ?? tr("未确认投递");
       state.status.classList.add("error");
       for (const item of buttons) item.disabled = false;
       return;
@@ -6358,8 +6506,8 @@ async function submitAskAnswers(
     paintStopButton(state);
     renderMessages(state);
     state.status.textContent = result.delivered
-      ? "已发送选择"
-      : (result.detail ?? "已提交，等待桌面执行");
+      ? tr("已发送选择")
+      : (result.detail ?? tr("已提交，等待桌面执行"));
     window.setTimeout(() => {
       void refreshTail(state);
     }, 800);
@@ -6382,7 +6530,7 @@ function nextStepBox(block: MessageBlock, state: ChatState | null): HTMLElement 
       className: "next-step-btn",
       attrs: {
         type: "button",
-        ...(action.action ? { title: "桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步" } : {}),
+        ...(action.action ? { title: tr("桥接端没有桌面宿主的执行通道，会以消息通知会话执行这一步") } : {}),
       },
       text: action.label,
     });
@@ -6403,16 +6551,16 @@ async function sendNextStep(
   action: NextStepAction,
   buttons: HTMLButtonElement[],
 ): Promise<void> {
-  const text = action.action ? `点击了「${action.label}」，请执行这一步。` : action.label;
+  const text = action.action ? tr(`点击了「{0}」，请执行这一步。`, action.label) : action.label;
   state.status.classList.remove("error");
-  state.status.textContent = "正在发送…";
+  state.status.textContent = tr("正在发送…");
   try {
     const result = await call<MessageSendResult>("message.send", {
       sessionId: state.session.sessionId,
       text,
     }, 60_000);
     if (!result.accepted) {
-      state.status.textContent = result.detail ?? "未确认投递";
+      state.status.textContent = result.detail ?? tr("未确认投递");
       state.status.classList.add("error");
       for (const item of buttons) item.disabled = false;
       return;
@@ -6430,11 +6578,11 @@ async function sendNextStep(
     renderMessages(state);
     state.status.textContent = state.session.hosted
       ? result.delivered
-        ? "已写入托管会话"
-        : (result.detail ?? "已提交")
+        ? tr("已写入托管会话")
+        : (result.detail ?? tr("已提交"))
       : result.delivered
-        ? "已投递到桌面会话"
-        : (result.detail ?? "已提交，等待桌面执行");
+        ? tr("已投递到桌面会话")
+        : (result.detail ?? tr("已提交，等待桌面执行"));
     window.setTimeout(() => {
       void refreshTail(state);
     }, 800);
@@ -6486,7 +6634,7 @@ function fileName(path: string): string {
 async function readLocalFile(path: string): Promise<FsReadResult> {
   const root = previewRoot;
   const sessionId = previewSessionId;
-  if (!root || !sessionId) throw new Error("这个会话没有项目目录，无法预览文件");
+  if (!root || !sessionId) throw new Error(tr("这个会话没有项目目录，无法预览文件"));
   const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
   return call<FsReadResult>("fs.read", { sessionId, root, path: full });
 }
@@ -6512,6 +6660,26 @@ function fileRefChip(label: string, path: string): HTMLElement {
   return chip;
 }
 
+/**
+ * 正文里裸写的本地路径（`apps/web/src/main.ts:12`）：变成和 markdown 链接一样的引用，
+ * 点了直接预览，不用去右侧文件树里找。`~/...` 不认（设备端不展开 home）。
+ */
+function localPathChip(path: string, line: string): HTMLElement | null {
+  if (path.startsWith("~/")) return null;
+  const cleaned = fileRefPath(path);
+  if (!cleaned) return null;
+  const chip = fileRefChip(fileName(cleaned), cleaned);
+  if (line) chip.title = `${cleaned}${line}`;
+  return chip;
+}
+
+/** markdown 渲染选项：本地链接、图片、正文里裸写的路径都走同一套本地文件处理。 */
+const MARKDOWN_OPTIONS = {
+  localLink: localFileLink,
+  localImage: localFileImage,
+  localPath: localPathChip,
+};
+
 /** A transcript link that points at a local file becomes a preview button. */
 function localFileLink(label: string, href: string): HTMLElement | null {
   const path = fileRefPath(href);
@@ -6523,7 +6691,7 @@ function localFileImage(alt: string, href: string): HTMLElement | null {
   const path = fileRefPath(href);
   if (!path || !IMAGE_EXT.test(path)) return null;
   const label = alt || fileName(path);
-  const button = el("button", { className: "md-figure-open", attrs: { type: "button", title: `查看 ${label}` } });
+  const button = el("button", { className: "md-figure-open", attrs: { type: "button", title: tr(`查看 {0}`, label) } });
   const img = el("img", { className: "md-img is-loading", attrs: { alt: label, loading: "lazy" } });
   button.append(img);
   const figure = el("figure", { className: "md-figure" }, [button, el("figcaption", { className: "md-figcaption", text: label })]);
@@ -6576,7 +6744,7 @@ function ensureFilePreview(): HTMLElement {
   filePreviewTitle = el("span", { className: "file-preview-name" });
   const close = el("button", {
     className: "icon-btn file-preview-close",
-    attrs: { type: "button", "aria-label": "关闭预览", title: "关闭预览" },
+    attrs: { type: "button", "aria-label": tr("关闭预览"), title: tr("关闭预览") },
   }, [icon("close")]);
   close.addEventListener("click", closeFilePreview);
   filePreviewBody = el("div", { className: "file-preview-body" });
@@ -6618,7 +6786,7 @@ async function openFilePreview(path: string): Promise<void> {
   }
   if (filePreviewNote) filePreviewNote.textContent = "";
   filePreviewActions?.replaceChildren();
-  filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: "正在读取…" }));
+  filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: tr("正在读取…") }));
   try {
     const file = await readLocalFile(path);
     // A newer preview (or a close) superseded this one while it was loading.
@@ -6628,17 +6796,20 @@ async function openFilePreview(path: string): Promise<void> {
       filePreviewBody?.replaceChildren(el("img", { className: "file-preview-img", attrs: { src, alt: file.name } }));
     } else if (file.mime === "text/markdown") {
       const body = el("div", { className: "markdown file-preview-md" });
-      body.append(renderMarkdown(file.text ?? ""));
+      body.append(renderMarkdown(file.text ?? "", MARKDOWN_OPTIONS));
       filePreviewBody?.replaceChildren(body);
     } else {
       filePreviewBody?.replaceChildren(el("pre", { className: "file-preview-text", text: file.text ?? "" }));
     }
-    // 复制的是文件原文（markdown、svg 也复制源码）；位图这类二进制没有可复制的文本。
-    if (filePreviewActions && typeof file.text === "string" && file.text.length > 0) {
-      filePreviewActions.replaceChildren(copyButton(file.text, "复制全部内容"));
+    // 复制的是文件原文（markdown、svg 也复制源码）；下载对图片与文本都提供。
+    const actions: HTMLElement[] = [];
+    if (typeof file.text === "string" && file.text.length > 0) {
+      actions.push(copyButton(file.text, tr("复制全部内容")));
     }
+    actions.push(previewDownloadButton(file, path));
+    filePreviewActions?.replaceChildren(...actions);
     if (filePreviewNote) {
-      filePreviewNote.textContent = `${sizeLabel(file.size)} · ${new Date(file.mtime).toLocaleString()}${file.truncated ? " · 只显示前 1 MB" : ""}`;
+      filePreviewNote.textContent = tr(`{0} · {1}{2}`, sizeLabel(file.size), new Date(file.mtime).toLocaleString(), file.truncated ? tr(" · 只显示前 1 MB") : "");
     }
   } catch (error) {
     if (request !== previewRequest) return;
@@ -6646,24 +6817,73 @@ async function openFilePreview(path: string): Promise<void> {
   }
 }
 
-/** Renders transcript text as Markdown; truncation is annotated after the content. */
-function markdownBlock(text: string, truncated?: boolean): HTMLElement {
+/**
+ * 长回复被列表截断（只给前几千字）时点「读取全文」：弹层里按 markdown 显示原文，
+ * 复制按钮拿的也是全文。弹层复用文件预览的卡片，关掉/按 Esc 就能回到会话。
+ * `sessionId` 用会话的（带 `hosted:` 这类前缀），不能用消息里存的裸 id。
+ */
+async function openMessageFullText(sessionId: string, message: MessageRecord): Promise<void> {
+  const overlay = ensureFilePreview();
+  const request = (previewRequest += 1);
+  overlay.hidden = false;
+  document.body.classList.add("has-file-preview");
+  if (filePreviewTitle) {
+    filePreviewTitle.textContent = message.role === "user" ? tr("完整消息") : tr("完整回复");
+    filePreviewTitle.title = "";
+  }
+  if (filePreviewNote) filePreviewNote.textContent = "";
+  filePreviewActions?.replaceChildren();
+  filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note", text: tr("正在读取全文…") }));
+  try {
+    const result = await call<MessageTextResult>(
+      "message.text",
+      { sessionId, messageId: message.messageId },
+      60_000,
+    );
+    if (request !== previewRequest) return;
+    const body = el("div", { className: "markdown file-preview-md" });
+    body.append(renderMarkdown(result.text, MARKDOWN_OPTIONS));
+    filePreviewBody?.replaceChildren(body);
+    filePreviewActions?.replaceChildren(copyButton(result.text, tr("复制全文")));
+    if (filePreviewNote) {
+      filePreviewNote.textContent = tr(`{0} 字{1}`, result.length.toLocaleString(), result.truncated ? tr(` · 只显示前 {0} 字`, result.text.length.toLocaleString()) : "");
+    }
+  } catch (error) {
+    if (request !== previewRequest) return;
+    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+  }
+}
+
+/** Renders transcript text as Markdown; truncation offers the full text behind a click. */
+function markdownBlock(text: string, truncated?: boolean, onLoadFull?: (() => void) | null): HTMLElement {
   const node = el("div", { className: "message-text md" });
   try {
-    node.append(renderMarkdown(text, { localLink: localFileLink, localImage: localFileImage }));
+    node.append(renderMarkdown(text, MARKDOWN_OPTIONS));
   } catch {
     // A rendering failure must never blank the transcript; fall back to plain text.
     node.textContent = text;
   }
-  if (truncated) node.append(el("p", { className: "md-note", text: "…（已截断）" }));
+  if (truncated) {
+    if (onLoadFull) {
+      const more = el("button", {
+        className: "md-note md-note-more",
+        attrs: { type: "button" },
+        text: tr("…（已截断）读取全文"),
+      });
+      more.addEventListener("click", onLoadFull);
+      node.append(more);
+    } else {
+      node.append(el("p", { className: "md-note", text: tr("…（已截断）") }));
+    }
+  }
   return node;
 }
 
 function shareButton(session: SessionSummary, message: MessageRecord): HTMLButtonElement {
   const share = el("button", {
     className: "share-btn",
-    attrs: { type: "button", title: "分享到其他客户端", "aria-label": "分享这条消息" },
-  }, [icon("share"), el("span", { text: "分享" })]);
+    attrs: { type: "button", title: tr("分享到其他客户端"), "aria-label": tr("分享这条消息") },
+  }, [icon("share"), el("span", { text: tr("分享") })]);
   share.addEventListener("click", () => {
     void openShare(session, message);
   });
@@ -6671,8 +6891,8 @@ function shareButton(session: SessionSummary, message: MessageRecord): HTMLButto
 }
 
 /** 复制一段输出；写剪贴板失败时给出可见反馈，不静默。 */
-function copyButton(text: string, title = "复制这段输出"): HTMLButtonElement {
-  const label = el("span", { text: "复制" });
+function copyButton(text: string | (() => Promise<string>), title = tr("复制这段输出")): HTMLButtonElement {
+  const label = el("span", { text: tr("复制") });
   const copy = el("button", {
     className: "share-btn copy-btn",
     attrs: { type: "button", title, "aria-label": title },
@@ -6680,18 +6900,29 @@ function copyButton(text: string, title = "复制这段输出"): HTMLButtonEleme
   const flash = (next: string): void => {
     label.textContent = next;
     setTimeout(() => {
-      label.textContent = "复制";
+      label.textContent = tr("复制");
     }, 1_500);
   };
   copy.addEventListener("click", () => {
     if (!navigator.clipboard) {
-      flash("无法复制");
+      flash(tr("无法复制"));
       return;
     }
-    void navigator.clipboard.writeText(text).then(
-      () => flash("已复制"),
-      () => flash("复制失败"),
-    );
+    // 正文被截断的回复要先回 Bridge 拿全文，再写剪贴板；取失败时不能假装复制成功。
+    if (typeof text === "string") {
+      void navigator.clipboard.writeText(text).then(
+        () => flash(tr("已复制")),
+        () => flash(tr("复制失败")),
+      );
+      return;
+    }
+    flash(tr("读取中…"));
+    void text()
+      .then((full) => navigator.clipboard.writeText(full))
+      .then(
+        () => flash(tr("已复制")),
+        () => flash(tr("复制失败")),
+      );
   });
   return copy;
 }
@@ -6709,6 +6940,110 @@ function textBlocks(messages: MessageRecord[]): string {
     .map((block) => block.text)
     .join("\n\n")
     .trim();
+}
+
+/** 列表里的长回复只给了前几千字；被截断的那条要回 Bridge 拿原文再拼。 */
+async function fullTextOf(sessionId: string, messages: MessageRecord[]): Promise<string> {
+  const parts: string[] = [];
+  for (const message of messages) {
+    const blocks = message.blocks.filter((block) => block.type === "text");
+    if (blocks.length === 0) continue;
+    if (blocks.every((block) => !block.truncated)) {
+      parts.push(blocks.map((block) => block.text).join("\n\n"));
+      continue;
+    }
+    const result = await call<MessageTextResult>(
+      "message.text",
+      { sessionId, messageId: message.messageId },
+      60_000,
+    );
+    parts.push(result.text);
+  }
+  return parts.join("\n\n").trim();
+}
+
+/** 复制/下载用：有截断就现取全文，否则直接用列表里的正文。 */
+function copySource(sessionId: string, messages: MessageRecord[]): string | (() => Promise<string>) {
+  const truncated = messages.some((message) =>
+    message.blocks.some((block) => block.type === "text" && block.truncated),
+  );
+  return truncated ? () => fullTextOf(sessionId, messages) : textBlocks(messages);
+}
+
+/** 下载名：`<会话名>-<年月日-时分>.md`，把文件名里的非法字符换掉。 */
+function downloadName(title: string, messages: MessageRecord[]): string {
+  const at = new Date(messages[messages.length - 1]?.createdAt || Date.now());
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  const stamp = `${at.getFullYear()}${pad(at.getMonth() + 1)}${pad(at.getDate())}-${pad(at.getHours())}${pad(at.getMinutes())}`;
+  const base = (title || tr("回复")).replace(/[\\/:*?"<>|\s]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+  return tr(`{0}-{1}.md`, base || tr("回复"), stamp);
+}
+
+/** 浏览器里生成文件并点一下下载；不经过剪贴板，Safari 上也能用。 */
+function saveTextFile(text: string, name: string): void {
+  saveBlobFile(new Blob([text], { type: "text/markdown;charset=utf-8" }), name);
+}
+
+/** 浏览器里生成文件并点一下下载；不经过剪贴板，Safari 上也能用。 */
+function saveBlobFile(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = el("a", { attrs: { href: url, download: name } });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  // 立刻 revoke 有的浏览器来不及取文件，留一会儿再清。
+  window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/** 预览弹层里的下载：图片按原始字节，文本按 UTF-8（超过 1 MB 的文本是截断后的部分）。 */
+function previewDownloadButton(file: FsReadResult, path: string): HTMLButtonElement {
+  const name = fileName(path);
+  const node = el(
+    "button",
+    { className: "share-btn", attrs: { type: "button", title: tr(`下载 {0}`, name), "aria-label": tr("下载文件") } },
+    [icon("download"), el("span", { text: tr("下载") })],
+  );
+  node.addEventListener("click", () => downloadPreviewFile(file, name));
+  return node;
+}
+
+/** 下载一个已读到的文件：图片按原始字节，文本按 UTF-8（弹层与侧栏共用）。 */
+function downloadPreviewFile(file: FsReadResult, name: string): void {
+  try {
+    if (file.dataBase64) {
+      const bytes = Uint8Array.from(atob(file.dataBase64), (ch) => ch.charCodeAt(0));
+      saveBlobFile(new Blob([bytes], { type: file.mime || "application/octet-stream" }), name);
+      return;
+    }
+    saveBlobFile(new Blob([file.text ?? ""], { type: file.mime || "text/plain;charset=utf-8" }), name);
+  } catch (error) {
+    flashNotice(tr(`下载失败：{0}`, messageOf(error)));
+  }
+}
+
+/** 下载这段回复（markdown）；正文被截断时先回 Bridge 取全文。 */
+function downloadButton(session: SessionSummary, messages: MessageRecord[]): HTMLButtonElement {
+  const title = tr("下载这段回复（Markdown）");
+  const node = el(
+    "button",
+    { className: "share-btn", attrs: { type: "button", title, "aria-label": tr("下载这段回复") } },
+    [icon("download")],
+  );
+  node.addEventListener("click", () => {
+    void (async () => {
+      try {
+        const text = await fullTextOf(session.sessionId, messages);
+        if (!text.trim()) {
+          flashNotice(tr("这段回复没有可下载的正文"));
+          return;
+        }
+        saveTextFile(text, downloadName(session.title, messages));
+      } catch (error) {
+        flashNotice(tr(`下载失败：{0}`, messageOf(error)));
+      }
+    })();
+  });
+  return node;
 }
 
 function assistantTurn(
@@ -6734,28 +7069,40 @@ function assistantTurn(
       } else if (block.type === "ask") {
         continue;
       } else {
-        steps.push(block.truncated ? `${block.text}\n…（已截断）` : block.text);
+        steps.push(block.truncated ? tr(`{0}\n…（已截断）`, block.text) : block.text);
       }
     }
     if (hasText) lastText = message;
   }
   const last = messages[messages.length - 1];
   const meta = el("div", { className: "message-meta" }, [
-    el("span", { className: "role assistant", text: "助手" }),
-    ...(peer ? [el("span", { className: "pill tiny", text: "Bridge 注入" })] : []),
+    el("span", { className: "role assistant", text: tr("助手") }),
+    ...(peer ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
     ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
   ]);
   if (session) {
-    // 复制整回合的输出，分享仍沿用最后一条带正文的消息。
+    // 复制/下载整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
     const copyText = textBlocks(messages);
-    meta.append(messageActions([copyText ? copyButton(copyText) : null, lastText ? shareButton(session, lastText) : null]));
+    meta.append(
+      messageActions([
+        copyText ? copyButton(copySource(session.sessionId, messages)) : null,
+        lastText ? shareButton(session, lastText) : null,
+        copyText ? downloadButton(session, messages) : null,
+      ]),
+    );
   }
   bubble.append(meta);
   let folded = steps.length === 0;
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
-        bubble.append(markdownBlock(block.text, block.truncated));
+        bubble.append(
+          markdownBlock(
+            block.text,
+            block.truncated,
+            session ? () => void openMessageFullText(session.sessionId, message) : null,
+          ),
+        );
       } else if (block.type === "next-step") {
         continue;
       } else if (block.type === "ask") {
@@ -6792,17 +7139,17 @@ function markTurnState(list: HTMLElement, state: ChatState): void {
   const tone = state.busy ? "busy" : state.interrupted ? "stopped" : "done";
   const badge = (): HTMLElement[] =>
     tone === "busy"
-      ? [spinner(), el("span", { className: "thinking-label", text: "进行中" })]
+      ? [spinner(), el("span", { className: "thinking-label", text: tr("进行中") })]
       : tone === "stopped"
-        ? [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "已中断" })]
-        : [icon("check", "icon turn-done"), el("span", { className: "thinking-label done-label", text: "已完成" })];
+        ? [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: tr("已中断") })]
+        : [icon("check", "icon turn-done"), el("span", { className: "thinking-label done-label", text: tr("已完成") })];
   if (!last) {
     if (tone === "done") return;
     const row = el("div", { className: "thinking-row" });
     row.append(
       ...(tone === "busy"
-        ? [spinner(), el("span", { className: "thinking-label", text: "思考中…" })]
-        : [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: "该回合已被中断" })]),
+        ? [spinner(), el("span", { className: "thinking-label", text: tr("思考中…") })]
+        : [icon("stop", "icon turn-stop"), el("span", { className: "thinking-label stopped-label", text: tr("该回合已被中断") })]),
     );
     list.append(row);
     return;
@@ -6827,7 +7174,7 @@ function renderMessages(state: ChatState): void {
     for (const item of state.queued) list.append(queuedBubble(item));
   };
   if (state.messages.length === 0) {
-    list.append(emptyState("没有可读取的消息", "这个会话在桌面应用中可能只有工具调用，或者还没有开始。"));
+    list.append(emptyState(tr("没有可读取的消息"), tr("这个会话在桌面应用中可能只有工具调用，或者还没有开始。")));
     appendQueued();
     if (state.busy || state.interrupted) markTurnState(list, state);
     return;
@@ -6874,7 +7221,7 @@ async function sendMessage(
   onSent: () => void,
 ): Promise<void> {
   if (pending.some((item) => item.status === "uploading")) {
-    status.textContent = "附件还在上传，请稍候";
+    status.textContent = tr("附件还在上传，请稍候");
     return;
   }
   const text = input.value.trim();
@@ -6886,11 +7233,11 @@ async function sendMessage(
   status.classList.remove("error");
   status.textContent = state.session.hosted
     ? state.session.live
-      ? "正在写入托管会话…"
-      : "正在恢复托管进程…"
+      ? tr("正在写入托管会话…")
+      : tr("正在恢复托管进程…")
     : state.session.live
-      ? "正在发送…"
-      : "正在请求桌面打开该会话…";
+      ? tr("正在发送…")
+      : tr("正在请求桌面打开该会话…");
   try {
     const result = await call<MessageSendResult>("message.send", {
       sessionId: state.session.sessionId,
@@ -6903,7 +7250,7 @@ async function sendMessage(
     renderAttachments();
     if (result.accepted) {
       const names = attachments.map((attachment) => attachment.name);
-      const attachmentLine = names.length > 0 ? `附件：${names.join("、")}` : "";
+      const attachmentLine = names.length > 0 ? tr(`附件：{0}`, names.join("、")) : "";
       state.queued.push({
         id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
         match: text !== "" ? text : (names[0] ?? ""),
@@ -6918,13 +7265,13 @@ async function sendMessage(
     }
     status.textContent = state.session.hosted
       ? result.delivered
-        ? "已写入托管会话"
-        : (result.detail ?? "已提交")
+        ? tr("已写入托管会话")
+        : (result.detail ?? tr("已提交"))
       : result.delivered
-        ? "已投递到桌面会话"
+        ? tr("已投递到桌面会话")
         : result.accepted
-          ? (result.detail ?? "已提交，等待桌面执行")
-          : (result.detail ?? "未确认投递");
+          ? (result.detail ?? tr("已提交，等待桌面执行"))
+          : (result.detail ?? tr("未确认投递"));
     // 发送落地后收起输入区，把空间让给对话；需要时点「写消息…」再展开。
     if (result.accepted) onSent();
     window.setTimeout(() => {
@@ -6976,7 +7323,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     try {
       data = await ensureSnapshot();
     } catch (error) {
-      flashNotice(`读取会话列表失败：${messageOf(error)}`);
+      noticeFailure(tr("读取会话列表失败"), error, () => void openShare(source, message));
       return;
     }
   }
@@ -6989,7 +7336,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
 
   const mask = el("div", { className: "sheet-mask" });
   const body = el("div", { className: "sheet-body" });
-  const steps = el("ol", { className: "steps", attrs: { "aria-label": "转发步骤" } });
+  const steps = el("ol", { className: "steps", attrs: { "aria-label": tr("转发步骤") } });
   const note = el("p", { className: "sheet-note" });
   const status = el("p", { className: "sheet-note" });
   const close = (): void => {
@@ -7004,19 +7351,19 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     if (event.target === mask) close();
   });
 
-  const cancel = button("取消", close, "btn secondary");
-  const send = button("发送", () => {
+  const cancel = button(tr("取消"), close, "btn secondary");
+  const send = button(tr("发送"), () => {
     void commit();
   }, "btn primary");
   send.disabled = true;
-  const viewTarget = button("查看目标会话", () => {
+  const viewTarget = button(tr("查看目标会话"), () => {
     close();
     if (pick.appId && pick.projectId && pick.sessionId) {
       navigate({ level: "chat", appId: pick.appId, projectId: pick.projectId, sessionId: pick.sessionId });
     }
   }, "btn");
   viewTarget.classList.add("hidden");
-  const back = button("上一步", () => {
+  const back = button(tr("上一步"), () => {
     if (pick.sessionId) pick.sessionId = null;
     else if (pick.projectId) pick.projectId = null;
     else if (pick.appId) pick.appId = null;
@@ -7024,18 +7371,18 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   }, "btn ghost");
   back.classList.add("hidden");
 
-  const closeButton = el("button", { className: "icon-btn", attrs: { type: "button", "aria-label": "关闭" } }, [icon("close")]);
+  const closeButton = el("button", { className: "icon-btn", attrs: { type: "button", "aria-label": tr("关闭") } }, [icon("close")]);
   closeButton.addEventListener("click", close);
 
-  const sheet = el("aside", { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": "分享消息" } }, [
+  const sheet = el("aside", { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("分享消息") } }, [
     el("header", { className: "sheet-head" }, [
       el("div", {}, [
-        el("p", { className: "eyebrow", text: "分享" }),
-        el("h2", { className: "sheet-title", text: "把这条消息发送到另一个客户端" }),
+        el("p", { className: "eyebrow", text: tr("分享") }),
+        el("h2", { className: "sheet-title", text: tr("把这条消息发送到另一个客户端") }),
       ]),
       closeButton,
     ]),
-    el("p", { className: "sheet-source", text: `来源：${source.title} · ${message.role === "user" ? "用户" : message.role === "assistant" ? "助手" : "系统"} · ${message.createdAt ? new Date(message.createdAt).toLocaleString() : ""}` }),
+    el("p", { className: "sheet-source", text: tr(`来源：{0} · {1} · {2}`, source.title, message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统"), message.createdAt ? new Date(message.createdAt).toLocaleString() : "") }),
     steps,
     body,
     el("footer", { className: "sheet-foot" }, [
@@ -7046,14 +7393,14 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
   mask.append(sheet);
   document.body.append(mask);
 
-  const appName = (appId: string | null): string => data.apps.find((item) => item.appId === appId)?.name ?? "客户端";
-  const projectName = (projectId: string | null): string => data.projects.find((item) => item.projectId === projectId)?.name ?? "工程";
+  const appName = (appId: string | null): string => data.apps.find((item) => item.appId === appId)?.name ?? tr("客户端");
+  const projectName = (projectId: string | null): string => data.projects.find((item) => item.projectId === projectId)?.name ?? tr("工程");
   const sessionOf = (sessionId: string | null): SessionSummary | null =>
     data.sessions.find((item) => item.sessionId === sessionId) ?? null;
 
   function renderSteps(): void {
     const active = pick.sessionId ? 3 : pick.projectId ? 2 : pick.appId ? 1 : 0;
-    const labels = ["客户端", "工程", "会话", "预览"];
+    const labels = [tr("客户端"), tr("工程"), tr("会话"), tr("预览")];
     steps.replaceChildren();
     labels.forEach((label, index) => {
       const state = index < active ? "done" : index === active ? "active" : "todo";
@@ -7089,18 +7436,18 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     status.classList.remove("error");
     status.textContent = "";
     back.classList.toggle("hidden", !pick.appId);
-    send.textContent = "发送";
+    send.textContent = tr("发送");
     send.disabled = true;
 
     if (!pick.appId) {
-      note.textContent = pick.appId === null && pick.projectId === null ? "选择要发送到的客户端" : "";
+      note.textContent = pick.appId === null && pick.projectId === null ? tr("选择要发送到的客户端") : "";
       const list = el("ul", { className: "list compact" });
       for (const item of data.apps) {
         const count = data.projects.filter((project) => project.appId === item.appId).length;
         list.append(el("li", {}, [
           rowButton({
             title: item.name,
-            meta: `${count} 个工程 · ${item.capabilities.send ? "可发送" : "仅可读"}`,
+            meta: tr(`{0} 个工程 · {1}`, count, item.capabilities.send ? tr("可发送") : tr("仅可读")),
             disabled: count === 0 || !item.capabilities.send,
             badge: statusLabel(item.status),
             onClick: () => {
@@ -7115,7 +7462,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     }
 
     if (!pick.projectId) {
-      note.textContent = `来自 ${appName(pick.appId)}，选择目标工程`;
+      note.textContent = tr(`来自 {0}，选择目标工程`, appName(pick.appId));
       const projects = data.projects.filter((project) => project.appId === pick.appId);
       const list = el("ul", { className: "list compact" });
       for (const project of projects) {
@@ -7125,7 +7472,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
             title: project.name,
             meta: `${project.cwd ?? project.projectId}`,
             disabled: !sendable,
-            badge: sendable ? undefined : "无可发送会话",
+            badge: sendable ? undefined : tr("无可发送会话"),
             onClick: () => {
               pick.projectId = project.projectId;
               void render();
@@ -7133,15 +7480,15 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
           }),
         ]));
       }
-      if (projects.length === 0) body.append(emptyState("这个客户端没有工程", "换一个客户端试试。"));
+      if (projects.length === 0) body.append(emptyState(tr("这个客户端没有工程"), tr("换一个客户端试试。")));
       else body.append(list);
       return;
     }
 
     if (!pick.sessionId) {
       const project = data.projects.find((item) => item.projectId === pick.projectId);
-      note.textContent = `${project?.name ?? "工程"} · 选择目标会话`;
-      const search = el("input", { className: "input search", attrs: { type: "text", placeholder: "筛选会话标题…", autocomplete: "off" } });
+      note.textContent = tr(`{0} · 选择目标会话`, project?.name ?? tr("工程"));
+      const search = el("input", { className: "input search", attrs: { type: "text", placeholder: tr("筛选会话标题…"), autocomplete: "off" } });
       const list = el("ul", { className: "list compact" });
       const sessions = data.sessions
         .filter((session) => session.projectId === pick.projectId && !exclude.has(session.sessionId))
@@ -7151,7 +7498,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
         list.replaceChildren();
         const visible = sessions.filter((session) => !term || session.title.toLowerCase().includes(term));
         if (visible.length === 0) {
-          list.append(el("li", {}, [emptyState("没有匹配的会话", "换个关键词，或者换一个工程。")]));
+          list.append(el("li", {}, [emptyState(tr("没有匹配的会话"), tr("换个关键词，或者换一个工程。"))]));
           return;
         }
         for (const session of visible) {
@@ -7160,7 +7507,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
               title: session.title,
               meta: `${timeLabel(session.updatedAt)} · ${sendStateLabel(session)}`,
               disabled: !session.canSend,
-              badge: session.canSend ? undefined : "不可发送",
+              badge: session.canSend ? undefined : tr("不可发送"),
               onClick: () => {
                 pick.sessionId = session.sessionId;
                 void render();
@@ -7176,10 +7523,10 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     }
 
     const target = sessionOf(pick.sessionId);
-    note.textContent = `目标：${appName(pick.appId)} / ${projectName(pick.projectId)} / ${target?.title ?? "会话"}`;
+    note.textContent = tr(`目标：{0} / {1} / {2}`, appName(pick.appId), projectName(pick.projectId), target?.title ?? tr("会话"));
     const editor = el("textarea", {
       className: "preview preview-editor",
-      attrs: { spellcheck: "false", "aria-label": "待发送内容，可直接编辑", placeholder: "正在生成预览…" },
+      attrs: { spellcheck: "false", "aria-label": tr("待发送内容，可直接编辑"), placeholder: tr("正在生成预览…") },
     });
     editor.readOnly = true;
     shareEditor = editor;
@@ -7193,7 +7540,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     send.disabled = true;
     editor.readOnly = true;
     status.classList.remove("error");
-    status.textContent = "正在校验目标会话…";
+    status.textContent = tr("正在校验目标会话…");
     try {
       prepared = await call<TransferPrepareResult>(
         "transfer.prepare",
@@ -7212,17 +7559,17 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
         const blocked = !prepared?.target.canSend;
         // 超长和空内容在本地就拦住：服务端拒绝时会清掉 prepared，编辑内容也会一起丢。
         status.textContent = !text.trim()
-          ? "内容为空，无法发送"
+          ? tr("内容为空，无法发送")
           : tooLong
-            ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
-            : `${text.length} 字符 · ${text === prepared?.text ? "发送内容与预览一致" : "已编辑，将发送当前内容"}${prepared?.note ? ` · ${prepared.note}` : ""}`;
+            ? tr(`已超出上限（{0} / {1} 字符）`, text.length, MAX_TRANSFER_CHARS)
+            : tr(`{0} 字符 · {1}{2}`, text.length, text === prepared?.text ? tr("发送内容与预览一致") : tr("已编辑，将发送当前内容"), prepared?.note ? ` · ${prepared.note}` : "");
         status.classList.toggle("error", tooLong || !text.trim() || blocked);
         send.disabled = blocked || sending || done || tooLong || !text.trim();
       };
       editor.addEventListener("input", sync);
       sync();
     } catch (error) {
-      editor.placeholder = "无法生成预览";
+      editor.placeholder = tr("无法生成预览");
       editor.readOnly = true;
       status.classList.add("error");
       status.textContent = messageOf(error);
@@ -7235,15 +7582,15 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
     if (!text.trim() || text.length > MAX_TRANSFER_CHARS) {
       status.classList.add("error");
       status.textContent = text.trim()
-        ? `已超出上限（${text.length} / ${MAX_TRANSFER_CHARS} 字符）`
-        : "消息不能为空";
+        ? tr(`已超出上限（{0} / {1} 字符）`, text.length, MAX_TRANSFER_CHARS)
+        : tr("消息不能为空");
       return;
     }
     sending = true;
     send.disabled = true;
     if (shareEditor) shareEditor.readOnly = true;
     status.classList.remove("error");
-    status.textContent = "正在发送…";
+    status.textContent = tr("正在发送…");
     try {
       const result = await call<TransferCommitResult>(
         "transfer.commit",
@@ -7252,18 +7599,18 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
       );
       done = true;
       status.textContent = result.delivered
-        ? `已投递给「${prepared.target.title}」（${result.textLength} 字符）`
-        : (result.detail ?? "已提交，但目标会话尚未确认投递");
+        ? tr(`已投递给「{0}」（{1} 字符）`, prepared.target.title, result.textLength)
+        : (result.detail ?? tr("已提交，但目标会话尚未确认投递"));
       if (!result.delivered && !result.accepted) status.classList.add("error");
-      send.textContent = "已发送";
-      cancel.textContent = "关闭";
+      send.textContent = tr("已发送");
+      cancel.textContent = tr("关闭");
       viewTarget.classList.remove("hidden");
       back.classList.add("hidden");
     } catch (error) {
       prepared = null;
       if (shareEditor) shareEditor.readOnly = false;
       status.classList.add("error");
-      status.textContent = `${messageOf(error)}；重新选择会话可再试`;
+      status.textContent = tr(`{0}；重新选择会话可再试`, messageOf(error));
       send.disabled = true;
     } finally {
       sending = false;
@@ -7281,13 +7628,14 @@ function emptyState(title: string, hint: string): HTMLElement {
   ]);
 }
 
-function errorView(title: string, message: string): HTMLElement {
+function errorView(title: string, message: string, retry?: () => void): HTMLElement {
   return el("main", { className: "main" }, [
-    el("p", { className: "eyebrow", text: "出错了" }),
+    el("p", { className: "eyebrow", text: tr("出错了") }),
     el("h1", { className: "display", text: title }),
     el("div", { className: "notice error", text: message }),
     el("div", { className: "actions" }, [
-      button("返回客户端", () => navigate({ level: "clients" }), "btn secondary"),
+      button(tr("重试"), retry ?? (() => void renderRoute()), "btn primary"),
+      button(tr("返回客户端"), () => navigate({ level: "clients" }), "btn secondary"),
     ]),
   ]);
 }
@@ -7304,7 +7652,7 @@ function skeletonView(route: Route): HTMLElement {
     ]));
   }
   return el("main", { className: "main" }, [
-    el("p", { className: "eyebrow", text: route.level === "chat" ? "会话" : "客户端" }),
+    el("p", { className: "eyebrow", text: route.level === "chat" ? tr("会话") : tr("客户端") }),
     el("div", { className: "skeleton-title" }),
     rows,
   ]);

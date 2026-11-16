@@ -6,13 +6,29 @@ const SAFE_SCHEME = /^(https?:|mailto:)/i;
 const MAX_INLINE_DEPTH = 8;
 
 /**
- * Hooks for links and images that point at files on the Mac. Both return the
- * element to use, or null to fall back to plain text / a normal link.
+ * Hooks for links and images that point at files on the Mac, plus bare paths
+ * written straight into the text (no markdown link around them). Each returns
+ * the element to use, or null to fall back to plain text / a normal link.
  */
 export interface MarkdownOptions {
   localLink?: (label: string, href: string) => HTMLElement | null;
   localImage?: (alt: string, href: string) => HTMLElement | null;
+  /** 正文里裸写的本地路径（例如 `apps/web/src/main.ts:12`）。 */
+  localPath?: (path: string, line: string) => HTMLElement | null;
 }
+
+/**
+ * 正文里的裸路径：必须带目录分隔符且末段有扩展名，避免把 `a/b`、`1/2` 当成文件。
+ * 前缀限定为行首、空白、括号、引号或中文标点，不会吃掉 URL 中间那段。
+ */
+const PATH_BODY =
+  "(?:\\.{1,2}\\/|~\\/|\\/)?(?:[\\w.@+\\-\\u4e00-\\u9fa5]+\\/)+[\\w.@+\\-\\u4e00-\\u9fa5]+\\.[A-Za-z0-9]{1,8}(?::\\d+(?::\\d+)?)?";
+const LOCAL_PATH_SOURCE = new RegExp(
+  `(^|[\\s(（\\[【{"“'‘\`：,，。、；;!！?？])(${PATH_BODY})`,
+  "g",
+);
+/** 整段就是一个路径（行内代码里常见）：`apps/web/src/main.ts:12`。 */
+const WHOLE_PATH = new RegExp(`^${PATH_BODY}$`);
 const MAX_BLOCK_DEPTH = 16;
 const MAX_LIST_DEPTH = 16;
 
@@ -21,7 +37,17 @@ function safeHref(raw: string): string | null {
   return SAFE_SCHEME.test(href) ? href : null;
 }
 
-function codeSpan(text: string): HTMLElement {
+function codeSpan(text: string, options: MarkdownOptions = {}): HTMLElement {
+  // 行内代码里的路径（agent 很常这么写）也换成可点的引用，否则还是要自己去文件树里找。
+  if (options.localPath) {
+    const trimmed = text.trim();
+    const line = /:\d+(?::\d+)?$/.exec(trimmed)?.[0] ?? "";
+    const path = line ? trimmed.slice(0, -line.length) : trimmed;
+    if (WHOLE_PATH.test(trimmed) && path) {
+      const node = options.localPath(path, line);
+      if (node) return node;
+    }
+  }
   const code = document.createElement("code");
   code.textContent = text;
   return code;
@@ -69,6 +95,33 @@ function imageNode(raw: string, options: MarkdownOptions): HTMLElement {
   return linkNode(alt || href, href, options);
 }
 
+/** 纯文本片段：把里面裸写的路径换成可点的引用，其余保持文本。 */
+function textNodes(text: string, options: MarkdownOptions): Node[] {
+  const make = options.localPath;
+  if (!make) return [document.createTextNode(text)];
+  const pattern = new RegExp(LOCAL_PATH_SOURCE.source, "g");
+  const out: Node[] = [];
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(text)) !== null) {
+    const lead = match[1] ?? "";
+    const literal = match[2] ?? "";
+    if (!literal) continue;
+    const line = /:\d+(?::\d+)?$/.exec(literal)?.[0] ?? "";
+    const path = line ? literal.slice(0, -line.length) : literal;
+    const node = path ? make(path, line) : null;
+    if (!node) continue;
+    const start = match.index + lead.length;
+    if (start > last) out.push(document.createTextNode(text.slice(last, start)));
+    out.push(node);
+    if (line) out.push(document.createTextNode(line));
+    last = start + literal.length;
+  }
+  if (last === 0) return [document.createTextNode(text)];
+  if (last < text.length) out.push(document.createTextNode(text.slice(last)));
+  return out;
+}
+
 export function inlineNodes(text: string, depth = 0, options: MarkdownOptions = {}): Node[] {
   if (depth > MAX_INLINE_DEPTH) return [document.createTextNode(text)];
   const out: Node[] = [];
@@ -76,10 +129,10 @@ export function inlineNodes(text: string, depth = 0, options: MarkdownOptions = 
   while (rest) {
     const match = INLINE.exec(rest);
     if (!match || match.index === undefined) break;
-    if (match.index > 0) out.push(document.createTextNode(rest.slice(0, match.index)));
+    if (match.index > 0) out.push(...textNodes(rest.slice(0, match.index), options));
     const raw = match[0];
     if (match[1]) {
-      out.push(codeSpan(raw.slice(1, -1)));
+      out.push(codeSpan(raw.slice(1, -1), options));
     } else if (match[2] || match[3]) {
       const strong = document.createElement("strong");
       strong.append(...inlineNodes(raw.slice(2, -2), depth + 1, options));
@@ -106,7 +159,7 @@ export function inlineNodes(text: string, depth = 0, options: MarkdownOptions = 
     }
     rest = rest.slice(match.index + raw.length);
   }
-  if (rest) out.push(document.createTextNode(rest));
+  if (rest) out.push(...textNodes(rest, options));
   return out;
 }
 

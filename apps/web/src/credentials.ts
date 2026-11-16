@@ -1,4 +1,5 @@
-export interface DeviceMeta {
+
+import { tr } from "./i18n";export interface DeviceMeta {
   relayUrl: string;
   roomId: string;
   deviceId: string;
@@ -19,7 +20,7 @@ export interface DeviceSecrets {
 export interface StoredDevice extends DeviceMeta, DeviceSecrets {}
 
 export class LockedError extends Error {
-  constructor(message = "设备凭据已锁定，请重新输入密码") {
+  constructor(message = tr("设备凭据已锁定，请重新输入密码")) {
     super(message);
     this.name = "LockedError";
   }
@@ -263,7 +264,7 @@ async function latestSecrets(store: Store): Promise<Map<string, DeviceSecrets>> 
   } catch {
     // 另一个标签页重置了口令，旧密钥解不开新密文；清掉内存状态让调用方重新解锁。
     lock();
-    throw new LockedError("凭据已在其它标签页重新设置，请重新输入密码");
+    throw new LockedError(tr("凭据已在其它标签页重新设置，请重新输入密码"));
   }
   secrets = parseSecrets(plain);
   vaultData = vault.data;
@@ -272,14 +273,14 @@ async function latestSecrets(store: Store): Promise<Map<string, DeviceSecrets>> 
 
 export async function unlock(password: string): Promise<void> {
   const vault = readStore()?.vault;
-  if (!vault) throw new Error("还没有设置密码");
+  if (!vault) throw new Error(tr("还没有设置密码"));
   const key = await deriveKey(password, fromBase64(vault.salt));
   let plain: ArrayBuffer;
   try {
     plain = await decryptVault(key, vault);
   } catch {
     // AES-GCM 的认证标签校验失败就是密码不对，没有别的解释。
-    throw new Error("密码不正确");
+    throw new Error(tr("密码不正确"));
   }
   sessionKey = key;
   secrets = parseSecrets(plain);
@@ -335,7 +336,7 @@ export function setupPassword(password: string): Promise<void> {
 async function writePassword(password: string): Promise<void> {
   const store = readStore();
   // 另一个标签页可能刚设好口令：不能再覆盖，改成让用户解锁同一份存储。
-  if (store?.vault) throw new LockedError("本机凭据已由其它标签页设置，请重新输入密码");
+  if (store?.vault) throw new LockedError(tr("本机凭据已由其它标签页设置，请重新输入密码"));
   const legacy = readLegacy();
   const devices: DeviceMeta[] = store
     ? store.devices
@@ -392,7 +393,7 @@ async function writeDevice(device: StoredDevice): Promise<void> {
   const store = readStore();
   if (!store || store.vault === null) {
     // 口令可能刚被另一个标签页清掉（忘记密码）：绝不能退回明文存储。
-    throw new LockedError("本机凭据已被清除，请重新配对");
+    throw new LockedError(tr("本机凭据已被清除，请重新配对"));
   }
   if (sessionKey === null || secrets === null) throw new LockedError();
   // 先按磁盘上的最新密文合并，再写回，避免覆盖别的标签页刚配对的设备。
@@ -467,12 +468,12 @@ export function isExpiringSoon(expiresAt: number | null): boolean {
 }
 
 export function expireLabel(expiresAt: number | null): string {
-  if (expiresAt === null) return "长期有效（可在 Mac 上撤销）";
+  if (expiresAt === null) return tr("长期有效（可在 Mac 上撤销）");
   const remaining = expiresAt - Date.now();
-  if (remaining <= 0) return "已过期";
+  if (remaining <= 0) return tr("已过期");
   const minutes = Math.floor(remaining / 60_000);
-  if (minutes < 60) return `${minutes} 分钟后到期`;
+  if (minutes < 60) return tr(`{0} 分钟后到期`, minutes);
   const hours = Math.floor(minutes / 60);
-  if (hours < 48) return `${hours} 小时后到期`;
-  return `${Math.floor(hours / 24)} 天后到期`;
+  if (hours < 48) return tr(`{0} 小时后到期`, hours);
+  return tr(`{0} 天后到期`, Math.floor(hours / 24));
 }

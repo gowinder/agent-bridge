@@ -125,6 +125,7 @@ export const METHODS = [
   "push.unsubscribe",
   "task.messages",
   "message.list",
+  "message.text",
   "session.subscribe",
   "session.unsubscribe",
   "sync.resume",
@@ -473,7 +474,12 @@ export interface SessionSummary {
   effort?: string;
   /** `hosted` pi only: 新派生的子代理用哪个模型；缺省跟随 pi 自己的设置。 */
   subagentModel?: string;
-  /** `hosted` pi only: 自动压缩阈值（剩多少 token 触发压缩）；缺省跟随 pi 自己的设置。 */
+  /**
+   * `hosted` pi only: 自动压缩触发点，占上下文窗口的百分比（1–100）。
+   * 缺省用 `DEFAULT_COMPACTION_TRIGGER_PERCENT`。
+   */
+  compactionTriggerPercent?: number;
+  /** 旧字段：直接写死的预留 token 数；只在老记录里出现。 */
   compactionReserveTokens?: number;
   /**
    * The directory the session actually works in. A worktree session keeps the
@@ -735,6 +741,23 @@ export interface MessageSendResult {
   detail?: string;
 }
 
+export interface MessageTextParams {
+  sessionId: string;
+  messageId: string;
+}
+
+/** 单条消息的完整正文；消息列表里超过上限的部分会带 `truncated`，用它补齐。 */
+export interface MessageTextResult {
+  messageId: string;
+  role: MessageRole;
+  createdAt: number;
+  text: string;
+  /** 全文超过单次返回上限时为 true，`text` 只到上限为止。 */
+  truncated: boolean;
+  /** 全文长度（字符）。 */
+  length: number;
+}
+
 /** Outcome of asking a client to compact the conversation on demand. */
 export interface SessionCompactResult {
   compacted: boolean;
@@ -919,6 +942,13 @@ export interface TransferTargetInfo {
 
 /** 转发正文（含预览里编辑后的内容）的长度上限，客户端据此提前拦住过长的内容。 */
 export const MAX_TRANSFER_CHARS = 200_000;
+
+/**
+ * Bridge 托管 pi 会话的自动压缩触发点：上下文用到模型窗口的这个百分比就压缩。
+ * pi 原生只认「预留多少 token」（窗口 − 预留 才压），大窗口模型几乎永不触发；
+ * Bridge 改成按百分比，启动时按当前模型窗口换算成 pi 认的 reserveTokens。
+ */
+export const DEFAULT_COMPACTION_TRIGGER_PERCENT = 20;
 
 export interface TransferPrepareResult {
   transferId: string;

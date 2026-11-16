@@ -4,6 +4,7 @@ import {
   type RelayHello,
   type RelayServerMessage,
 } from "@craftstead/protocol";
+import { tr } from "./i18n";
 
 type Control = RelayServerMessage;
 type Waiter =
@@ -118,7 +119,7 @@ export class RelayConnection {
     return this.timeout(
       new Promise((resolve) => this.waiters.push({ kind: "control", match, resolve })),
       timeoutMs,
-      "中继控制消息超时",
+      tr("中继控制消息超时"),
     );
   }
 
@@ -127,7 +128,7 @@ export class RelayConnection {
     return this.timeout(
       new Promise((resolve) => this.waiters.push({ kind: "frame", resolve })),
       timeoutMs,
-      "中继数据帧超时",
+      tr("中继数据帧超时"),
     );
   }
 
