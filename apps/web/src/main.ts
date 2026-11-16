@@ -5,6 +5,7 @@ import type {
   ContextUsage,
   DeviceSummary,
   DevtoolsStatus,
+  ErrorCode,
   FileUploadBeginResult,
   FileUploadChunkResult,
   FileUploadFinishResult,
@@ -72,7 +73,7 @@ import {
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
 import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
-import type { PeerClient } from "./peer.js";
+import { PeerError, type PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
 import { langSwitchLabel, serverTr, toggleLang, tr } from "./i18n";
@@ -764,9 +765,41 @@ function showPairError(message: string): void {
   );
 }
 
-/** 超时/断线这类错误值得就地重试；参数错了之类重试也没用。 */
+/** RPC 层失败：把桥端给的 `error.code` 带出来，重试与否按 code 判断而不是猜文案。 */
+class RpcCallError extends Error {
+  constructor(
+    readonly code: ErrorCode | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RpcCallError";
+  }
+}
+
+/** 等等再试有意义：限流、桥端内部错误、这一轮还在跑、适配器刚起来、游标过期。 */
+const RETRYABLE_RPC_CODES = new Set<ErrorCode>([
+  "rate_limited",
+  "internal",
+  "conflict",
+  "adapter_unavailable",
+  "stale_cursor",
+]);
+
+/** 中继侧：Bridge 刚起来、通道被占、限流；重新连一次或稍等就能过。 */
+const RETRYABLE_RELAY_CODES = new Set(["bridge_offline", "channel_in_use", "rate_limited"]);
+
+/**
+ * 值得就地重试的错误：请求超时、通道断开、Bridge 没连上中继、限流这类。
+ * 参数错了、找不到、没权限之类重试也没用，不给「重试」按钮。
+ */
 function isRetryableError(error: unknown): boolean {
-  return /超时|已断开|已关闭|中继.*失败|Failed to fetch|NetworkError/i.test(messageOf(error));
+  if (error instanceof PeerError) return true;
+  if (error instanceof RpcCallError) {
+    return error.code !== undefined && RETRYABLE_RPC_CODES.has(error.code);
+  }
+  if (error instanceof RelayError) return RETRYABLE_RELAY_CODES.has(error.code);
+  // 浏览器把网络层失败统一报成 TypeError（Failed to fetch）：重发一次可能就成功。
+  return error instanceof TypeError;
 }
 
 /**
@@ -1617,9 +1650,11 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
 }
 
 async function call<T>(method: Method, params?: unknown, timeoutMs = 20_000): Promise<T> {
-  if (!active) throw new Error(tr("连接已断开"));
+  if (!active) throw new PeerError("closed", tr("连接已断开"));
   const response = await active.request(method, params, timeoutMs);
-  if (!response.ok) throw new Error(response.error?.message ?? tr(`{0} 失败`, method));
+  if (!response.ok) {
+    throw new RpcCallError(response.error?.code, response.error?.message ?? tr(`{0} 失败`, method));
+  }
   return response.result as T;
 }
 
@@ -2012,6 +2047,8 @@ function dockHistory(): HTMLElement {
 let todoDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
 let todoCache: TodoListResult | null = null;
 let todoError = "";
+/** 待办读取失败时点「重试」要怎么重来；不懂重试的错误留 null。 */
+let todoRetry: (() => void) | null = null;
 /** 正在就地编辑的待办；重绘后靠它回到编辑态。 */
 let editingTodoId: string | null = null;
 let todoEditDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
@@ -2084,8 +2121,10 @@ function dockTodos(): HTMLElement {
       }
       todoCache = result;
       todoError = "";
+      todoRetry = null;
     } catch (error) {
       todoError = messageOf(error);
+      todoRetry = isRetryableError(error) ? () => void refresh() : null;
     }
     paintList();
   };
@@ -2256,7 +2295,14 @@ function dockTodos(): HTMLElement {
 
   const paintList = (): void => {
     const parts: HTMLElement[] = [];
-    if (todoError) parts.push(el("p", { className: "hint warn", text: todoError }));
+    if (todoError) {
+      parts.push(
+        el("p", { className: "hint warn" }, [
+          el("span", { text: todoError }),
+          ...(todoRetry ? [button(tr("重试"), todoRetry, "btn small")] : []),
+        ]),
+      );
+    }
     const data = todoCache;
     if (!data) {
       if (!todoError) parts.push(el("p", { className: "hint", text: tr("正在读取待办…") }));
@@ -5213,6 +5259,8 @@ interface FileBrowserState {
   entries: FsEntry[];
   preview: FsReadResult | null;
   error: string | null;
+  /** 出错时点「重试」要重做的那一步（读根目录 / 列目录 / 读文件）。 */
+  retry: (() => void) | null;
   loading: boolean;
 }
 
@@ -5426,7 +5474,12 @@ async function refreshRail(state: RailState): Promise<void> {
     paintRail(state, result);
   } catch (error) {
     state.signature = "";
-    state.body.replaceChildren(el("p", { className: "rail-empty", text: messageOf(error) }));
+    state.body.replaceChildren(
+      el("div", { className: "rail-empty" }, [
+        el("p", { text: messageOf(error) }),
+        ...(isRetryableError(error) ? [button(tr("重试"), () => void refreshRail(state), "btn small")] : []),
+      ]),
+    );
   } finally {
     state.loading = false;
   }
@@ -5483,6 +5536,7 @@ async function openFilesPane(state: RailState): Promise<void> {
     entries: [],
     preview: null,
     error: null,
+    retry: null,
     loading: false,
   };
   paintFiles(state, tr("正在读取项目目录…"));
@@ -5502,8 +5556,10 @@ async function loadFileRoots(state: RailState): Promise<void> {
     });
     files.roots = result.roots;
     files.error = result.roots.length === 0 ? tr("没有可浏览的项目目录") : null;
+    files.retry = null;
   } catch (error) {
     files.error = messageOf(error);
+    files.retry = isRetryableError(error) ? () => void loadFileRoots(state) : null;
   }
   files.loading = false;
   const first = files.roots[0];
@@ -5532,8 +5588,10 @@ async function listFiles(state: RailState, path: string): Promise<void> {
     files.parent = result.parent;
     files.entries = result.entries;
     files.error = null;
+    files.retry = null;
   } catch (error) {
     files.error = messageOf(error);
+    files.retry = isRetryableError(error) ? () => void listFiles(state, path) : null;
   }
   files.loading = false;
   paintFiles(state);
@@ -5552,8 +5610,10 @@ async function openFile(state: RailState, path: string): Promise<void> {
       path,
     });
     files.error = null;
+    files.retry = null;
   } catch (error) {
     files.error = messageOf(error);
+    files.retry = isRetryableError(error) ? () => void openFile(state, path) : null;
   }
   files.loading = false;
   paintFiles(state);
@@ -5660,7 +5720,14 @@ function paintFiles(state: RailState, placeholder?: string): void {
     return;
   }
   if (files.error) {
-    pane.append(el("p", { className: "rail-empty rail-error", text: files.error }));
+    // 断线、超时、Bridge 刚起来这类错误，用户不该只能反复点标签页来重来。
+    const retry = files.retry;
+    pane.append(
+      el("div", { className: "rail-empty rail-error" }, [
+        el("p", { text: files.error }),
+        ...(retry ? [button(tr("重试"), retry, "btn small")] : []),
+      ]),
+    );
     return;
   }
   if (files.entries.length === 0) {
@@ -7020,7 +7087,12 @@ async function openFilePreview(path: string): Promise<void> {
     }
   } catch (error) {
     if (request !== previewRequest) return;
-    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+    filePreviewBody?.replaceChildren(
+      el("div", { className: "file-preview-note is-error" }, [
+        el("p", { text: messageOf(error) }),
+        ...(isRetryableError(error) ? [button(tr("重试"), () => void openFilePreview(path), "btn small")] : []),
+      ]),
+    );
   }
 }
 
@@ -7057,7 +7129,14 @@ async function openMessageFullText(sessionId: string, message: MessageRecord): P
     }
   } catch (error) {
     if (request !== previewRequest) return;
-    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+    filePreviewBody?.replaceChildren(
+      el("div", { className: "file-preview-note is-error" }, [
+        el("p", { text: messageOf(error) }),
+        ...(isRetryableError(error)
+          ? [button(tr("重试"), () => void openMessageFullText(sessionId, message), "btn small")]
+          : []),
+      ]),
+    );
   }
 }
 
