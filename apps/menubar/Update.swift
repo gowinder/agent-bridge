@@ -88,20 +88,21 @@ final class Updater {
         return (full?.isEmpty == false ? full : short) ?? "0.0.0"
     }()
 
-    /// 装的是不是预发布（`0.11.1-rc.8`）。只有这种版本才有「停留在测试版通道」这个选项。
+    /// 装的是不是预发布（`0.11.1-rc.8`）。只有这种版本才有「允许升级到正式版」这个选项。
     static let currentVersionIsPrerelease = currentVersion.contains("-")
 
-    /// 装的是测试版时，是否只跟着预发布走、不升到正式版。默认开：装 rc 的人本来就在试新功能。
-    /// 正式版机器上恒为 false，选项也不显示。
-    static var staysOnPrereleaseChannel: Bool {
+    /// 装的是测试版时，是否允许升到正式版。默认关：装 rc 的人只跟着 rc 走，
+    /// 正式版不会把测试版顶掉。正式版机器上恒为 false，选项也不显示。
+    static var allowsReleaseUpgrade: Bool {
         get {
             guard currentVersionIsPrerelease else { return false }
             let defaults = UserDefaults.standard
-            // 没设过就当开着，省得装完 rc 还要去勾一次。
-            if defaults.object(forKey: "prereleaseChannel") == nil { return true }
-            return defaults.bool(forKey: "prereleaseChannel")
+            if let value = defaults.object(forKey: "allowReleaseUpgrade") as? Bool { return value }
+            // 旧键 prereleaseChannel 是反义（true = 停留在测试版），读一次完成迁移。
+            if let legacy = defaults.object(forKey: "prereleaseChannel") as? Bool { return !legacy }
+            return false
         }
-        set { UserDefaults.standard.set(newValue, forKey: "prereleaseChannel") }
+        set { UserDefaults.standard.set(newValue, forKey: "allowReleaseUpgrade") }
     }
 
     private(set) var phase: Phase = .idle
@@ -114,12 +115,6 @@ final class Updater {
     func clearAvailable() {
         available = nil
         onChange?()
-    }
-
-    /// 通道判定的默认口径：preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
-    /// 装了测试版又勾了「停留在测试版通道」时，这个口径被通道开关覆盖（只看 prerelease 标志）。
-    private var isPreview: Bool {
-        AdminClient.isPreviewRelay(AdminClient.relayHint ?? UserDefaults.standard.string(forKey: "relayUrl"))
     }
 
     var isBusy: Bool {
@@ -151,16 +146,22 @@ final class Updater {
         }
         do {
             let releases = try await fetchReleases()
-            // 停留在测试版通道时只认 prerelease：正式版发布也不提示，避免 rc 直接被顶掉。
-            let stayOnPrerelease = Self.staysOnPrereleaseChannel
-            available = releases.first { release in
-                if release.draft { return false }
-                if stayOnPrerelease {
-                    if !release.prerelease { return false }
-                } else if !isPreview && release.prerelease {
+            // 通道只看当前装的是哪一档，不看中继：正式版只认正式版 DMG；
+            // 测试版默认只认预发布，勾了「允许升级到正式版」才把正式版也算进来。
+            let allowRelease = Self.allowsReleaseUpgrade
+            let candidates = releases.filter { release in
+                guard !release.draft else { return false }
+                if Self.currentVersionIsPrerelease {
+                    if !release.prerelease && !allowRelease { return false }
+                } else if release.prerelease {
                     return false
                 }
                 return VersionOrder.isNewer(release.tag, than: Self.currentVersion)
+            }
+            // 取版本号最高的那个，而不是接口返回的第一个，避免旧版本后发时把人降级。
+            available = candidates.reduce(nil as GitHubRelease?) { best, release in
+                guard let best else { return release }
+                return VersionOrder.isNewer(release.tag, than: best.tag) ? release : best
             }
             lastFailure = nil
         } catch {
