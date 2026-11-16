@@ -332,6 +332,15 @@ test("registry resumes only from a usable pi session path", async (t) => {
   assert.equal(newline.includes("--session"), false);
 });
 
+test("pi sessions report pi as the hosting CLI, legacy records fall back to claude", (t) => {
+  // 老记录没有 agent 字段，那是只有 Claude Code 的时代留下的。
+  const h = piHarness((repo) => [{ id: "legacy", cwd: repo, title: "旧会话", permissionMode: "manual", createdAt: 1, updatedAt: 1 }]);
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  assert.equal(h.manager.session(session.sessionId)?.hostedAgent, "pi");
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === "hosted:legacy")?.hostedAgent, "claude");
+});
+
 test("pi sessions advertise the commands the bridge handles itself", (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());

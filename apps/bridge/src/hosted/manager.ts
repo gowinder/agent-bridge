@@ -2106,7 +2106,8 @@ export class HostedSessionManager {
       canSend: dirExists,
       hosted: true,
       hostedState: live ? "running" : "stopped",
-      ...(record.agent === "pi" ? { hostedAgent: "pi" as const } : {}),
+      // 老记录没有 agent 字段，那是 Claude Code 时代留下的；一律写出来，网页的图标/文案才分得清。
+      hostedAgent: record.agent === "pi" ? "pi" : "claude",
       permissionMode: record.permissionMode,
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
