@@ -811,9 +811,14 @@ export class HostedSessionManager {
         result.currentName = models.find((item) => item.id === current)?.name ?? current;
       }
       if (record.subagentModel) result.subagentModel = record.subagentModel;
+      if (record.subagentThinking) result.subagentThinking = record.subagentThinking;
+      result.canSwitchThinking = true;
+      result.canSwitchSubagentThinking = true;
+      result.thinkingLevels = [...PI_THINKING_LEVELS];
+      if (record.thinking) result.thinking = record.thinking;
       result.note =
         models.length > 0
-          ? "换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话；子代理模型只影响之后新派生的子代理。"
+          ? "思考等级立刻生效（改回跟随 pi 设置要重启进程）；换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话；子代理的设置只影响之后新派生的子代理。"
           : "pi 的模型清单要等会话跑过一次才拿得到。";
       return result;
     }
@@ -864,29 +869,47 @@ export class HostedSessionManager {
   }
 
   /**
-   * 单独改这个会话派生子代理用的模型（只对 pi 有效）。
+   * 只改这个会话派生子代理用的模型或思考等级（只对 pi 有效）。
    * pi 只在启动时读 settings.json，所以空闲进程要先停掉，下一条消息按新设置重新打开会话；
-   * 已经在跑的子代理不受影响，只有之后新派生的才用新模型。
-   * `value` 传 null 表示改回跟随 pi 自己的设置。
+   * 已经在跑的子代理不受影响，只有之后新派生的才用新设置。
+   * 传 null 表示改回跟随 pi 自己的设置。
    */
   async setSubagentModel(sessionId: string, value: string | null): Promise<SessionSummary> {
+    return this.applySubagentSetting(sessionId, { model: value });
+  }
+
+  /** 子代理的思考等级，语义同 `setSubagentModel`。 */
+  async setSubagentThinking(sessionId: string, value: string | null): Promise<SessionSummary> {
+    return this.applySubagentSetting(sessionId, { thinking: value });
+  }
+
+  private async applySubagentSetting(
+    sessionId: string,
+    patch: { model?: string | null; thinking?: string | null },
+  ): Promise<SessionSummary> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     if (record.agent !== "pi") {
-      throw new RpcError("unsupported", "只有 pi 托管会话可以单独设置子代理模型");
+      throw new RpcError("unsupported", "只有 pi 托管会话可以单独设置子代理");
     }
     const live = this.live.get(record.id);
-    const model = this.model(value?.trim() || undefined);
+    const model = patch.model === undefined ? record.subagentModel : this.model(patch.model?.trim() || undefined);
+    const thinking =
+      patch.thinking === undefined
+        ? record.subagentThinking
+        : patch.thinking === null
+          ? undefined
+          : this.thinkingLevel(patch.thinking);
     if (live?.busy || live?.pending || live?.piPending) {
-      throw new RpcError("conflict", "这一轮还在跑，等它结束再换子代理模型");
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再改子代理设置");
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    // 只改模型时思考等级与压缩触发点沿用记录里的值；都没有覆盖项就把目录清掉。
+    // 没改的那几项沿用记录里的值；三项都没有值就把目录清掉。
     const reserveTokens = this.compactionReserveFor(record);
-    if (model || record.subagentThinking || reserveTokens !== undefined) {
-      if (!preparePiAgentDir(agentDir, { model, thinking: record.subagentThinking, reserveTokens })) {
-        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理模型没有生效`);
+    if (model || thinking || reserveTokens !== undefined) {
+      if (!preparePiAgentDir(agentDir, { model, thinking, reserveTokens })) {
+        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理设置没有生效`);
       }
     } else {
       removePiAgentDir(agentDir);
@@ -895,6 +918,42 @@ export class HostedSessionManager {
     await this.stopInSessiond(record.id, true);
     if (model) record.subagentModel = model;
     else delete record.subagentModel;
+    if (thinking) record.subagentThinking = thinking;
+    else delete record.subagentThinking;
+    this.touch(record);
+    return this.summary(record);
+  }
+
+  /**
+   * 换这个会话的思考等级（只对 pi 有效）。`value` 传 null 表示改回跟随 pi 设置。
+   * pi 的 RPC 有原生 `set_thinking_level`：进程在跑就直接改，不用重启；
+   * 但「取消等级」pi 没有对应 RPC，只能停掉进程，让下次启动不带 `--thinking`。
+   */
+  async setThinking(sessionId: string, value: string | null): Promise<SessionSummary> {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    if (record.agent !== "pi") {
+      throw new RpcError("unsupported", "只有 pi 托管会话有思考等级");
+    }
+    const level = value === null ? undefined : this.thinkingLevel(value);
+    const live = this.live.get(record.id);
+    if (level && live?.pi) {
+      const result = await live.pi.setThinkingLevel(level);
+      if (result.error) {
+        throw new RpcError("invalid_params", `pi 设置思考等级失败：${result.error}`);
+      }
+      record.thinking = level;
+      this.touch(record);
+      return this.summary(record);
+    }
+    if (live?.busy || live?.pending || live?.piPending) {
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再换思考等级");
+    }
+    // 进程不在、或者要改回跟随 pi 设置：停掉旧进程，下一条消息按新参数启动。
+    if (live) this.kill(record.id);
+    await this.stopInSessiond(record.id, true);
+    if (level) record.thinking = level;
+    else delete record.thinking;
     this.touch(record);
     return this.summary(record);
   }

@@ -4699,6 +4699,32 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const subagentRow = (item: ModelOption, current: boolean, pick: (id: string) => void): HTMLElement =>
     modelRow(item, current, true, pick, tr("子代理用"));
 
+  /** 思考等级：一排小 chip，比模型那种长列表省地方；null 表示跟随 pi 设置。 */
+  const thinkingChips = (
+    levels: string[],
+    current: string | undefined,
+    pick: (level: string | null) => void,
+    action: string,
+  ): HTMLElement => {
+    const chip = (value: string | null, label: string, isCurrent: boolean): HTMLElement => {
+      const node = el("button", {
+        className: `thinking-chip${isCurrent ? " is-current" : ""}`,
+        text: label,
+        attrs: {
+          type: "button",
+          title: `${action}：${label}`,
+          "aria-pressed": isCurrent ? "true" : "false",
+        },
+      });
+      if (!isCurrent) node.addEventListener("click", () => pick(value));
+      return node;
+    };
+    return el("div", { className: "model-chips" }, [
+      chip(null, tr("跟随 pi 设置"), !current),
+      ...levels.map((level) => chip(level, level, current === level)),
+    ]);
+  };
+
   const paintModels = (info: SessionModelsResult): void => {
     const label = info.currentName ?? info.current;
     if (!label && info.models.length === 0) {
@@ -4712,7 +4738,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("span", { className: "model-chip-value", text: label ?? tr("未知") }),
       icon("chevron", "icon model-chev"),
     );
-    modelButton.title = tr(`当前模型：{0}{1}`, label ?? tr("未知"), info.canSwitchSubagent ? tr(` · 子代理：{0}`, info.subagentModel ?? tr("跟随 pi 设置")) : "");
+    modelButton.title = tr(
+      `当前模型：{0}{1}{2}`,
+      label ?? tr("未知"),
+      info.canSwitchThinking ? tr(` · 思考：{0}`, info.thinking ?? tr("跟随 pi 设置")) : "",
+      info.canSwitchSubagent ? tr(` · 子代理：{0}`, info.subagentModel ?? tr("跟随 pi 设置")) : "",
+    );
     const rows: HTMLElement[] = [];
     for (const section of ["main", "custom", "overflow"] as const) {
       const items = info.models.filter((item) => (item.section ?? "main") === section);
@@ -4740,6 +4771,22 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       for (const item of info.models) {
         rows.push(subagentRow(item, item.id === info.subagentModel, applySubagentModel));
       }
+    }
+    // pi 的思考等级：主会话走 --thinking（进程在跑可直接改），子代理写进 settings.json。
+    if (info.canSwitchThinking) {
+      rows.push(el("p", { className: "model-pop-group", text: tr("思考等级") }));
+      rows.push(thinkingChips(info.thinkingLevels ?? [], info.thinking, applyThinking, tr("切换思考等级")));
+    }
+    if (info.canSwitchSubagentThinking) {
+      rows.push(el("p", { className: "model-pop-group", text: tr("子代理思考等级") }));
+      rows.push(
+        thinkingChips(
+          info.thinkingLevels ?? [],
+          info.subagentThinking,
+          applySubagentThinking,
+          tr("切换子代理思考等级"),
+        ),
+      );
     }
     if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
     modelPop.replaceChildren(...rows);
@@ -4782,6 +4829,36 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       flashNotice(model ? tr(`子代理模型已换成 {0}，新派生的子代理按它运行`, model) : tr("子代理模型改回跟随 pi 设置"));
     } catch (error) {
       flashNotice(tr(`换子代理模型失败：{0}`, messageOf(error)));
+    }
+  }
+
+  /** 换主会话的思考等级；null 表示改回跟随 pi 设置。 */
+  async function applyThinking(level: string | null): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setThinking", { sessionId: route.sessionId, level });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(level ? tr(`思考等级已换成 {0}`, level) : tr("思考等级改回跟随 pi 设置"));
+    } catch (error) {
+      flashNotice(tr(`换思考等级失败：{0}`, messageOf(error)));
+    }
+  }
+
+  /** 只换子代理的思考等级：主会话不动，之后新派生的子代理按它跑。 */
+  async function applySubagentThinking(level: string | null): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setSubagentThinking", { sessionId: route.sessionId, level });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(
+        level
+          ? tr(`子代理思考等级已换成 {0}，新派生的子代理按它运行`, level)
+          : tr("子代理思考等级改回跟随 pi 设置"),
+      );
+    } catch (error) {
+      flashNotice(tr(`换子代理思考等级失败：{0}`, messageOf(error)));
     }
   }
 
