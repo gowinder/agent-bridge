@@ -88,13 +88,36 @@ final class Updater {
         return (full?.isEmpty == false ? full : short) ?? "0.0.0"
     }()
 
+    /// 装的是不是预发布（`0.11.1-rc.8`）。只有这种版本才有「停留在测试版通道」这个选项。
+    static let currentVersionIsPrerelease = currentVersion.contains("-")
+
+    /// 装的是测试版时，是否只跟着预发布走、不升到正式版。默认开：装 rc 的人本来就在试新功能。
+    /// 正式版机器上恒为 false，选项也不显示。
+    static var staysOnPrereleaseChannel: Bool {
+        get {
+            guard currentVersionIsPrerelease else { return false }
+            let defaults = UserDefaults.standard
+            // 没设过就当开着，省得装完 rc 还要去勾一次。
+            if defaults.object(forKey: "prereleaseChannel") == nil { return true }
+            return defaults.bool(forKey: "prereleaseChannel")
+        }
+        set { UserDefaults.standard.set(newValue, forKey: "prereleaseChannel") }
+    }
+
     private(set) var phase: Phase = .idle
     private(set) var available: GitHubRelease?
     private(set) var lastChecked: Date?
     private(set) var lastFailure: String?
     var onChange: (() -> Void)?
 
-    /// preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
+    /// 换了更新通道后旧候选就不再适用，菜单/工具提示不该继续显示它。
+    func clearAvailable() {
+        available = nil
+        onChange?()
+    }
+
+    /// 通道判定的默认口径：preview 中继吃预发布，生产只吃正式版，和 DMG 的发布流程保持一致。
+    /// 装了测试版又勾了「停留在测试版通道」时，这个口径被通道开关覆盖（只看 prerelease 标志）。
     private var isPreview: Bool {
         AdminClient.isPreviewRelay(AdminClient.relayHint ?? UserDefaults.standard.string(forKey: "relayUrl"))
     }
@@ -128,9 +151,16 @@ final class Updater {
         }
         do {
             let releases = try await fetchReleases()
+            // 停留在测试版通道时只认 prerelease：正式版发布也不提示，避免 rc 直接被顶掉。
+            let stayOnPrerelease = Self.staysOnPrereleaseChannel
             available = releases.first { release in
-                !release.draft && (isPreview || !release.prerelease)
-                    && VersionOrder.isNewer(release.tag, than: Self.currentVersion)
+                if release.draft { return false }
+                if stayOnPrerelease {
+                    if !release.prerelease { return false }
+                } else if !isPreview && release.prerelease {
+                    return false
+                }
+                return VersionOrder.isNewer(release.tag, than: Self.currentVersion)
             }
             lastFailure = nil
         } catch {

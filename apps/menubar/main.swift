@@ -460,6 +460,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsTerminalSwitch: NSSwitch?
     private var settingsExpiryReminderSwitch: NSSwitch?
     private var settingsAutoUpdateSwitch: NSSwitch?
+    private var settingsPrereleaseChannelSwitch: NSSwitch?
     private var autoUpdateTimer: Timer?
     /// 自动更新失败（网络、没有写权限）后先退避一小时，别每 10 分钟重试一遍。
     private var autoUpdateBackoffUntil: Date?
@@ -563,6 +564,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         autoUpdateEnabled = sender.state == .on
         autoUpdateBackoffUntil = nil
         scheduleAutoUpdate()
+    }
+
+    @objc private func togglePrereleaseChannel(_ sender: NSSwitch) {
+        Updater.staysOnPrereleaseChannel = sender.state == .on
+        // 旧的更新目标已经不属于这个通道，先清掉再重查（不弹窗）。
+        updater.clearAvailable()
+        Task { await updater.check() }
     }
 
     private func paint() {
@@ -755,6 +763,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(disabled(updater.summary))
         } else {
             menu.addItem(disabled("菜单栏 app v\(Updater.currentVersion)"))
+            // 锁在测试版通道时不升级正式版，得让人知道这是有意的、去哪改。
+            if Updater.currentVersionIsPrerelease && Updater.staysOnPrereleaseChannel {
+                menu.addItem(disabled("停留在测试版通道，正式版不提示（设定里可关）"))
+            }
             if let failure = updater.lastFailure {
                 menu.addItem(disabled("检查更新失败：\(failure)"))
             }
@@ -1216,7 +1228,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        let height: CGFloat = 700
+        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉，统一给到 774。
+        let height: CGFloat = 774
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1374,6 +1387,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section("更新")
         settingsAutoUpdateSwitch = toggle("自动更新（每 10 分钟检查，有新版本直接装）", #selector(toggleAutoUpdate(_:)))
         hint("装着新版本时会替换 AgentBridge.app 并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。", height: 16)
+        if Updater.currentVersionIsPrerelease {
+            settingsPrereleaseChannelSwitch = toggle("停留在测试版通道（只升 rc，不升正式版）", #selector(togglePrereleaseChannel(_:)))
+            hint("装在测试版 v\(Updater.currentVersion)：打开只升 rc，正式版不提示。", height: 16)
+        }
 
         return view
     }
@@ -1492,6 +1509,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsTerminalSwitch?.isEnabled = reachable
         settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
         settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
+        settingsPrereleaseChannelSwitch?.state = Updater.staysOnPrereleaseChannel ? .on : .off
 
         settingsPortLabel?.stringValue =
             "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? "（环境变量指定）" : "")
