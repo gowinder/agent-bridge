@@ -86,6 +86,15 @@ test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   assert.equal(options.cwd, realpathSync(h.repo));
 });
 
+test("session summaries say which CLI holds the process", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, permissionMode: "manual" });
+  // 网页要靠这个字段决定图标与文案：kind 只说明「托管」，引擎藏在 hostedAgent 里。
+  assert.equal(h.manager.session(session.sessionId)?.hostedAgent, "claude");
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId)?.hostedAgent, "claude");
+});
+
 test("router model names with a slash reach argv and survive a restart", (t) => {
   const h = harness();
   const session = h.manager.create({ path: h.repo, model: "ncncapi/claude-opus-5-5" });

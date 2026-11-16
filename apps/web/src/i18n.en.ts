@@ -184,6 +184,7 @@ export const EN: Record<string, string> = {
     "The Bridge terminal on the Mac should show the same code. If it differs, the channel has been tampered with — cancel.",
   "Mac 上的 Bridge 没有连接中继，请确认它正在运行。":
     "The Bridge on this Mac is not connected to the relay. Check that it is running.",
+  "Claude 托管": "Hosted by Claude",
   "pi 思考等级": "pi thinking level",
   "pi 托管": "Hosted by pi",
   "pi 模型": "pi model",

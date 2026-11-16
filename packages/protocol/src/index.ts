@@ -466,7 +466,7 @@ export interface SessionSummary {
   hostedState?: "running" | "idle" | "stopped";
   /** `hosted` only: the permission mode Bridge passes to the CLI. */
   permissionMode?: string;
-  /** `hosted` only: which CLI holds the process. Absent means Claude Code. */
+  /** `hosted` only: which CLI holds the process. 老桥没这个字段时按 Claude Code 处理。 */
   hostedAgent?: HostedAgent;
   /** `hosted` only: the --model Bridge passes to the CLI; absent means the CLI default. */
   model?: string;

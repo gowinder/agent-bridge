@@ -1816,12 +1816,17 @@ function writeDockTab(tab: DockTab): void {
   }
 }
 
-function agentLabel(kind: string): string {
+function agentLabel(kind: string, hostedAgent?: HostedAgent): string {
   if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "ChatGPT";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "Antigravity";
   if (kind === "dsh") return "DeepSeek";
   if (kind === "pi") return "pi";
-  if (kind === "hosted") return tr("托管");
+  if (kind === "hosted") {
+    // 托管会话的 kind 只说明「由 Bridge 托管」，具体引擎藏在 hostedAgent 里。
+    if (hostedAgent === "pi") return tr("pi 托管");
+    if (hostedAgent === "claude") return tr("Claude 托管");
+    return tr("托管");
+  }
   return "Claude";
 }
 
@@ -1859,7 +1864,7 @@ function dockSessionButton(session: SessionSummary, active: boolean): HTMLButton
   const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
     el("span", {
       className: `mark ${session.busy ? "busy" : session.live ? "live" : ""}`,
-      text: agentMark(session.kind),
+      text: agentMark(session.kind, session.hostedAgent),
     }),
     el("span", { className: "dock-session-title", text: session.title }),
     ...(pills.length > 0 ? [el("span", { className: "dock-session-pills" }, pills)] : []),
@@ -1957,7 +1962,7 @@ function dockHistory(): HTMLElement {
       el("span", { className: "dock-history-facts" }, [
         el("span", {
           className: "dock-history-meta",
-          text: `${agentLabel(session.kind)} · ${recentTime(session.updatedAt)}`,
+          text: `${agentLabel(session.kind, session.hostedAgent)} · ${recentTime(session.updatedAt)}`,
         }),
         ...dockStatePills(session),
       ]),
@@ -2314,11 +2319,17 @@ function shortAgentName(app: AppInfo): string {
   return app.name.split(/[·\s]/)[0] ?? app.name;
 }
 
-function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
+function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"], hostedAgent?: HostedAgent): string {
   if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "CX";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "AG";
   if (kind === "dsh") return "DS";
   if (kind === "pi") return "PI";
+  // 托管会话按实际引擎显示，别再一律当成 Claude Code。
+  if (kind === "hosted") {
+    if (hostedAgent === "pi") return "PI";
+    if (hostedAgent === "claude") return "CC";
+    return "BH";
+  }
   return "CC";
 }
 
@@ -3198,7 +3209,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         { className: `mark ${busy ? "busy" : session.live ? "live" : ""}` },
         busy
           ? [el("span", { className: "spinner mark-spinner" })]
-          : [document.createTextNode(agentMark(session.kind))],
+          : [document.createTextNode(agentMark(session.kind, session.hostedAgent))],
       ),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title" }, [
