@@ -176,6 +176,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
+  menu:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>',
   more:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.4" cy="8" r="1.25"/></svg>',
   pin:
@@ -673,6 +675,8 @@ function hashFor(route: Route): string {
 }
 
 function navigate(route: Route, replace = false): void {
+  // 窄屏抽屉里点条目就跳走，跳之前先收起，免得新页面还压着遮罩。
+  if (dockOpen) setDockOpen(false);
   const hash = hashFor(route);
   if (location.hash === hash) {
     void renderRoute();
@@ -1755,9 +1759,11 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
     renderTopbar(crumbs),
     el("div", { className: "shell" }, [
       dockSidebar(parseRoute()),
+      ...(dockOpen ? [dockScrim()] : []),
       el("div", { className: "shell-main" }, [content]),
     ]),
   );
+  document.body.classList.toggle("dock-open", dockOpen);
   restoreDockFocus(focus);
 }
 
@@ -2270,10 +2276,73 @@ function dockTodos(): HTMLElement {
   return wrap;
 }
 
+/**
+ * 窄屏没有常驻 dock，导航折进左侧抽屉：同一个 dock 加 `is-open` 就是抽屉，
+ * 宽屏的 CSS 不认这个类，桌面布局不受影响。
+ */
+let dockOpen = false;
+let dockKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+
+function setDockOpen(open: boolean): void {
+  if (dockOpen === open) return;
+  dockOpen = open;
+  const dock = document.querySelector<HTMLElement>(".dock");
+  dock?.classList.toggle("is-open", open);
+  if (open && dock) {
+    if (!document.querySelector(".dock-scrim")) dock.after(dockScrim());
+  } else {
+    document.querySelector(".dock-scrim")?.remove();
+  }
+  document.querySelector(".dock-toggle")?.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("dock-open", open);
+  if (dockKeyHandler) {
+    document.removeEventListener("keydown", dockKeyHandler);
+    dockKeyHandler = null;
+  }
+  if (open) {
+    // 手机上没键盘也用不上，桌面窄窗口时按 Esc 能收起。
+    dockKeyHandler = (event) => {
+      if (event.key === "Escape") setDockOpen(false);
+    };
+    document.addEventListener("keydown", dockKeyHandler);
+  }
+}
+
+/** 抽屉背后的遮罩：点一下就收起。 */
+function dockScrim(): HTMLElement {
+  const node = el("div", { className: "dock-scrim", attrs: { "aria-hidden": "true" } });
+  node.addEventListener("click", () => setDockOpen(false));
+  return node;
+}
+
+/** 顶栏左侧的抽屉开关，只在窄屏出现（宽屏已有常驻 dock）。 */
+function dockToggleButton(): HTMLButtonElement {
+  const node = button("", () => setDockOpen(!dockOpen), "btn ghost small dock-toggle");
+  node.append(icon("menu"));
+  node.setAttribute("aria-label", tr("打开会话导航"));
+  node.setAttribute("aria-haspopup", "dialog");
+  node.setAttribute("aria-controls", "dock-nav");
+  node.setAttribute("aria-expanded", String(dockOpen));
+  return node;
+}
+
 /** 桌面宽屏左侧的 dock：结构树、历史与待办三个 tab，选中的 tab 记在 localStorage。 */
 function dockSidebar(route: Route): HTMLElement {
   let tab = readDockTab();
-  const nav = el("nav", { className: "dock", attrs: { "aria-label": tr("会话导航") } });
+  const nav = el("nav", {
+    className: `dock${dockOpen ? " is-open" : ""}`,
+    attrs: { "aria-label": tr("会话导航"), id: "dock-nav" },
+  });
+  // 抽屉头部只在窄屏出现：宽屏 dock 是常驻侧栏，不需要标题和关闭按钮。
+  const closeButton: HTMLButtonElement = button("", () => setDockOpen(false), "btn ghost small dock-close");
+  closeButton.append(icon("close"));
+  closeButton.setAttribute("aria-label", tr("关闭会话导航"));
+  nav.append(
+    el("div", { className: "dock-head" }, [
+      el("span", { className: "dock-head-title", text: tr("会话导航") }),
+      closeButton,
+    ]),
+  );
   const tabs = el("div", { className: "dock-tabs", attrs: { role: "tablist" } });
   const body = el("div", { className: "dock-body" });
   const makeTab = (id: DockTab, label: string): HTMLButtonElement => {
@@ -2690,6 +2759,7 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
       el("span", { className: "brand-mark", text: "AB" }),
       el("span", { className: "brand-name", text: "Agent Bridge" }),
     ]),
+    dockToggleButton(),
     el(
       "a",
       {
