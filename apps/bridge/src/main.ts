@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import type { Server } from "node:http";
-import { hostname } from "node:os";
-import { join } from "node:path";
+import { homedir, hostname } from "node:os";
+import { dirname, join } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@craftstead/crypto";
 import { loadNoiseNode } from "@craftstead/crypto/node";
 import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from "@craftstead/protocol";
@@ -887,7 +887,37 @@ async function commandServeSessiond(): Promise<void> {
   });
 }
 
+/**
+ * launchd / Finder 拉起的 app 只带 `/usr/bin:/bin:/usr/sbin:/sbin`，而托管会话和 CLI
+ * 适配器都靠 PATH 找 node / pi / claude / codex：pi 的入口是 `#!/usr/bin/env node` 脚本，
+ * 缺 node 会直接以 127 退出，会话就再也 resume 不起来。子进程全部继承 process.env，
+ * 所以启动时补一次即可（放在已有 PATH 之后，不改变用户自己的解析优先级）。
+ */
+function ensureToolPath(): void {
+  const home = homedir();
+  const candidates = [
+    join(home, ".bun", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    join(home, ".local", "bin"),
+    // 随 app 打包的 Node 运行时：本机没装 node 时的兜底。
+    dirname(process.execPath),
+  ];
+  const parts = (process.env["PATH"] ?? "").split(":").filter(Boolean);
+  for (const dir of candidates) {
+    if (parts.includes(dir)) continue;
+    try {
+      if (!statSync(dir).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    parts.push(dir);
+  }
+  process.env["PATH"] = parts.join(":");
+}
+
 async function main(): Promise<void> {
+  ensureToolPath();
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
     case "init":
