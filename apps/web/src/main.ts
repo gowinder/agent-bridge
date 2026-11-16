@@ -289,20 +289,19 @@ let hostedDraft: {
  * 会话列表页先取一次，点「新建」时就能直接拿来填默认值。
  */
 let hostedCreateDefaults: HostedCreateDefaults | null = null;
-/** 上面那份选项有没有取过：列表页重绘很频繁，取到就没必要再问。 */
-let hostedCreateDefaultsFetched = false;
 
-function prefetchHostedCreateDefaults(): void {
-  if (hostedCreateDefaultsFetched) return;
-  hostedCreateDefaultsFetched = true;
-  void call<HostedOptionsResult>("hosted.options")
-    .then((info) => {
-      hostedCreateDefaults = info.lastCreate ?? null;
-    })
-    .catch(() => {
-      // 读不到就按默认值来，下次进这个页面再试。
-      hostedCreateDefaultsFetched = false;
-    });
+/**
+ * 点「新建」时现取一次：别的标签页或浏览器刚建过会话，缓存就会过期，
+ * 拿旧值预填再直接提交会把刚记住的选项又覆盖回去。`hosted.dirs` 是轻量的那份。
+ */
+async function fetchHostedCreateDefaults(): Promise<HostedCreateDefaults | null> {
+  try {
+    const config = await call<HostedDirsResult>("hosted.dirs");
+    hostedCreateDefaults = config.lastCreate ?? null;
+  } catch {
+    // 取不到就沿用缓存（可能为空），按默认值建也不影响创建。
+  }
+  return hostedCreateDefaults;
 }
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
@@ -3229,7 +3228,6 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const sessions = visibleSessions(projectSessions, showArchived);
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
   const isHosted = appInfo?.appId === "hosted";
-  if (isHosted && appInfo?.capabilities.create === true) prefetchHostedCreateDefaults();
   const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
   // 桌面客户端（例如 dsh）也能从网页新建：Bridge 代它起一次无界面运行，第一条消息随创建发出。
   const canCreateDesktop = !isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
@@ -3240,14 +3238,15 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   if (panelHost && project && appInfo && desktopPanelDraft) {
     panelHost.append(desktopCreatePanel(project, appInfo, desktopPanelDraft));
   }
-  const openCreate = (): void => {
+  const openCreate = async (): Promise<void> => {
     if (!panelHost || !project || !appInfo) return;
     if (canCreateDesktop) {
       desktopDraft = { projectId: project.projectId, text: "" };
       panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
     } else {
       // 默认沿用上一次创建时的选项；Bridge 没记过（第一次用）就退回手动 / Claude Code。
-      const last = hostedCreateDefaults;
+      // 现取一次而不是用页面里缓存的：别的标签页建过会话后缓存就是旧的。
+      const last = await fetchHostedCreateDefaults();
       hostedDraft = {
         projectId: project.projectId,
         title: "",
@@ -3352,7 +3351,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(el("li", { className: session.archived ? "row-item is-archived" : "row-item" }, [row, actions]));
   }
 
-  const createHosted = canCreateHosted || canCreateDesktop ? button("", openCreate, "btn small create-btn") : null;
+  const createHosted = canCreateHosted || canCreateDesktop ? button("", () => void openCreate(), "btn small create-btn") : null;
   if (createHosted) {
     createHosted.append(
       el("span", {
@@ -3781,7 +3780,6 @@ function hostedCreatePanel(
   syncAgent();
   void call<HostedOptionsResult>("hosted.options")
     .then((info) => {
-      hostedCreateDefaults = info.lastCreate ?? null;
       const groups: Array<[string, ModelOption[]]> = [
         [tr("自定义"), info.models.filter((item) => item.section === "custom")],
         [tr("常用"), info.models.filter((item) => (item.section ?? "main") === "main")],

@@ -617,11 +617,12 @@ export type HostedAgent = "claude" | "pi";
 /**
  * 上一次成功创建托管会话时用的选项：存在 Bridge 的 hosted.json 里，
  * 网页下次打开新建面板就按它填默认值，换浏览器、清缓存都不丢。
+ * 启动参数（args）不在这里：它按浏览器本地的「保存过的参数 + 勾选」走。
  */
 export interface HostedCreateDefaults {
   /** 上次用的引擎。 */
   agent?: HostedAgent;
-  /** Claude Code 的权限模式；pi 会话恒为 manual（占位）。 */
+  /** Claude Code 的权限模式；pi 没有这一项，创建 pi 会话时保留上次 Claude Code 用的模式。 */
   permissionMode?: HostedPermissionMode;
   /** 上次 Claude Code 会话用的 `--model`；缺省表示 CLI 默认。 */
   model?: string;
@@ -661,6 +662,8 @@ export interface HostedDirsResult {
   permissionModes: HostedPermissionMode[];
   /** hosted.json 的 allowBypassPermissions 开关；false 时 permissionModes 不含 bypassPermissions。 */
   allowBypassPermissions: boolean;
+  /** 上一次新建托管会话用的选项，网页打开新建面板前用它预填。 */
+  lastCreate?: HostedCreateDefaults;
   note?: string;
 }
 

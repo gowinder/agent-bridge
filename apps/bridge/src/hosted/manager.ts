@@ -387,6 +387,7 @@ export class HostedSessionManager {
       idleTimeoutMs: this.config.idleTimeoutMs,
       permissionModes: this.remotePermissionModes(),
       allowBypassPermissions: this.config.allowBypassPermissions,
+      ...(this.config.lastCreate ? { lastCreate: this.config.lastCreate } : {}),
     };
     if (!result.enabled) {
       result.note = `尚未配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`;
@@ -399,17 +400,20 @@ export class HostedSessionManager {
     this.config = readConfig(this.stateDir);
   }
 
-  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
-  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+  /**
+   * 读盘、改几个键、写回：运行中手改过 hosted.json（还没重启）时，不会被内存里的旧配置冲掉。
+   * 只用于「顺手记一下」的改动；改 dirs 这类设置仍走 writeConfig。
+   */
+  private patchConfigFile(patch: Record<string, unknown>): void {
     const path = join(this.stateDir, "hosted.json");
     let raw: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
       if (isRecord(parsed)) raw = parsed;
     } catch {
-      // 没有文件或内容坏了：按只有这一项的新配置写。
+      // 没有文件或内容坏了：按只有这几项的新配置写。
     }
-    raw["allowBypassPermissions"] = enabled;
+    Object.assign(raw, patch);
     try {
       mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
       const tmp = `${path}.tmp`;
@@ -421,6 +425,11 @@ export class HostedSessionManager {
         `写入 hosted.json 失败：${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
+  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+    this.patchConfigFile({ allowBypassPermissions: enabled });
     this.reloadConfig();
     return this.configForClient();
   }
@@ -1041,23 +1050,25 @@ export class HostedSessionManager {
       agent,
       permissionMode: agent === "pi" ? (prev.permissionMode ?? permissionMode) : permissionMode,
     };
+    // 本次用的引擎以「这次选了什么」为准：选回默认就不写这项，下次预填跟着回到默认；
+    // 另一个引擎的那份原样留着，来回切引擎不会互相清空。
     if (agent === "pi") {
-      if (prev.model !== undefined) next.model = prev.model;
-      if (prev.effort !== undefined) next.effort = prev.effort;
+      if (prev.model) next.model = prev.model;
+      if (prev.effort) next.effort = prev.effort;
       if (used.model) next.piModel = used.model;
       if (used.thinking) next.piThinking = used.thinking;
       if (used.subagentModel) next.subagentModel = used.subagentModel;
       if (used.subagentThinking) next.subagentThinking = used.subagentThinking;
     } else {
-      if (prev.piModel !== undefined) next.piModel = prev.piModel;
-      if (prev.piThinking !== undefined) next.piThinking = prev.piThinking;
-      if (prev.subagentModel !== undefined) next.subagentModel = prev.subagentModel;
-      if (prev.subagentThinking !== undefined) next.subagentThinking = prev.subagentThinking;
+      if (prev.piModel) next.piModel = prev.piModel;
+      if (prev.piThinking) next.piThinking = prev.piThinking;
+      if (prev.subagentModel) next.subagentModel = prev.subagentModel;
+      if (prev.subagentThinking) next.subagentThinking = prev.subagentThinking;
       if (used.model) next.model = used.model;
       if (used.effort) next.effort = used.effort;
     }
+    this.patchConfigFile({ lastCreate: next });
     this.config.lastCreate = next;
-    this.writeConfig();
   }
 
   /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
