@@ -4337,8 +4337,6 @@ interface ChatState {
   historyEnd?: boolean;
   /** 手动折叠起来的消息（按回合首条 messageId）；5 秒轮询重绘后仍保持折叠。 */
   folded?: Set<string>;
-  /** 对话底部那排复制 / 分享 / 下载：不用滚回消息头。 */
-  bottomBar?: HTMLElement;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -4367,9 +4365,6 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const note = el("p", { className: "hint" });
   const list = el("div", { className: "transcript-body" });
   const status = el("p", { className: "hint" });
-  // 固定在输入区上方：复制/分享最后一条回复不用再滚回消息头。
-  const bottomBar = el("div", { className: "chat-bottom-actions" });
-  bottomBar.hidden = true;
   // 翻历史与 5 秒轮询是两条独立请求：共用一个 loading 会让点击被轮询默默吞掉。
   let loadingOlder = false;
   const loadOlder = button("", () => {
@@ -4399,7 +4394,6 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     loading: false,
     busy: false,
     interrupted: false,
-    bottomBar,
     contextButton,
     contextPop,
   };
@@ -5118,7 +5112,6 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
         note,
         list,
       ]),
-      bottomBar,
       composer,
       status,
     ]),
@@ -6690,6 +6683,14 @@ function messageBubble(
               ),
     );
   }
+  if (hasText && session) {
+    // 长消息读到底也能复制/分享，不用再滚回消息头。
+    const foot = messageFoot([
+      copyButton(copySource(session.sessionId, [message])),
+      shareButton(session, message),
+    ]);
+    if (foot) bubble.append(foot);
+  }
   return bubble;
 }
 
@@ -7384,6 +7385,16 @@ function foldButton(
   return toggle;
 }
 
+/**
+ * 消息卡片底部的操作区：长消息读到底就能复制/分享，不用再滚回消息头。
+ * 顶部那排保留，两处按钮是同一套。
+ */
+function messageFoot(buttons: (HTMLElement | null)[]): HTMLElement | null {
+  const items = buttons.filter((item): item is HTMLElement => item !== null);
+  if (items.length === 0) return null;
+  return el("div", { className: "message-foot" }, items);
+}
+
 /** 消息里所有正文块，按顺序拼回纯文本。 */
 function textBlocks(messages: MessageRecord[]): string {
   return messages
@@ -7576,46 +7587,23 @@ function assistantTurn(
   // 只有最新一回合的盒子可以点；历史回合保留文字说明。
   const latest = nextSteps[nextSteps.length - 1];
   if (latest) bubble.append(nextStepBox(latest, latest.pending ? (askState ?? state) : state));
+  if (session) {
+    // 整回合的复制放在底部：读完长回复就能直接点，和消息头那排是同一套动作。
+    const footText = textBlocks(messages);
+    const lastText = [...messages]
+      .reverse()
+      .find((message) => message.blocks.some((block) => block.type === "text"));
+    const foot = messageFoot([
+      footText ? copyButton(copySource(session.sessionId, messages)) : null,
+      lastText ? shareButton(session, lastText) : null,
+    ]);
+    if (foot) bubble.append(foot);
+  }
   return bubble;
 }
 
 function spinner(): HTMLElement {
   return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
-}
-
-/** 最后一条助手回复所在的回合：`message.assistant` 连着的几条算一个回合。 */
-function lastAssistantTurn(messages: MessageRecord[]): MessageRecord[] {
-  let end = -1;
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "assistant") {
-      end = index;
-      break;
-    }
-  }
-  if (end < 0) return [];
-  let start = end;
-  while (start > 0 && messages[start - 1]?.role === "assistant") start -= 1;
-  return messages.slice(start, end + 1);
-}
-
-/** 对话底部那排操作跟着最后一条回复走；没有回复就让整条隐藏。 */
-function paintBottomActions(state: ChatState): void {
-  const bar = state.bottomBar;
-  if (!bar) return;
-  const turn = lastAssistantTurn(state.messages);
-  const text = turn.length > 0 ? textBlocks(turn) : "";
-  const lastText = [...turn]
-    .reverse()
-    .find((message) => message.blocks.some((block) => block.type === "text"));
-  bar.hidden = text === "" || lastText === undefined;
-  if (bar.hidden || !lastText) {
-    bar.replaceChildren();
-    return;
-  }
-  bar.replaceChildren(
-    copyButton(copySource(state.session.sessionId, turn), tr("复制最后一条回复")),
-    shareButton(state.session, lastText),
-  );
 }
 
 /** 只有 Bridge 托管的会话能从网页停回合，别的来源由桌面应用自己控制。 */
@@ -7660,7 +7648,6 @@ function markTurnState(list: HTMLElement, state: ChatState): void {
 }
 
 function renderMessages(state: ChatState): void {
-  paintBottomActions(state);
   const list = state.list;
   const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
   const stick = distanceFromBottom < 80;
