@@ -2529,24 +2529,6 @@ details[open] > .dock-project-head::before {
   scroll-padding-bottom: 12px;
 }
 
-/* 输入区上方那排：复制 / 分享 / 下载最后一条回复，不跟着消息滚走。 */
-.chat-bottom-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  padding: 0 2px;
-}
-
-.chat-bottom-actions[hidden] {
-  display: none;
-}
-
-.chat-bottom-actions .share-btn {
-  margin-left: 0;
-  opacity: 1;
-}
-
 .message {
   border-radius: var(--radius);
   padding: 12px 14px;
@@ -2594,7 +2576,8 @@ details[open] > .dock-project-head::before {
   -webkit-line-clamp: 2;
 }
 
-.message.is-folded > *:not(.message-meta):not(.message-fold-preview):not(.thinking-row) {
+.message.is-folded
+  > *:not(.message-meta):not(.message-fold-preview):not(.thinking-row):not(.message-foot) {
   display: none;
 }
 
@@ -2606,6 +2589,31 @@ details[open] > .dock-project-head::before {
 
 .message.is-folded .fold-chev {
   transform: rotate(0deg);
+}
+
+/* 消息卡片底部那排：长消息读到底就能复制/分享。 */
+.message-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+
+.message:hover .message-foot,
+.message-foot:focus-within {
+  opacity: 1;
+}
+
+.message-foot .share-btn {
+  margin-left: 0;
+}
+
+@media (hover: none) {
+  .message-foot {
+    opacity: 1;
+  }
 }
 
 .message-meta {
