@@ -855,6 +855,8 @@ export interface SessionSearchResult {
   matches: string[];
   /** 实际搜过几个会话（读不到 transcript 的不算）。 */
   searched: number;
+  /** 读 transcript 失败的会话数；这些没算进 searched。 */
+  errors?: number;
   /** 超过时间预算时为 true：结果是部分结果。 */
   partial?: boolean;
 }

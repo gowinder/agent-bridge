@@ -109,10 +109,6 @@ function numberParam(params: Record<string, unknown>, name: string): number | un
 }
 
 /**
- * 读接口（session.list、message.list、fs.* 等）每隔几秒就被轮询一次，记进操作日志
- * 只会把真正做过的操作冲掉，所以只挑会改变状态或内容的请求。
- */
-/**
  * 对话内容搜索。只在用户勾了「搜内容」时调用，作用范围是前端传进来的那批会话
  * （侧栏历史最多几十条），所以直接复用各适配器的 messages()：它们内部按
  * transcript 的 mtime/size 缓存了解析结果，第二次搜同一会话基本只 stat 一次。
@@ -120,52 +116,18 @@ function numberParam(params: Record<string, unknown>, name: string): number | un
 const SEARCH_MAX_SESSIONS = 80;
 const SEARCH_MAX_QUERY_CHARS = 120;
 const SEARCH_PAGE_SIZE = 200;
-const SEARCH_MAX_PAGES = 20;
-const SEARCH_MAX_TEXT_CHARS = 400_000;
+const SEARCH_MAX_PAGES = 40;
 const SEARCH_CONCURRENCY = 3;
 const SEARCH_BUDGET_MS = 8_000;
-const SEARCH_CACHE_TTL_MS = 60_000;
-const SEARCH_CACHE_MAX = 80;
+const SEARCH_HIT_TTL_MS = 30_000;
+const SEARCH_HIT_CACHE_MAX = 2_000;
 
-interface SearchText {
+interface SearchHit {
   at: number;
-  text: string;
+  hit: boolean;
 }
 
-const searchTextCache = new Map<string, SearchText>();
-
-/** 把一个会话的正文拼成一段小写文本（尾部截断），供关键词匹配用。 */
-async function sessionSearchText(adapters: SearchMessageSource, sessionId: string): Promise<string> {
-  const cached = searchTextCache.get(sessionId);
-  if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return cached.text;
-
-  let text = "";
-  let before: string | undefined;
-  for (let page = 0; page < SEARCH_MAX_PAGES; page += 1) {
-    const result = await adapters.messages(sessionId, {
-      limit: SEARCH_PAGE_SIZE,
-      ...(before ? { before } : {}),
-    });
-    const chunk = result.messages
-      .map((message) => message.blocks.map((block) => block.text).join("\n"))
-      .join("\n");
-    text = text ? `${chunk}\n${text}` : chunk;
-    if (!result.nextBefore) break;
-    before = result.nextBefore;
-    if (text.length > SEARCH_MAX_TEXT_CHARS) break;
-  }
-
-  // 只留尾部：最新内容最可能是用户要找的，也能压住内存。
-  const trimmed = text.slice(-SEARCH_MAX_TEXT_CHARS).toLowerCase();
-  searchTextCache.delete(sessionId);
-  searchTextCache.set(sessionId, { at: Date.now(), text: trimmed });
-  while (searchTextCache.size > SEARCH_CACHE_MAX) {
-    const oldest = searchTextCache.keys().next().value;
-    if (oldest === undefined) break;
-    searchTextCache.delete(oldest);
-  }
-  return trimmed;
-}
+const searchHitCache = new Map<string, SearchHit>();
 
 /** 搜索只需要「按会话读一页消息」这一件事，抽出来是为了能在测试里替换掉适配器。 */
 export interface SearchMessageSource {
@@ -173,6 +135,53 @@ export interface SearchMessageSource {
     sessionId: string,
     params: { limit?: number; before?: string },
   ): Promise<MessageListResult>;
+}
+
+/**
+ * 一个会话里是否同时出现全部关键词。
+ *
+ * 边翻页边匹配，不攒全文：这样老会话（一两千条消息、五百 KB 以上）靠前的内容也
+ * 能搜到，不会因为只留尾部而漏词；内存也不随会话大小涨。全部关键词都出现就停。
+ */
+async function sessionSearchHit(
+  adapters: SearchMessageSource,
+  sessionId: string,
+  words: string[],
+  cacheKey: string,
+): Promise<boolean> {
+  const cached = searchHitCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < SEARCH_HIT_TTL_MS) return cached.hit;
+
+  const seen = new Set<string>();
+  let before: string | undefined;
+  for (let page = 0; page < SEARCH_MAX_PAGES; page += 1) {
+    const result = await adapters.messages(sessionId, {
+      limit: SEARCH_PAGE_SIZE,
+      ...(before ? { before } : {}),
+    });
+    for (const message of result.messages) {
+      for (const block of message.blocks) {
+        if (seen.size === words.length) break;
+        const text = block.text.toLowerCase();
+        for (const word of words) {
+          if (!seen.has(word) && text.includes(word)) seen.add(word);
+        }
+      }
+    }
+    if (seen.size === words.length) break;
+    if (!result.nextBefore) break;
+    before = result.nextBefore;
+  }
+
+  const hit = seen.size === words.length;
+  searchHitCache.delete(cacheKey);
+  searchHitCache.set(cacheKey, { at: Date.now(), hit });
+  while (searchHitCache.size > SEARCH_HIT_CACHE_MAX) {
+    const oldest = searchHitCache.keys().next().value;
+    if (oldest === undefined) break;
+    searchHitCache.delete(oldest);
+  }
+  return hit;
 }
 
 export async function searchSessionTexts(
@@ -186,10 +195,12 @@ export async function searchSessionTexts(
     .filter((word) => word.length > 0);
   if (words.length === 0) return { matches: [], searched: 0 };
 
+  const cachePrefix = words.join("\u0001");
   const ids = sessionIds.filter((id, index) => sessionIds.indexOf(id) === index).slice(0, SEARCH_MAX_SESSIONS);
   const started = Date.now();
   const matches: string[] = [];
   let searched = 0;
+  let errors = 0;
   let cursor = 0;
 
   // 解析 transcript 是同步 CPU 活，分几个 worker 并发 + 每会话让出一次事件循环，
@@ -202,21 +213,28 @@ export async function searchSessionTexts(
       if (index >= ids.length) return;
       const sessionId = ids[index] as string;
       try {
-        const text = await sessionSearchText(adapters, sessionId);
+        const hit = await sessionSearchHit(adapters, sessionId, words, `${cachePrefix}\u0000${sessionId}`);
         searched += 1;
-        if (words.every((word) => text.includes(word))) matches.push(sessionId);
+        if (hit) matches.push(sessionId);
       } catch {
         // 读不到 transcript 的会话跳过：搜索不该因为一个坏会话整单失败。
+        errors += 1;
       }
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   });
   await Promise.all(workers);
 
-  const partial = Date.now() - started > SEARCH_BUDGET_MS ? true : undefined;
-  return partial ? { matches, searched, partial } : { matches, searched };
+  const result: SessionSearchResult = { matches, searched };
+  if (errors > 0) result.errors = errors;
+  if (Date.now() - started > SEARCH_BUDGET_MS) result.partial = true;
+  return result;
 }
 
+/**
+ * 读接口（session.list、message.list、fs.* 等）每隔几秒就被轮询一次，记进操作日志
+ * 只会把真正做过的操作冲掉，所以只挑会改变状态或内容的请求。
+ */
 const ACTIVITY_METHODS = new Set([
   "message.send",
   "shell.exec",
