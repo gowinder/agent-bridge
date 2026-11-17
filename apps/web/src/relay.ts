@@ -7,6 +7,14 @@ import {
 import { tr } from "./i18n";
 
 type Control = RelayServerMessage;
+
+/**
+ * 读循环意外退出（或长时间没人调用 nextFrame）时帧会一直堆在这里。
+ * 留一点余量够重新排空就行，别把标签页内存吃光。
+ */
+const MAX_QUEUED_FRAMES = 64;
+const MAX_QUEUED_CONTROLS = 64;
+
 type Waiter =
   | { kind: "control"; match: (message: Control) => boolean; resolve: (message: Control) => void }
   | { kind: "frame"; resolve: (frame: Uint8Array) => void }
@@ -52,8 +60,10 @@ export class RelayConnection {
         } catch {
           return;
         }
+        if (this.controls.length > MAX_QUEUED_CONTROLS) this.controls.shift();
       } else {
         this.frames.push(new Uint8Array(data));
+        if (this.frames.length > MAX_QUEUED_FRAMES) this.frames.shift();
       }
       this.pump();
     });
@@ -83,6 +93,8 @@ export class RelayConnection {
 
   private handleClose(info: CloseInfo): void {
     if (this.closeInfo) return;
+    // 关掉之后 send 会抛 InvalidStateError；置回 false 让 sendBinary 走丢弃分支。
+    this.open = false;
     this.closeInfo = info;
     this.onClosed(info);
     this.pump();
@@ -116,20 +128,16 @@ export class RelayConnection {
   nextControl(match: (message: Control) => boolean, timeoutMs = 10_000): Promise<Control> {
     const index = this.controls.findIndex(match);
     if (index !== -1) return Promise.resolve(this.controls.splice(index, 1)[0]!);
-    return this.timeout(
-      new Promise((resolve) => this.waiters.push({ kind: "control", match, resolve })),
-      timeoutMs,
-      tr("中继控制消息超时"),
-    );
+    return this.waitFor<Control>(timeoutMs, tr("中继控制消息超时"), (resolve) => ({
+      kind: "control",
+      match,
+      resolve,
+    }));
   }
 
   nextFrame(timeoutMs = 10_000): Promise<Uint8Array> {
     if (this.frames.length > 0) return Promise.resolve(this.frames.shift()!);
-    return this.timeout(
-      new Promise((resolve) => this.waiters.push({ kind: "frame", resolve })),
-      timeoutMs,
-      tr("中继数据帧超时"),
-    );
+    return this.waitFor<Uint8Array>(timeoutMs, tr("中继数据帧超时"), (resolve) => ({ kind: "frame", resolve }));
   }
 
   closed(): Promise<CloseInfo> {
@@ -137,28 +145,37 @@ export class RelayConnection {
     return new Promise((resolve) => this.waiters.push({ kind: "close", resolve }));
   }
 
-  private timeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  /**
+   * 等一个 waiter，带超时。超时要把 waiter 从队列里摘掉：留着的话，
+   * 之后真正到达的帧会被这个没人等的孤儿吃掉，表现为「偶发丢消息」。
+   */
+  private waitFor<T>(timeoutMs: number, label: string, make: (resolve: (value: T) => void) => Waiter): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(label)), ms);
-      promise.then(
-        (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        (error: unknown) => {
-          clearTimeout(timer);
-          reject(error);
-        },
-      );
+      let waiter: Waiter | null = null;
+      const timer = setTimeout(() => {
+        if (waiter) {
+          const index = this.waiters.indexOf(waiter);
+          if (index !== -1) this.waiters.splice(index, 1);
+        }
+        reject(new Error(label));
+      }, timeoutMs);
+      waiter = make((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      });
+      this.waiters.push(waiter);
     });
   }
 
   sendBinary(frame: Uint8Array): void {
+    // 已经关了就别再排队：既发不出去，也会把 outbox 撑大。
+    if (this.closeInfo) return;
     if (this.open) this.ws.send(frame);
     else this.outbox.push(frame);
   }
 
   sendText(text: string): void {
+    if (this.closeInfo) return;
     if (this.open) this.ws.send(text);
     else this.outbox.push(text);
   }

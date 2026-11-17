@@ -24,6 +24,11 @@ test("very long paths keep the tail, which is the part that identifies the file"
   assert.ok(line.includes("file.ts"));
 });
 
+test("heartbeats stay out of the log", () => {
+  // 心跳每 20 秒一次，进日志会把操作记录彻底淹掉。
+  assert.equal(describeActivity(request("host.ping")), null);
+});
+
 test("polled methods stay out of the log", () => {
   for (const method of ["session.list", "message.list", "hosted.dirs", "host.info"]) {
     assert.equal(describeActivity(request(method)), null, method);

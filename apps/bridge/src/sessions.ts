@@ -495,6 +495,9 @@ export class DeviceSession implements ChannelSession {
   private async dispatch(request: RequestMessage): Promise<unknown> {
     const params = isObject(request.params) ? request.params : {};
     switch (request.method) {
+      // 心跳不碰任何状态：只回时间戳，网页据此判断通道是否还活着。
+      case "host.ping":
+        return { at: Date.now() };
       case "host.info": {
         const info: HostInfoResult = {
           name: this.options.hostName,

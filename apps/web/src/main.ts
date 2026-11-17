@@ -263,6 +263,13 @@ const app: HTMLDivElement = root;
 
 let active: PeerClient | null = null;
 let generation = 0;
+/** 可见时的心跳间隔与判定窗口；手机挂起后回来靠它第一时间发现「假活」。 */
+const HEARTBEAT_MS = 20_000;
+const HEARTBEAT_TIMEOUT_MS = 6_000;
+/** 请求超时/回到前台时的短探活：够快，又不至于把慢请求误判成断线。 */
+const PROBE_TIMEOUT_MS = 4_000;
+/** 心跳定时器：页面可见时每 20 秒 ping 一次，隐藏时停掉省电。 */
+let heartbeatTimer: number | null = null;
 /** 刚配对完回到首页时提示一句回落地页的入口；只影响一次渲染。 */
 let justPaired = false;
 let retryTimer: number | null = null;
@@ -728,6 +735,7 @@ function stopActive(): void {
     retryTimer = null;
   }
   stopPolling();
+  stopHeartbeat();
   stopSessionWatch();
   active?.stop();
   active = null;
@@ -742,6 +750,101 @@ function stopPolling(): void {
     pollTimer = null;
   }
 }
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function startHeartbeat(): void {
+  stopHeartbeat();
+  // 后台标签页的定时器本来就会被节流，这里干脆不发，省电也省流量。
+  if (document.visibilityState !== "visible") return;
+  heartbeatTimer = window.setInterval(() => void heartbeatTick(), HEARTBEAT_MS);
+}
+
+/** 通道还在但可能已经死了：只有 Bridge 真的回话才能证明它活着。 */
+async function pingHost(timeoutMs: number): Promise<boolean> {
+  const client = active;
+  if (!client) return false;
+  try {
+    await client.request("host.ping", undefined, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 丢掉当前连接并进入重连。故意保留 `connected`/`snapshot`：
+ * 页面继续显示断线前的数据，重连成功后 `renderRoute(soft)` 会把它们刷新掉，
+ * 用户不会突然看到白屏或者被踢回首页。
+ */
+function connectionLost(message: string): void {
+  const device = connected?.device;
+  if (!device) return;
+  // 已经在重连的路上：重复调度会把退避重置回第 1 次。
+  if (active === null && retryTimer !== null) return;
+  stopPolling();
+  stopHeartbeat();
+  active?.stop();
+  active = null;
+  setReconnecting(message);
+  scheduleRetry(device, 1);
+}
+
+async function heartbeatTick(): Promise<void> {
+  if (!active || document.visibilityState !== "visible") return;
+  if (await pingHost(HEARTBEAT_TIMEOUT_MS)) return;
+  connectionLost(tr("连接无响应，正在重连…"));
+}
+
+/** 一次请求超时可能只是它慢（压缩能跑两分钟），用短探活区分「慢」和「死了」。 */
+let probing = false;
+
+async function probeAfterTimeout(): Promise<void> {
+  // 轮询与多个请求可能同时超时：只发一次探活，别把刚恢复的链路再压死。
+  if (probing) return;
+  probing = true;
+  try {
+    if (await pingHost(PROBE_TIMEOUT_MS)) return;
+    connectionLost(tr("连接无响应，正在重连…"));
+  } finally {
+    probing = false;
+  }
+}
+
+/**
+ * 「重试」按钮的语义：连接还在就重发请求；连接已经没了就先重建连接 ——
+ * 直接重发只会再等一次超时，用户会以为按钮坏了。
+ */
+function retryAction(retry: () => void): () => void {
+  return () => {
+    if (active && !active.isDead) {
+      retry();
+      return;
+    }
+    const device = connected?.device;
+    if (!device) {
+      retry();
+      return;
+    }
+    scheduleRetry(device, 1);
+  };
+}
+
+// 回到前台先探活：手机挂起时 socket 常常已经死了但 close 事件不会来。
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    stopHeartbeat();
+    return;
+  }
+  if (!active) return;
+  startHeartbeat();
+  void probeAfterTimeout();
+});
 
 function showHome(): void {
   stopActive();
@@ -819,7 +922,7 @@ function flashNotice(message: string, retry?: () => void): void {
         tr("重试"),
         () => {
           box.remove();
-          retry();
+          retryAction(retry)();
         },
         "btn primary small float-notice-retry",
       ),
@@ -846,12 +949,12 @@ function statusError(state: ChatState, error: unknown, retry: () => void): void 
     el("span", { text }),
     button(
       tr("重试"),
-      () => {
+      retryAction(() => {
         state.retrying = true;
         state.status.classList.remove("error");
         state.status.textContent = tr("正在重试…");
         retry();
-      },
+      }),
       "btn ghost small status-retry",
     ),
   );
@@ -1593,9 +1696,26 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   opened.client.onEvent((message) => {
     if (message.event === "shell.output") handleShellEvent(message.data as ShellEventData);
   });
-  const infoResponse = await opened.client.request("host.info");
-  const devicesResponse = await opened.client.request("device.list");
+  // 读循环自己判死时走这条：socket 可能还开着，`closed()` 永远不会 resolve。
+  opened.client.onDead(() => {
+    if (gen + 1 !== generation || active !== opened.client) return;
+    connectionLost(tr("连接已断开，正在重连…"));
+  });
+  let infoResponse: Awaited<ReturnType<typeof opened.client.request>>;
+  let devicesResponse: Awaited<ReturnType<typeof opened.client.request>>;
+  try {
+    infoResponse = await opened.client.request("host.info");
+    devicesResponse = await opened.client.request("device.list");
+  } catch (error) {
+    // 握手成功了但通道马上又断：这里不能把 active 留在半初始化状态，
+    // 否则页面停在「正在连接」，之后也没有任何代码会去重连它。
+    opened.client.stop();
+    active = null;
+    throw error;
+  }
   if (!infoResponse.ok || !devicesResponse.ok) {
+    opened.client.stop();
+    active = null;
     throw new Error(infoResponse.error?.message ?? devicesResponse.error?.message ?? tr("读取主机信息失败"));
   }
   connected = {
@@ -1609,18 +1729,19 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   }
   await renderRoute(soft);
   startSessionWatch();
+  startHeartbeat();
   progressDone();
   setReconnecting(null);
   void opened.connection.closed().then((info) => {
     if (gen + 1 !== generation || active !== opened.client) return;
-    active = null;
-    stopPolling();
     if (info.code === 4003) {
+      stopPolling();
+      stopHeartbeat();
+      active = null;
       showHome();
       return;
     }
-    setReconnecting(tr("连接已断开，正在重连…"));
-    scheduleRetry(device, 1);
+    connectionLost(tr("连接已断开，正在重连…"));
   });
 }
 
@@ -1639,6 +1760,8 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
       ]),
     );
   }
+  // 旧的定时器必须清掉：不清的话两条重试链会同时存在，各自建一条 socket。
+  if (retryTimer !== null) clearTimeout(retryTimer);
   retryTimer = window.setTimeout(() => {
     retryTimer = null;
     if (gen !== generation) return;
@@ -1650,8 +1773,17 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
 }
 
 async function call<T>(method: Method, params?: unknown, timeoutMs = 20_000): Promise<T> {
-  if (!active) throw new PeerError("closed", tr("连接已断开"));
-  const response = await active.request(method, params, timeoutMs);
+  const client = active;
+  if (!client || client.isDead) throw new PeerError("closed", tr("连接已断开"));
+  let response: Awaited<ReturnType<PeerClient["request"]>>;
+  try {
+    response = await client.request(method, params, timeoutMs);
+  } catch (error) {
+    // 超时后先短探活判死：连接真死了就要停下来重连，
+    // 否则「重试」会继续往死通道发帧，Bridge 那边还会真的重复执行一次。
+    if (error instanceof PeerError && error.code === "timeout") void probeAfterTimeout();
+    throw error;
+  }
   if (!response.ok) {
     throw new RpcCallError(response.error?.code, response.error?.message ?? tr(`{0} 失败`, method));
   }

@@ -123,22 +123,29 @@ export async function connectDevice(
     }),
     () => {},
   );
-  await ready;
-  const handshake = new NoiseHandshake(engine, {
-    pattern: "ik",
-    initiator: true,
-    localKeys: {
-      privateKey: fromHex(device.privateKey),
-      publicKey: fromHex(device.publicKey),
-    },
-    remotePublicKey: fromHex(device.bridgePublicKey),
-    prologue: reconnectPrologue(device.roomId, channel, device.deviceId),
-  });
-  connection.sendBinary(handshake.write());
-  handshake.read(await connection.nextFrame());
-  if (!handshake.finished) throw new Error(tr("重连握手未完成"));
-  const secure = handshake.intoChannel();
-  return { client: new PeerClient(connection, secure), connection };
+  try {
+    await ready;
+    const handshake = new NoiseHandshake(engine, {
+      pattern: "ik",
+      initiator: true,
+      localKeys: {
+        privateKey: fromHex(device.privateKey),
+        publicKey: fromHex(device.publicKey),
+      },
+      remotePublicKey: fromHex(device.bridgePublicKey),
+      prologue: reconnectPrologue(device.roomId, channel, device.deviceId),
+    });
+    connection.sendBinary(handshake.write());
+    handshake.read(await connection.nextFrame());
+    if (!handshake.finished) throw new Error(tr("重连握手未完成"));
+    const secure = handshake.intoChannel();
+    return { client: new PeerClient(connection, secure), connection };
+  } catch (error) {
+    // 握手失败也要关掉 socket：不关的话这条通道会一直挂在 relay 和 Bridge 上，
+    // 而且没人再持有它，永远关不掉 —— 每次重试都会漏一条。
+    connection.close(1000, "connect failed");
+    throw error;
+  }
 }
 
 export { credentialsFromFragment };
