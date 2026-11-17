@@ -251,6 +251,8 @@ enum L10n {
         "(未找到)": "(not found)",
         "initialized=unknown（info 无法运行）": "initialized=unknown (info did not run)",
         "语言：中文": "Language: English",
+        "提示": "Alerts",
+        "新消息气泡（网页发来消息时在状态图标下弹一下）": "Message bubble (pops under the menu bar icon when a web message arrives)",
         "预览版与正式版是两份独立安装，各自更新": "Preview and release are separate installs; each updates on its own channel",
         "只更新预览版，正式版不提示（设定里可勾选升级到正式版）": "Only preview builds are offered; stable releases are not announced (opt in from Settings)",
         "有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。": "New versions are downloaded, swapped in and restarted automatically; skipped while pairing. When off, you check by hand from the menu.",

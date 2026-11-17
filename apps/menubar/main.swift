@@ -486,6 +486,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsFilesSwitch: NSSwitch?
     private var settingsTerminalSwitch: NSSwitch?
     private var settingsExpiryReminderSwitch: NSSwitch?
+    private var settingsMessageBubbleSwitch: NSSwitch?
     private var settingsAutoUpdateSwitch: NSSwitch?
     private var settingsReleaseUpgradeSwitch: NSSwitch?
     private var autoUpdateTimer: Timer?
@@ -505,6 +506,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var expiryReminderEnabled: Bool {
         get { UserDefaults.standard.object(forKey: "devtoolsExpiryReminder") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "devtoolsExpiryReminder") }
+    }
+
+    /// 网页发来消息时在状态图标下方弹的那个气泡。默认开，关掉后消息只进「日志」页。
+    private var messageBubbleEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "messageBubbleEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "messageBubbleEnabled") }
     }
     private var settingsTable: NSTableView?
     private var settingsCountLabel: NSTextField?
@@ -1365,9 +1372,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉；
-        // 托管目录下面又多了一行按钮，统一给到 806。
-        let height: CGFloat = 806
+        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉；托管目录下面又多了一行
+        // 按钮；再加「提示」区的标题与一行开关（约 70），806 已经放不下，统一给到 880。
+        let height: CGFloat = 880
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1538,6 +1545,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsExpiryReminderSwitch = toggle(T("到期前 30 分钟提醒"), #selector(toggleExpiryReminder(_:)))
         hint(T("开关立即生效；菜单里的「开启 1 / 8 / 24 小时」只是加个自动关闭的时限。勾选提醒后，自动关闭前 30 分钟会发一条系统通知。"))
 
+        section(T("提示"))
+        settingsMessageBubbleSwitch = toggle(T("新消息气泡（网页发来消息时在状态图标下弹一下）"), #selector(toggleMessageBubble(_:)))
+
         section(T("更新"))
         settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
         hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
@@ -1661,6 +1671,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsFilesSwitch?.isEnabled = reachable
         settingsTerminalSwitch?.isEnabled = reachable
         settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
+        settingsMessageBubbleSwitch?.state = messageBubbleEnabled ? .on : .off
         settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
         settingsReleaseUpgradeSwitch?.state = Updater.allowsReleaseUpgrade ? .on : .off
 
@@ -1800,6 +1811,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if sender.state == .on { requestNotificationPermission() }
     }
 
+    @objc private func toggleMessageBubble(_ sender: NSSwitch) {
+        messageBubbleEnabled = sender.state == .on
+        // 正在显示的那一个也一起收掉，否则开关看着像没生效。
+        if sender.state == .off { dismissBubble() }
+    }
+
     private func requestNotificationPermission() {
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
@@ -1846,7 +1863,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         messageLog.append(contentsOf: fresh)
         if messageLog.count > 200 { messageLog.removeFirst(messageLog.count - 200) }
         renderMessageLog()
-        if let latest = fresh.last { showMessageBubble(latest) }
+        // 消息总要进日志和 lastMessageAt；气泡只是提示，关掉不能把消息吞了。
+        if messageBubbleEnabled, let latest = fresh.last { showMessageBubble(latest) }
     }
 
     private func showMessageBubble(_ message: ReceivedMessage) {
