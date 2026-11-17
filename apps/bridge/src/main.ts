@@ -614,7 +614,7 @@ async function commandServe(): Promise<void> {
       return status;
     },
     recordHostEvent(line: string) {
-      recordHostEvent(line);
+      recordEvent(HOST_LOG_ID, line);
     },
     recentMessages(since: number) {
       // since=0 是初次加载：给最近一批，不要 200 条全倒给菜单栏。
