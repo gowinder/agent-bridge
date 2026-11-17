@@ -96,6 +96,8 @@ export const RELAY_CHANNEL_BYTES = 16;
 export const METHODS = [
   "pair.request",
   "host.info",
+  // 心跳：网页每 20 秒发一次，用来发现「socket 还在、通道其实已经死了」的连接。
+  "host.ping",
   "host.capabilities",
   "app.list",
   "project.list",
@@ -249,6 +251,11 @@ export interface DeviceSummary {
   expiresAt: number | null;
   revokedAt: number | null;
   lastSeenAt: number | null;
+}
+
+/** 心跳响应：只回一个时间戳，不读写任何状态，也不进操作日志。 */
+export interface HostPingResult {
+  at: number;
 }
 
 export interface HostInfoResult {
