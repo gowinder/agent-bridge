@@ -3183,12 +3183,6 @@ function renderProjects(route: Route & { level: "projects" }): void {
   }
 
   const isHosted = route.appId === "hosted";
-  const addForm = isHosted
-    ? hostedAddDirForm(() => {
-        snapshot = null;
-        void renderRoute();
-      })
-    : null;
   renderShell(
     el("main", { className: "main" }, [
       el("section", { className: "view-head" }, [
@@ -3198,21 +3192,10 @@ function renderProjects(route: Route & { level: "projects" }): void {
           el("h1", { className: "display", text: tr("工程") }),
           el("p", {
             className: "meta",
-            text: tr(`{0} 个工程，按会话数量排列{1}`, projects.length, isHosted ? tr("；托管目录可在本页添加") : ""),
+            // 白名单只在这台 Mac 上改：远程设备连读到的列表都不该能自己扩。
+            text: tr(`{0} 个工程，按会话数量排列{1}`, projects.length, isHosted ? tr("；托管目录只能在 Mac 菜单栏的「设定」里修改") : ""),
           }),
         ]),
-        ...(addForm
-          ? [
-              button(
-                tr("添加目录"),
-                () => {
-                  addForm.hidden = !addForm.hidden;
-                  if (!addForm.hidden) addForm.querySelector("input")?.focus();
-                },
-                "btn ghost small",
-              ),
-            ]
-          : []),
         button(
           tr("刷新"),
           () => {
@@ -3222,46 +3205,10 @@ function renderProjects(route: Route & { level: "projects" }): void {
           "btn ghost small",
         ),
       ]),
-      ...(addForm ? [addForm] : []),
       list,
     ]),
     crumbsFor(route),
   );
-}
-
-/** 把本机目录加入托管白名单：必须是已存在的绝对路径，添加后立刻出现在工程列表里。 */
-function hostedAddDirForm(onAdded: () => void): HTMLElement {
-  const input = el("input", {
-    className: "input mono",
-    attrs: { type: "text", placeholder: "/Users/you/code/project", spellcheck: "false", autocomplete: "off" },
-  });
-  const status = el("p", { className: "hint", text: tr("填这台 Mac 上已存在的绝对路径，添加后即可从这里新建托管会话。") });
-  const form = el("div", { className: "add-dir" }, [input, button(tr("添加"), () => void submitPath(), "btn primary small"), status]);
-  form.hidden = true;
-  const submitPath = async (): Promise<void> => {
-    const path = input.value.trim();
-    if (!path) {
-      status.classList.add("error");
-      status.textContent = tr("先填目录路径。");
-      return;
-    }
-    status.classList.remove("error");
-    status.textContent = tr("正在添加…");
-    try {
-      await call<HostedDirsResult>("hosted.addDir", { path });
-      onAdded();
-    } catch (error) {
-      status.classList.add("error");
-      status.textContent = messageOf(error);
-    }
-  };
-  trackIme(input);
-  input.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || isImeEnter(event)) return;
-    event.preventDefault();
-    void submitPath();
-  });
-  return form;
 }
 
 function renderSessions(route: Route & { level: "sessions" }): void {

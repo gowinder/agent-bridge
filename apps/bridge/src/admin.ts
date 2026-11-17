@@ -159,7 +159,10 @@ export interface AdminActions {
   /** 删除已作废设备的记录：中继那边也要删，否则菜单栏还会把它们列出来。 */
   purgeRevokedDevices(): Promise<{ purged: number; failed: string[] }>;
   hostedConfig(): AdminHostedConfig;
-  setHostedConfig(patch: { allowBypassPermissions?: boolean }): AdminHostedConfig;
+  /** 只有本机 admin 接口能改白名单与权限策略：远程设备没有这条通路。 */
+  setHostedConfig(patch: { allowBypassPermissions?: boolean; dirs?: string[] }): AdminHostedConfig;
+  /** 这台机器上已有工程的目录（去重、只含仍存在的），用于一键导入白名单。 */
+  projectDirs(): Promise<string[]>;
 }
 
 export interface AdminServerOptions {
@@ -286,15 +289,22 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           send(response, 200, { messages: actions.recentMessages(Number.isFinite(since) ? since : 0) });
           return;
         }
+        if (path === "/projects" && request.method === "GET") {
+          send(response, 200, { dirs: await actions.projectDirs() });
+          return;
+        }
         if (path === "/hosted" && request.method === "GET") {
           send(response, 200, actions.hostedConfig());
           return;
         }
         if (path === "/hosted" && request.method === "POST") {
           const body = await readBody(request);
-          const patch: { allowBypassPermissions?: boolean } = {};
+          const patch: { allowBypassPermissions?: boolean; dirs?: string[] } = {};
           if (typeof body["allowBypassPermissions"] === "boolean") {
             patch.allowBypassPermissions = body["allowBypassPermissions"];
+          }
+          if (Array.isArray(body["dirs"])) {
+            patch.dirs = body["dirs"].filter((item): item is string => typeof item === "string");
           }
           send(response, 200, actions.setHostedConfig(patch));
           return;

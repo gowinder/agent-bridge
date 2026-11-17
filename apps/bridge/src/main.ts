@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import type { Server } from "node:http";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -650,9 +650,27 @@ async function commandServe(): Promise<void> {
       return adapters.hostedConfig();
     },
     setHostedConfig(patch) {
-      return typeof patch.allowBypassPermissions === "boolean"
-        ? adapters.setHostedAllowBypass(patch.allowBypassPermissions)
-        : adapters.hostedConfig();
+      if (Array.isArray(patch.dirs)) adapters.setHostedDirs(patch.dirs);
+      if (typeof patch.allowBypassPermissions === "boolean") {
+        adapters.setHostedAllowBypass(patch.allowBypassPermissions);
+      }
+      return adapters.hostedConfig();
+    },
+    async projectDirs() {
+      const { projects } = await adapters.projects();
+      const dirs: string[] = [];
+      for (const project of projects) {
+        if (!project.cwd) continue;
+        let real: string;
+        try {
+          real = realpathSync(project.cwd);
+        } catch {
+          // 目录已经不在了：不往白名单里塞不存在的路径，否则建会话时才报错。
+          continue;
+        }
+        if (!dirs.includes(real)) dirs.push(real);
+      }
+      return dirs;
     },
   };
 

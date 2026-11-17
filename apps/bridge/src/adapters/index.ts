@@ -115,12 +115,14 @@ export class SessionAdapters {
     };
   }
 
-  hostedAddDir(path: string): HostedDirsResult {
-    return this.hostedManager.addDir(path);
-  }
-
-  hostedRemoveDir(path: string): HostedDirsResult {
-    return this.hostedManager.removeDir(path);
+  /** 整份替换托管白名单，只给本机 admin 接口用。 */
+  setHostedDirs(dirs: string[]): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
+    const info = this.hostedManager.setDirs(dirs);
+    return {
+      allowBypassPermissions: info.allowBypassPermissions,
+      dirs: info.dirs.map((dir) => dir.path),
+      idleTimeoutMs: info.idleTimeoutMs,
+    };
   }
 
   hostedOptions(): HostedOptionsResult {

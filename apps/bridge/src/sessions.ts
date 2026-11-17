@@ -115,8 +115,6 @@ const ACTIVITY_METHODS = new Set([
   "shell.exec",
   "shell.cancel",
   "file.upload.finish",
-  "hosted.addDir",
-  "hosted.removeDir",
   "hosted.create",
   "hosted.stop",
   "hosted.resume",
@@ -173,11 +171,6 @@ function describeActivity(request: RequestMessage): string | null {
     const raw = params["triggerPercent"] ?? params["reserveTokens"];
     if (raw === null || raw === undefined) return `把自动压缩触发点改回默认${suffix}`;
     return `把自动压缩触发点改成窗口的 ${String(raw)}%${suffix}`;
-  }
-  if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
-    const path = (stringParam(params, "path") ?? "").trim();
-    const verb = request.method === "hosted.addDir" ? "添加" : "移除";
-    return path ? `${verb}托管目录「${path}」` : `${verb}托管目录`;
   }
   if (request.method === "session.create") {
     const appId = stringParam(params, "appId") ?? "";
@@ -551,10 +544,10 @@ export class DeviceSession implements ChannelSession {
       }
       case "hosted.dirs":
         return this.options.adapters.hostedDirs();
+      // 白名单只能本机改：远程设备若能自己往里加目录，"只有白名单里的目录能建会话" 就形同虚设。
       case "hosted.addDir":
-        return this.options.adapters.hostedAddDir(stringParam(params, "path") ?? "");
       case "hosted.removeDir":
-        return this.options.adapters.hostedRemoveDir(stringParam(params, "path") ?? "");
+        throw new RpcError("unsupported", "托管目录只能在 Mac 菜单栏的「设定」里修改");
       case "hosted.create": {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");

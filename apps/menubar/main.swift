@@ -278,6 +278,19 @@ final class AdminClient {
         let data = try await request("POST", "/hosted", body: ["allowBypassPermissions": enabled])
         return try JSONDecoder().decode(HostedConfig.self, from: data)
     }
+
+    /// 这台机器上已有工程的目录，用于把白名单一次配好。
+    func projectDirs() async throws -> [String] {
+        let data = try await request("GET", "/projects")
+        struct Payload: Decodable { let dirs: [String] }
+        return try JSONDecoder().decode(Payload.self, from: data).dirs
+    }
+
+    /// 整份替换托管白名单：远程设备没有这条通路，只有本机 admin 接口能改。
+    func setHostedDirs(_ dirs: [String]) async throws -> HostedConfig {
+        let data = try await request("POST", "/hosted", body: ["dirs": dirs])
+        return try JSONDecoder().decode(HostedConfig.self, from: data)
+    }
 }
 
 /// Runs the bridge CLI for the two things the admin API cannot answer: whether
@@ -457,6 +470,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsPortLabel: NSTextField?
     private var settingsBypassSwitch: NSSwitch?
     private var settingsDirsLabel: NSTextField?
+    private var settingsAddDirButton: NSButton?
+    private var settingsImportDirsButton: NSButton?
     private var settingsIdleLabel: NSTextField?
     private var settingsFilesSwitch: NSSwitch?
     private var settingsTerminalSwitch: NSSwitch?
@@ -1260,8 +1275,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉，统一给到 774。
-        let height: CGFloat = 774
+        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉；
+        // 托管目录下面又多了一行按钮，统一给到 806。
+        let height: CGFloat = 806
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1405,8 +1421,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section(T("托管会话"))
         settingsBypassSwitch = toggle(T("允许 bypassPermissions（跳过权限确认）"), #selector(toggleBypass(_:)))
         hint(T("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。"))
-        settingsDirsLabel = valueLabel("…")
+        settingsDirsLabel = valueLabel("…", mono: true)
         row(T("托管目录"), settingsDirsLabel!)
+        // 白名单只能在这台机器上改：远程设备连「加目录」的入口都没有。
+        let dirButtonsY = take(22, gap: 6)
+        let addDir = NSButton(title: T("添加目录…"), target: self, action: #selector(addHostedDir))
+        addDir.bezelStyle = .rounded
+        addDir.controlSize = .small
+        addDir.font = .systemFont(ofSize: 11)
+        addDir.frame = NSRect(x: valueX, y: dirButtonsY, width: 92, height: 20)
+        view.addSubview(addDir)
+        settingsAddDirButton = addDir
+        let importDirs = NSButton(title: T("导入现有工程目录"), target: self, action: #selector(importHostedDirs))
+        importDirs.bezelStyle = .rounded
+        importDirs.controlSize = .small
+        importDirs.font = .systemFont(ofSize: 11)
+        importDirs.frame = NSRect(x: valueX + 100, y: dirButtonsY, width: 132, height: 20)
+        view.addSubview(importDirs)
+        settingsImportDirsButton = importDirs
         settingsIdleLabel = valueLabel("…")
         row(T("空闲超时"), settingsIdleLabel!)
 
@@ -1559,6 +1591,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             settingsIdleLabel?.stringValue = ""
         }
         settingsBypassSwitch?.isEnabled = reachable && hostedConfig != nil
+        settingsAddDirButton?.isEnabled = reachable && hostedConfig != nil
+        settingsImportDirsButton?.isEnabled = reachable && hostedConfig != nil
     }
 
     /// 日志 tab 的行：先按搜索词过滤，再按时间倒序。
@@ -1599,6 +1633,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 alert(T("保存失败"), error.localizedDescription)
             }
             renderSettings()
+        }
+    }
+
+    /// 添加托管目录：只收这台机器上真实存在的目录，加进去后网页才能在那里建会话。
+    @objc private func addHostedDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.prompt = T("加入白名单")
+        panel.message = T("选中的目录会加入托管白名单：远程设备只能在这些目录里新建会话。")
+        guard panel.runModal() == .OK else { return }
+        let picked = panel.urls.map { $0.resolvingSymlinksInPath().path }
+        guard !picked.isEmpty else { return }
+        applyHostedDirs(adding: picked)
+    }
+
+    /// 一键把桌面客户端已经索引到的工程目录加进白名单。
+    @objc private func importHostedDirs() {
+        settingsImportDirsButton?.isEnabled = false
+        Task {
+            defer { settingsImportDirsButton?.isEnabled = true }
+            do {
+                let found = try await client.projectDirs()
+                guard !found.isEmpty else {
+                    alert(T("没有找到工程目录"), T("桌面客户端里还没有索引到带目录的工程。"))
+                    return
+                }
+                applyHostedDirs(adding: found)
+            } catch {
+                alert(T("读取工程目录失败"), error.localizedDescription)
+            }
+        }
+    }
+
+    /// 合并进现有白名单再整份写回；已经有的不重复加，一个都没多就不打扰。
+    private func applyHostedDirs(adding more: [String]) {
+        let existing = hostedConfig?.dirs ?? []
+        var merged = existing
+        for path in more where !merged.contains(path) { merged.append(path) }
+        guard merged.count != existing.count else {
+            alert(T("目录已在白名单里"), TF(T("这 %d 个目录都已经在托管白名单中。"), more.count))
+            return
+        }
+        Task {
+            do {
+                hostedConfig = try await client.setHostedDirs(merged)
+                renderSettings()
+                // 白名单变了，网页的工程列表也得跟着刷新。
+                snapshot = nil
+                await refresh()
+            } catch {
+                alert(T("保存白名单失败"), error.localizedDescription)
+                renderSettings()
+            }
         }
     }
 

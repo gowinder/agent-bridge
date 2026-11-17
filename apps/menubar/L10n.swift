@@ -118,6 +118,18 @@ enum L10n {
         "本机接口": "Local endpoint",
         "修改…": "Change…",
         "托管会话": "Hosted sessions",
+        "添加目录…": "Add Folder…",
+        "导入现有工程目录": "Import Project Folders",
+        "加入白名单": "Add to Allowlist",
+        "选中的目录会加入托管白名单：远程设备只能在这些目录里新建会话。":
+            "The folders you pick join the hosted allowlist; remote devices can only start sessions inside them.",
+        "没有找到工程目录": "No project folders found",
+        "桌面客户端里还没有索引到带目录的工程。":
+            "No indexed desktop projects with a working folder yet.",
+        "读取工程目录失败": "Could not read project folders",
+        "目录已在白名单里": "Already in the allowlist",
+        "这 %d 个目录都已经在托管白名单中。": "All %d folders are already in the hosted allowlist.",
+        "保存白名单失败": "Could not save the allowlist",
         "允许 bypassPermissions（跳过权限确认）": "Allow bypassPermissions (skip permission prompts)",
         "打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。":
             "When on, the web client can pick bypassPermissions for hosted sessions and stop asking per action. Only turn this on if you trust remote actions.",
