@@ -2480,12 +2480,21 @@ function dockTodos(): HTMLElement {
  */
 let dockOpen = false;
 let dockKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+/**
+ * 重画 dock 内容。dock 是进入这条路由时画好的，停在聊天页时别的会话完成了、
+ * 未读变了它也还是一份旧 DOM；窄屏抽屉每次打开时得用它刷一次。
+ */
+let dockRepaint: (() => void) | null = null;
 
 function setDockOpen(open: boolean): void {
   if (dockOpen === open) return;
   dockOpen = open;
   const dock = document.querySelector<HTMLElement>(".dock");
   dock?.classList.toggle("is-open", open);
+  if (open) {
+    // 先重画再显示：否则抽屉里永远是进入当前会话时那份旧数据（未读、运行中都是旧的）。
+    dockRepaint?.();
+  }
   if (open && dock) {
     if (!document.querySelector(".dock-scrim")) dock.after(dockScrim());
   } else {
@@ -2572,6 +2581,11 @@ function dockSidebar(route: Route): HTMLElement {
   };
   paint();
   nav.append(tabs, body);
+  dockRepaint = () => {
+    // 页面切走后这份 nav 已经脱离文档，别再去改它。
+    if (!nav.isConnected) return;
+    paint();
+  };
   return nav;
 }
 
