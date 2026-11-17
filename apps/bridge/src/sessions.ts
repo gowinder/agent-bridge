@@ -18,12 +18,14 @@ import type {
   HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
+  MessageListResult,
   PairResult,
   PushInfoResult,
   PushSubscribeResult,
   RequestMessage,
   ResponseMessage,
   SessionListParams,
+  SessionSearchResult,
   ShellEventData,
   TodoKind,
   WireMessage,
@@ -110,6 +112,111 @@ function numberParam(params: Record<string, unknown>, name: string): number | un
  * 读接口（session.list、message.list、fs.* 等）每隔几秒就被轮询一次，记进操作日志
  * 只会把真正做过的操作冲掉，所以只挑会改变状态或内容的请求。
  */
+/**
+ * 对话内容搜索。只在用户勾了「搜内容」时调用，作用范围是前端传进来的那批会话
+ * （侧栏历史最多几十条），所以直接复用各适配器的 messages()：它们内部按
+ * transcript 的 mtime/size 缓存了解析结果，第二次搜同一会话基本只 stat 一次。
+ */
+const SEARCH_MAX_SESSIONS = 80;
+const SEARCH_MAX_QUERY_CHARS = 120;
+const SEARCH_PAGE_SIZE = 200;
+const SEARCH_MAX_PAGES = 20;
+const SEARCH_MAX_TEXT_CHARS = 400_000;
+const SEARCH_CONCURRENCY = 3;
+const SEARCH_BUDGET_MS = 8_000;
+const SEARCH_CACHE_TTL_MS = 60_000;
+const SEARCH_CACHE_MAX = 80;
+
+interface SearchText {
+  at: number;
+  text: string;
+}
+
+const searchTextCache = new Map<string, SearchText>();
+
+/** 把一个会话的正文拼成一段小写文本（尾部截断），供关键词匹配用。 */
+async function sessionSearchText(adapters: SearchMessageSource, sessionId: string): Promise<string> {
+  const cached = searchTextCache.get(sessionId);
+  if (cached && Date.now() - cached.at < SEARCH_CACHE_TTL_MS) return cached.text;
+
+  let text = "";
+  let before: string | undefined;
+  for (let page = 0; page < SEARCH_MAX_PAGES; page += 1) {
+    const result = await adapters.messages(sessionId, {
+      limit: SEARCH_PAGE_SIZE,
+      ...(before ? { before } : {}),
+    });
+    const chunk = result.messages
+      .map((message) => message.blocks.map((block) => block.text).join("\n"))
+      .join("\n");
+    text = text ? `${chunk}\n${text}` : chunk;
+    if (!result.nextBefore) break;
+    before = result.nextBefore;
+    if (text.length > SEARCH_MAX_TEXT_CHARS) break;
+  }
+
+  // 只留尾部：最新内容最可能是用户要找的，也能压住内存。
+  const trimmed = text.slice(-SEARCH_MAX_TEXT_CHARS).toLowerCase();
+  searchTextCache.delete(sessionId);
+  searchTextCache.set(sessionId, { at: Date.now(), text: trimmed });
+  while (searchTextCache.size > SEARCH_CACHE_MAX) {
+    const oldest = searchTextCache.keys().next().value;
+    if (oldest === undefined) break;
+    searchTextCache.delete(oldest);
+  }
+  return trimmed;
+}
+
+/** 搜索只需要「按会话读一页消息」这一件事，抽出来是为了能在测试里替换掉适配器。 */
+export interface SearchMessageSource {
+  messages(
+    sessionId: string,
+    params: { limit?: number; before?: string },
+  ): Promise<MessageListResult>;
+}
+
+export async function searchSessionTexts(
+  adapters: SearchMessageSource,
+  query: string,
+  sessionIds: string[],
+): Promise<SessionSearchResult> {
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  if (words.length === 0) return { matches: [], searched: 0 };
+
+  const ids = sessionIds.filter((id, index) => sessionIds.indexOf(id) === index).slice(0, SEARCH_MAX_SESSIONS);
+  const started = Date.now();
+  const matches: string[] = [];
+  let searched = 0;
+  let cursor = 0;
+
+  // 解析 transcript 是同步 CPU 活，分几个 worker 并发 + 每会话让出一次事件循环，
+  // 免得搜索把正在跑的会话卡住半分钟。
+  const workers = Array.from({ length: Math.min(SEARCH_CONCURRENCY, ids.length) }, async () => {
+    for (;;) {
+      if (Date.now() - started > SEARCH_BUDGET_MS) return;
+      const index = cursor;
+      cursor += 1;
+      if (index >= ids.length) return;
+      const sessionId = ids[index] as string;
+      try {
+        const text = await sessionSearchText(adapters, sessionId);
+        searched += 1;
+        if (words.every((word) => text.includes(word))) matches.push(sessionId);
+      } catch {
+        // 读不到 transcript 的会话跳过：搜索不该因为一个坏会话整单失败。
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  });
+  await Promise.all(workers);
+
+  const partial = Date.now() - started > SEARCH_BUDGET_MS ? true : undefined;
+  return partial ? { matches, searched, partial } : { matches, searched };
+}
+
 const ACTIVITY_METHODS = new Set([
   "message.send",
   "shell.exec",
@@ -548,6 +655,16 @@ export class DeviceSession implements ChannelSession {
         const messageId = stringParam(params, "messageId");
         if (!messageId) throw new RpcError("invalid_params", "messageId required");
         return this.options.adapters.messageText(sessionId, messageId);
+      }
+      case "session.search": {
+        const query = (stringParam(params, "query") ?? "").trim();
+        if (!query) return { matches: [], searched: 0 } satisfies SessionSearchResult;
+        if (query.length > SEARCH_MAX_QUERY_CHARS) {
+          throw new RpcError("invalid_params", `搜索词太长（最多 ${SEARCH_MAX_QUERY_CHARS} 个字）`);
+        }
+        const raw = params["sessionIds"];
+        const sessionIds = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+        return await searchSessionTexts(this.options.adapters, query, sessionIds);
       }
       case "session.rail": {
         const sessionId = stringParam(params, "sessionId");

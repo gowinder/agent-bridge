@@ -808,6 +808,61 @@ details[open] > .dock-project-head::before {
   background: var(--surface-2);
 }
 
+.dock-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dock-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dock-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.dock-search-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.dock-search-input::placeholder {
+  color: var(--muted);
+}
+
+.dock-search-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dock-search-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dock-search-status[hidden] {
+  display: none;
+}
+
 .dock-history-row {
   display: flex;
   flex-direction: column;
