@@ -4471,8 +4471,15 @@ body.has-file-preview {
     border-radius: 9px;
   }
 
+  /* 手机上只收起次要状态：未读 / 执行中 / 待回答是回来找会话的唯一线索，得留着。 */
   .row .pill {
     display: none;
+  }
+
+  .row .pill.unread,
+  .row .pill.warn,
+  .row .pill.busy {
+    display: inline-flex;
   }
 
   .main.chat {
