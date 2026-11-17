@@ -88,3 +88,52 @@ test("空关键词与重复 sessionId", async () => {
   assert.deepEqual(dup.matches, ["x"]);
   assert.equal(dup.searched, 1);
 });
+
+test("列表里被截断的长消息，会去取全文再匹配", async () => {
+  const full = "开头".repeat(2000) + "\n后半段才出现的关键词";
+  const source = {
+    async messages(sessionId) {
+      return {
+        messages: [
+          {
+            messageId: "long",
+            sessionId,
+            role: "assistant",
+            createdAt: 0,
+            blocks: [{ type: "text", text: full.slice(0, 4000), truncated: true }],
+          },
+        ],
+        completeness: "partial",
+      };
+    },
+    async messageText(_sessionId, messageId) {
+      assert.equal(messageId, "long");
+      return { text: full };
+    },
+  };
+  const hit = await searchSessionTexts(source, "关键词", ["s1"]);
+  assert.deepEqual(hit.matches, ["s1"]);
+});
+
+test("没有 messageText 的适配器只按截断后的文本算", async () => {
+  const source = {
+    async messages(sessionId) {
+      return {
+        messages: [
+          {
+            messageId: "long",
+            sessionId,
+            role: "assistant",
+            createdAt: 0,
+            blocks: [{ type: "text", text: "只给了前半段", truncated: true }],
+          },
+        ],
+        completeness: "partial",
+      };
+    },
+  };
+  // 换一个 sessionId：命中结果按 (关键词, 会话) 缓存 30 秒，同 id 会命中上一条测试的缓存。
+  const hit = await searchSessionTexts(source, "关键词", ["s2"]);
+  assert.deepEqual(hit.matches, []);
+  assert.equal(hit.searched, 1);
+});

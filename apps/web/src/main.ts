@@ -2139,6 +2139,8 @@ function dockTree(route: Route): HTMLElement {
  */
 const DOCK_SEARCH_DEBOUNCE_MS = 350;
 const DOCK_SEARCH_MAX_IDS = 80;
+/** 搜索时最多看多少条会话（内容搜索另有 80 条的预算，多传的会被 Bridge 截掉）。 */
+const DOCK_SEARCH_LIMIT = 200;
 
 let dockSearchQuery = "";
 let dockSearchDeep = false;
@@ -2163,7 +2165,11 @@ let dockHistoryView: {
 function dockHistorySessions(): SessionSummary[] {
   const data = snapshot;
   if (!data) return [];
-  return visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
+  const all = visibleSessions(data.sessions);
+  // 不搜索时列表只画最近 30 条；一开始搜就放开到全部（最多 DOCK_SEARCH_LIMIT 条），
+  // 否则排在 30 名之外的会话连标题都搜不到，用户会以为「明明有却搜不出来」。
+  const limit = dockSearchQuery.trim() ? DOCK_SEARCH_LIMIT : DOCK_HISTORY_LIMIT;
+  return all.slice(0, limit);
 }
 
 function dockHistoryMatch(session: SessionSummary): boolean {
@@ -2313,7 +2319,11 @@ async function runDeepSearch(query: string): Promise<void> {
   dockSearchBusy = false;
 
   if (!response.ok) {
-    if (response.error?.code === "unsupported") {
+    // 老版本 Bridge 抛的是普通 Error，包成 internal 后只留下这句话；两种都算「太旧」。
+    const stale =
+      response.error?.code === "unsupported" ||
+      /unsupported method/i.test(response.error?.message ?? "");
+    if (stale) {
       // 老版本 Bridge 没有这个 RPC：记住别再问，正文搜索整体降级。
       dockSearchStale = true;
       dockSearchNote = "";

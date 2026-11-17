@@ -135,6 +135,8 @@ export interface SearchMessageSource {
     sessionId: string,
     params: { limit?: number; before?: string },
   ): Promise<MessageListResult>;
+  /** 取单条消息的完整正文：列表里的长文本被截到 MAX_BLOCK_CHARS，搜索要靠它补全。 */
+  messageText?(sessionId: string, messageId: string): Promise<{ text: string }>;
 }
 
 /**
@@ -165,6 +167,18 @@ async function sessionSearchHit(
         const text = block.text.toLowerCase();
         for (const word of words) {
           if (!seen.has(word) && text.includes(word)) seen.add(word);
+        }
+        // 列表里的长文本只给了前 4000 字：超长的再取一次全文，
+        // 否则「工人」这种落在工具输出后半段的词永远匹配不到。
+        if (block.truncated && seen.size < words.length && adapters.messageText) {
+          try {
+            const full = (await adapters.messageText(sessionId, message.messageId)).text.toLowerCase();
+            for (const word of words) {
+              if (!seen.has(word) && full.includes(word)) seen.add(word);
+            }
+          } catch {
+            // 取不到全文就按已截断的算，不影响其它会话。
+          }
         }
       }
     }
