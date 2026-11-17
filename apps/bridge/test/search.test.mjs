@@ -71,6 +71,16 @@ test("读不到 transcript 的会话跳过，不影响其它会话", async () =>
   assert.equal(result.searched, 1);
 });
 
+test("最老那一页的内容也能搜到（不只看尾部）", async () => {
+  // 三页加起来六百多 KB：旧实现只留尾部 400KB，最老那页会被截掉
+  const filler = "填充".repeat(50_000);
+  const source = fakeSource({
+    old: [["最近在改界面"], [`中间一大段：${filler}`], ["早期的决定：工人上限 200"]],
+  });
+  const result = await searchSessionTexts(source, "工人", ["old"]);
+  assert.deepEqual(result.matches, ["old"]);
+});
+
 test("空关键词与重复 sessionId", async () => {
   const source = fakeSource({ x: [["hello world"]] });
   assert.deepEqual(await searchSessionTexts(source, "   ", ["x"]), { matches: [], searched: 0 });

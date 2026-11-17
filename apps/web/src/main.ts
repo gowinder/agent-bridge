@@ -2145,6 +2145,11 @@ let dockSearchDeep = false;
 let dockSearchMatches: Set<string> | null = null;
 let dockSearchBusy = false;
 let dockSearchPartial = false;
+/** Mac 上的 Bridge 不认识 session.search（旧版本）：别再反复请求，直接把原因写出来。 */
+let dockSearchStale = false;
+/** 这次搜索失败的原因；有内容时状态行显示它，而不是「没搜到」。 */
+let dockSearchNote = "";
+let dockSearchErrors = 0;
 let dockSearchTimer: number | null = null;
 let dockSearchToken = 0;
 let dockHistoryView: {
@@ -2226,8 +2231,13 @@ function renderDockHistoryList(): void {
     return;
   }
   view.status.hidden = false;
-  if (dockSearchBusy) {
+  const unread = dockSearchErrors > 0 ? tr(`，{0} 个会话读不到`, dockSearchErrors) : "";
+  if (dockSearchStale) {
+    view.status.textContent = tr("Mac 上的 Bridge 还是旧版本，升级后才能搜对话内容");
+  } else if (dockSearchBusy) {
     view.status.textContent = tr("正在搜索对话内容…");
+  } else if (dockSearchNote) {
+    view.status.textContent = tr(`搜索失败：{0}`, dockSearchNote);
   } else if (dockSearchMatches === null) {
     view.status.textContent = tr("勾选后按对话内容搜索");
   } else {
@@ -2235,11 +2245,11 @@ function renderDockHistoryList(): void {
     view.status.textContent =
       count === 0
         ? dockSearchPartial
-          ? tr("内容没搜到（超时，可能没搜完）")
-          : tr("内容没搜到")
+          ? tr(`内容没搜到（超时，可能没搜完）{0}`, unread)
+          : tr(`内容没搜到{0}`, unread)
         : dockSearchPartial
-          ? tr(`内容命中 {0} 个会话（超时，可能没搜完）`, count)
-          : tr(`内容命中 {0} 个会话`, count);
+          ? tr(`内容命中 {0} 个会话（超时，可能没搜完）{1}`, count, unread)
+          : tr(`内容命中 {0} 个会话{1}`, count, unread);
   }
 }
 
@@ -2254,6 +2264,13 @@ function scheduleDeepSearch(): void {
     dockSearchBusy = false;
     dockSearchMatches = null;
     dockSearchPartial = false;
+    dockSearchNote = "";
+    dockSearchErrors = 0;
+    renderDockHistoryList();
+    return;
+  }
+  if (dockSearchStale) {
+    dockSearchBusy = false;
     renderDockHistoryList();
     return;
   }
@@ -2271,19 +2288,49 @@ async function runDeepSearch(query: string): Promise<void> {
   const sessionIds = dockHistorySessions()
     .slice(0, DOCK_SEARCH_MAX_IDS)
     .map((session) => session.sessionId);
-  try {
-    const result = await call<SessionSearchResult>("session.search", { query, sessionIds });
-    if (token !== dockSearchToken) return;
-    dockSearchMatches = new Set(result.matches);
-    dockSearchPartial = result.partial === true;
-  } catch {
-    if (token !== dockSearchToken) return;
-    // 连接断了或老桥不认识这个方法：内容搜索降级成没有命中，标题过滤照旧。
+  const peer = active;
+  if (!peer) {
+    dockSearchBusy = false;
     dockSearchMatches = new Set();
-    dockSearchPartial = false;
+    dockSearchNote = tr("没连上 Mac，只按标题搜");
+    renderDockHistoryList();
+    return;
+  }
+
+  // 直接用 request 而不是 call()：要拿到错误码，才能把「Bridge 太旧」和「网络断了」分开说。
+  let response;
+  try {
+    response = await peer.request("session.search", { query, sessionIds }, 30_000);
+  } catch (error) {
+    if (token !== dockSearchToken) return;
+    dockSearchBusy = false;
+    dockSearchMatches = new Set();
+    dockSearchNote = error instanceof Error ? error.message : tr("搜索失败");
+    renderDockHistoryList();
+    return;
   }
   if (token !== dockSearchToken) return;
   dockSearchBusy = false;
+
+  if (!response.ok) {
+    if (response.error?.code === "unsupported") {
+      // 老版本 Bridge 没有这个 RPC：记住别再问，正文搜索整体降级。
+      dockSearchStale = true;
+      dockSearchNote = "";
+    } else {
+      dockSearchNote = response.error?.message ?? tr("搜索失败");
+    }
+    dockSearchMatches = new Set();
+    dockSearchPartial = false;
+    renderDockHistoryList();
+    return;
+  }
+
+  const result = response.result as SessionSearchResult;
+  dockSearchMatches = new Set(result.matches);
+  dockSearchPartial = result.partial === true;
+  dockSearchErrors = result.errors ?? 0;
+  dockSearchNote = "";
   renderDockHistoryList();
 }
 
