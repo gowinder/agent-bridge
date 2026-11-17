@@ -461,7 +461,6 @@ export class HostedSessionManager {
     return this.configForClient();
   }
 
-
   /** 统一成绝对路径（~ 展开、存在的路径取 realpath）；不检查目录是否存在。 */
   private normalizeDir(input: string): string {
     const raw = input.trim();
