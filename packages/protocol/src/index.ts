@@ -103,6 +103,8 @@ export const METHODS = [
   "project.list",
   "session.list",
   "session.get",
+  // 历史对话搜索：标题在前端本地过滤，勾了「搜对话内容」才问 Bridge 要全文命中。
+  "session.search",
   "session.rail",
   "session.models",
   "session.compact",
@@ -839,6 +841,22 @@ export interface SessionRailResult {
 
 export interface SessionRailParams {
   sessionId: string;
+}
+
+export interface SessionSearchParams {
+  /** 关键词；空格分隔的多个词要求全部命中，不区分大小写。 */
+  query: string;
+  /** 要搜哪些会话。Bridge 只认的会话才搜，读不到 transcript 的直接跳过。 */
+  sessionIds: string[];
+}
+
+export interface SessionSearchResult {
+  /** 命中的 sessionId，顺序不保证。 */
+  matches: string[];
+  /** 实际搜过几个会话（读不到 transcript 的不算）。 */
+  searched: number;
+  /** 超过时间预算时为 true：结果是部分结果。 */
+  partial?: boolean;
 }
 
 export interface SessionModelsParams {

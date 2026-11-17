@@ -44,6 +44,7 @@ import type {
   SessionModelsResult,
   SessionRailResult,
   SessionRenameResult,
+  SessionSearchResult,
   SessionSummary,
   ShellCancelResult,
   ShellEventData,
@@ -2132,18 +2133,62 @@ function dockTree(route: Route): HTMLElement {
 }
 
 /** 第二个 tab：所有会话按最近更新排序。 */
-function dockHistory(): HTMLElement {
-  const wrap = el("div", { className: "dock-list" });
+/**
+ * 历史面板：搜索框常驻（重建列表时不能把它一起换掉，否则每敲一个字都丢焦点），
+ * 默认按标题过滤；勾了「搜内容」才去问 Bridge 要全文命中。
+ */
+const DOCK_SEARCH_DEBOUNCE_MS = 350;
+const DOCK_SEARCH_MAX_IDS = 80;
+
+let dockSearchQuery = "";
+let dockSearchDeep = false;
+let dockSearchMatches: Set<string> | null = null;
+let dockSearchBusy = false;
+let dockSearchPartial = false;
+let dockSearchTimer: number | null = null;
+let dockSearchToken = 0;
+let dockHistoryView: {
+  wrap: HTMLElement;
+  list: HTMLElement;
+  input: HTMLInputElement;
+  check: HTMLInputElement;
+  status: HTMLElement;
+} | null = null;
+
+function dockHistorySessions(): SessionSummary[] {
   const data = snapshot;
-  if (!data) {
-    wrap.append(el("p", { className: "hint", text: tr("正在读取会话…") }));
-    return wrap;
-  }
+  if (!data) return [];
+  return visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
+}
+
+function dockHistoryMatch(session: SessionSummary): boolean {
+  const query = dockSearchQuery.trim().toLowerCase();
+  if (!query) return true;
+  // 标题永远在本地过滤：改写过的标题和原名都算。
+  const title = `${session.title} ${session.originalTitle ?? ""}`.toLowerCase();
+  if (title.includes(query)) return true;
+  return dockSearchDeep && dockSearchMatches?.has(session.sessionId) === true;
+}
+
+function renderDockHistoryList(): void {
+  const view = dockHistoryView;
+  if (!view) return;
   const active = dockActive(parseRoute());
-  const sessions = visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
+  const all = dockHistorySessions();
+  const sessions = all.filter(dockHistoryMatch);
+  const nodes: HTMLElement[] = [];
   if (sessions.length === 0) {
-    wrap.append(el("p", { className: "hint", text: tr("还没有会话。") }));
-    return wrap;
+    nodes.push(
+      el("p", {
+        className: "hint",
+        text:
+          dockSearchQuery.trim() === ""
+            ? tr("还没有会话。")
+            : dockSearchBusy
+              ? tr("正在搜索…")
+              : tr("没有匹配的会话。"),
+      }),
+    );
   }
   for (const session of sessions) {
     const current = active.sessionId === session.sessionId;
@@ -2170,9 +2215,118 @@ function dockHistory(): HTMLElement {
         sessionId: session.sessionId,
       });
     });
-    wrap.append(node);
+    nodes.push(node);
   }
-  return wrap;
+  view.list.replaceChildren(...nodes);
+
+  const query = dockSearchQuery.trim();
+  if (!dockSearchDeep || query === "") {
+    view.status.hidden = true;
+    view.status.textContent = "";
+    return;
+  }
+  view.status.hidden = false;
+  if (dockSearchBusy) {
+    view.status.textContent = tr("正在搜索对话内容…");
+  } else if (dockSearchMatches === null) {
+    view.status.textContent = tr("勾选后按对话内容搜索");
+  } else {
+    const count = dockSearchMatches.size;
+    view.status.textContent =
+      count === 0
+        ? dockSearchPartial
+          ? tr("内容没搜到（超时，可能没搜完）")
+          : tr("内容没搜到")
+        : dockSearchPartial
+          ? tr(`内容命中 {0} 个会话（超时，可能没搜完）`, count)
+          : tr(`内容命中 {0} 个会话`, count);
+  }
+}
+
+function scheduleDeepSearch(): void {
+  if (dockSearchTimer !== null) {
+    window.clearTimeout(dockSearchTimer);
+    dockSearchTimer = null;
+  }
+  const query = dockSearchQuery.trim();
+  if (!dockSearchDeep || query === "") {
+    dockSearchToken += 1;
+    dockSearchBusy = false;
+    dockSearchMatches = null;
+    dockSearchPartial = false;
+    renderDockHistoryList();
+    return;
+  }
+  dockSearchBusy = true;
+  renderDockHistoryList();
+  dockSearchTimer = window.setTimeout(() => {
+    dockSearchTimer = null;
+    void runDeepSearch(query);
+  }, DOCK_SEARCH_DEBOUNCE_MS);
+}
+
+async function runDeepSearch(query: string): Promise<void> {
+  dockSearchToken += 1;
+  const token = dockSearchToken;
+  const sessionIds = dockHistorySessions()
+    .slice(0, DOCK_SEARCH_MAX_IDS)
+    .map((session) => session.sessionId);
+  try {
+    const result = await call<SessionSearchResult>("session.search", { query, sessionIds });
+    if (token !== dockSearchToken) return;
+    dockSearchMatches = new Set(result.matches);
+    dockSearchPartial = result.partial === true;
+  } catch {
+    if (token !== dockSearchToken) return;
+    // 连接断了或老桥不认识这个方法：内容搜索降级成没有命中，标题过滤照旧。
+    dockSearchMatches = new Set();
+    dockSearchPartial = false;
+  }
+  if (token !== dockSearchToken) return;
+  dockSearchBusy = false;
+  renderDockHistoryList();
+}
+
+function dockHistory(): HTMLElement {
+  if (!dockHistoryView) {
+    const wrap = el("div", { className: "dock-history" });
+    const search = el("div", { className: "dock-search" });
+    const input = el("input", {
+      className: "dock-search-input",
+      attrs: {
+        type: "search",
+        placeholder: tr("搜索历史对话…"),
+        "aria-label": tr("搜索历史对话"),
+        autocomplete: "off",
+      },
+    });
+    input.value = dockSearchQuery;
+    input.addEventListener("input", () => {
+      dockSearchQuery = input.value;
+      if (dockSearchDeep) {
+        // 内容搜索要防抖，先把标题命中的结果画出来
+        scheduleDeepSearch();
+      } else {
+        renderDockHistoryList();
+      }
+    });
+    const label = el("label", { className: "dock-search-check" });
+    const check = el("input", { attrs: { type: "checkbox", "aria-label": tr("同时搜索对话内容") } });
+    check.checked = dockSearchDeep;
+    check.addEventListener("change", () => {
+      dockSearchDeep = check.checked;
+      scheduleDeepSearch();
+    });
+    label.append(check, document.createTextNode(tr("搜内容")));
+    search.append(input, label);
+    const status = el("p", { className: "dock-search-status" });
+    status.hidden = true;
+    const list = el("div", { className: "dock-list dock-history-list" });
+    wrap.append(search, status, list);
+    dockHistoryView = { wrap, list, input, check, status };
+  }
+  renderDockHistoryList();
+  return dockHistoryView.wrap;
 }
 
 /** 待办面板的本地状态：切换 tab 会重绘，草稿与上次数据留着。 */
@@ -2535,6 +2689,8 @@ function dockToggleButton(): HTMLButtonElement {
 
 /** 桌面宽屏左侧的 dock：结构树、历史与待办三个 tab，选中的 tab 记在 localStorage。 */
 function dockSidebar(route: Route): HTMLElement {
+  // 换一页就重建侧栏：历史面板里的 DOM（搜索框）跟着换新，搜索词本身留着。
+  dockHistoryView = null;
   let tab = readDockTab();
   const nav = el("nav", {
     className: `dock${dockOpen ? " is-open" : ""}`,
