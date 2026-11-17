@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import type { Server } from "node:http";
 import { homedir, hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { toHex, type KeyPair, type Noise } from "@craftstead/crypto";
 import { loadNoiseNode } from "@craftstead/crypto/node";
 import type { DevtoolsCapability, DevtoolsCapabilityName, DevtoolsStatus } from "@craftstead/protocol";
@@ -683,14 +683,12 @@ async function commandServe(): Promise<void> {
       const dirs: string[] = [];
       for (const project of projects) {
         if (!project.cwd) continue;
-        let real: string;
-        try {
-          real = realpathSync(project.cwd);
-        } catch {
-          // 目录已经不在了：不往白名单里塞不存在的路径，否则建会话时才报错。
-          continue;
-        }
-        if (!dirs.includes(real)) dirs.push(real);
+        // 不 realpath：这是「导入现有工程目录」的候选列表，真正的校验在加入白名单时做。
+        // 逐个 realpath 会在工程位于桌面/文档/下载/外置磁盘时弹一轮授权。
+        const dir = resolve(project.cwd);
+        // 目录已经不在了就别列出来，否则加入白名单时才报错。
+        if (!existsSync(dir)) continue;
+        if (!dirs.includes(dir)) dirs.push(dir);
       }
       return dirs;
     },

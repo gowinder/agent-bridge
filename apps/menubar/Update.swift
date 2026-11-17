@@ -91,11 +91,15 @@ final class Updater {
     /// 装的是不是预发布（`0.11.1-rc.8`）。只有这种版本才有「允许升级到正式版」这个选项。
     static let currentVersionIsPrerelease = currentVersion.contains("-")
 
+    /// 预览版是另一份独立安装（bundle id 带 .preview），固定跟着 prerelease 走：
+    /// 让它升到正式版会把正式版装成同名的第二个 app，两边互相顶。
+    static let isPreviewInstall = Bundle.main.bundleIdentifier?.hasSuffix(".preview") == true
+
     /// 装的是测试版时，是否允许升到正式版。默认关：装 rc 的人只跟着 rc 走，
     /// 正式版不会把测试版顶掉。正式版机器上恒为 false，选项也不显示。
     static var allowsReleaseUpgrade: Bool {
         get {
-            guard currentVersionIsPrerelease else { return false }
+            guard currentVersionIsPrerelease, !isPreviewInstall else { return false }
             let defaults = UserDefaults.standard
             if let value = defaults.object(forKey: "allowReleaseUpgrade") as? Bool { return value }
             // 旧键 prereleaseChannel 是反义（true = 停留在测试版），读一次完成迁移。
@@ -260,21 +264,24 @@ final class Updater {
 
     private func stage(_ dmg: URL, release: GitHubRelease, bridgePid: Int?) async throws {
         let app = Bundle.main.bundleURL
+        // 预览版的应用名是 AgentBridge-preview.app：查找、替换都按自己这一份来。
+        let name = app.lastPathComponent
         let destination = app.deletingLastPathComponent()
         guard FileManager.default.isWritableFile(atPath: destination.path) else {
-            throw UpdateError.message(TF("没有写入 %@ 的权限；先把 AgentBridge.app 拖进「应用程序」再更新", destination.path))
+            throw UpdateError.message(TF("没有写入 %@ 的权限；先把 %@ 拖进「应用程序」再更新", destination.path, name))
         }
 
         let work = dmg.deletingLastPathComponent()
         let mount = work.appendingPathComponent("mnt", isDirectory: true)
         try FileManager.default.createDirectory(at: mount, withIntermediateDirectories: true)
         try await run("/usr/bin/hdiutil", ["attach", dmg.path, "-nobrowse", "-readonly", "-mountpoint", mount.path])
-        let source = mount.appendingPathComponent("AgentBridge.app")
-        let staged = work.appendingPathComponent("AgentBridge.app")
+        // 预览版从 AgentBridge.app 改名成了 AgentBridge-preview.app：旧版本更新上来时
+        // 按自己的名字找不到，就退回到挂载点里唯一的那份 .app。
+        guard let source = Self.appInInstaller(mount, preferred: name) else {
+            throw UpdateError.message(TF("安装包里没有 %@", name))
+        }
+        let staged = work.appendingPathComponent(source.lastPathComponent)
         do {
-            guard FileManager.default.fileExists(atPath: source.path) else {
-                throw UpdateError.message(T("安装包里没有 AgentBridge.app"))
-            }
             try await run("/bin/cp", ["-R", source.path, staged.path])
         } catch {
             _ = try? await run("/usr/bin/hdiutil", ["detach", mount.path, "-quiet"])
@@ -291,6 +298,12 @@ final class Updater {
         bridge_pid="$2"
         source="$3"
         target="$4"
+        # 应用改名时（AgentBridge.app → AgentBridge-preview.app）落到新名字上，别把
+        # 新版本塞进旧目录名。
+        name=$(basename "$source")
+        if [ "$(basename "$target")" != "$name" ]; then
+          target="$(dirname "$target")/$name"
+        fi
         # 替换到一半失败时至少把当前装着的那份重新拉起来，别停在「App 已退出」。
         opened=0
         reopen() { [ "$opened" = "1" ] || open "$target" 2>/dev/null || true; }
@@ -324,6 +337,18 @@ final class Updater {
         ]
         try helper.run()
         NSApp.terminate(nil)
+    }
+
+    /// 安装包里唯一的 .app；名字对得上时直接用，对不上（改过名）就退回唯一那一份。
+    private static func appInInstaller(_ mount: URL, preferred name: String) -> URL? {
+        let direct = mount.appendingPathComponent(name)
+        if FileManager.default.fileExists(atPath: direct.path) { return direct }
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: mount,
+            includingPropertiesForKeys: nil
+        )) ?? []
+        let apps = entries.filter { $0.pathExtension == "app" }
+        return apps.count == 1 ? apps[0] : nil
     }
 
     private func run(_ tool: String, _ arguments: [String]) async throws {

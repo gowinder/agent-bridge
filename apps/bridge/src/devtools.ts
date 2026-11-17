@@ -238,13 +238,10 @@ export class Devtools {
     const roots: ScopedRoot[] = [];
     for (const project of (await this.adapters.projects()).projects) {
       if (!project.cwd) continue;
-      let real: string;
-      try {
-        real = realpathSync(project.cwd);
-        if (!statSync(real).isDirectory()) continue;
-      } catch {
-        continue;
-      }
+      // 只做纯字符串归一，不 realpath/stat：这份索引每几秒重建一次，而工程目录可能
+      // 落在桌面/文档/下载/外置磁盘上，碰一次就要弹一次「文件与文件夹」授权。
+      // 真正读文件时才解析真实路径（scope / read），符号链接在那儿兜底。
+      const real = resolve(project.cwd);
       const existing = seen.get(real);
       if (existing) {
         existing.projectIds.add(project.projectId);
@@ -272,18 +269,34 @@ export class Devtools {
     const { session } = await this.adapters.session(sessionId);
     // A missing path must not be reported differently from a foreign one, or the
     // device could probe the filesystem for existence outside the project.
+    const roots = await this.allRoots();
+    const wanted = resolve(root);
+    const exact = roots.find((item) => item.real === wanted && item.projectIds.has(session.projectId));
+    if (exact) return exact;
+    // 走到这里说明请求的路径和索引里的写法不一致（符号链接、大小写），
+    // 只有这种少见情况才解析一次真实路径。
     let want: string | null = null;
     try {
-      want = realpathSync(resolve(root));
+      want = realpathSync(wanted);
     } catch {
       want = null;
     }
     const match = want === null
       ? undefined
-      : (await this.allRoots()).find(
-        (item) => item.real === want && item.projectIds.has(session.projectId),
-      );
+      : roots.find((item) => item.real === want && item.projectIds.has(session.projectId));
     if (match) return match;
+    if (want !== null) {
+      for (const item of roots) {
+        if (!item.projectIds.has(session.projectId)) continue;
+        let itemReal: string | null = null;
+        try {
+          itemReal = realpathSync(item.real);
+        } catch {
+          continue;
+        }
+        if (itemReal === want) return item;
+      }
+    }
     // 工作树会话归在原项目里，但它自己在 .claude/worktrees/<name> 下工作：
     // 只放行这个会话自己的 cwd，别的路径仍按项目范围拒绝。
     if (want !== null && session.cwd) {
