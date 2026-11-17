@@ -153,8 +153,8 @@ enum L10n {
         "开关立即生效；菜单里的「开启 1 / 8 / 24 小时」只是加个自动关闭的时限。勾选提醒后，自动关闭前 30 分钟会发一条系统通知。":
             "Toggles apply immediately; the 1 / 8 / 24 hour items in the menu only add an auto-off timer. With notifications on, you get one 30 minutes before it turns off automatically.",
         "自动更新（每 10 分钟检查，有新版本直接装）": "Automatic updates (check every 10 minutes, install right away)",
-        "装着新版本时会替换 AgentBridge.app 并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。":
-            "When an update is found it replaces AgentBridge.app and restarts, taking a menu-bar-started Bridge with it; skipped while pairing. With this off, updates are only checked from the menu.",
+        "装着新版本时会替换应用包并自动重启，由菜单栏启动的 Bridge 跟着重启；正在配对时跳过。关掉后只在菜单里手动检查。":
+            "When an update is found it replaces the app and restarts, taking a menu-bar-started Bridge with it; skipped while pairing. With this off, updates are only checked from the menu.",
         "按设备、工程、agent 或内容过滤": "Filter by device, project, agent or content",
         "时间": "Time",
         "来自": "From",
@@ -251,6 +251,7 @@ enum L10n {
         "(未找到)": "(not found)",
         "initialized=unknown（info 无法运行）": "initialized=unknown (info did not run)",
         "语言：中文": "Language: English",
+        "预览版与正式版是两份独立安装，各自更新": "Preview and release are separate installs; each updates on its own channel",
         "只更新预览版，正式版不提示（设定里可勾选升级到正式版）": "Only preview builds are offered; stable releases are not announced (opt in from Settings)",
         "有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。": "New versions are downloaded, swapped in and restarted automatically; skipped while pairing. When off, you check by hand from the menu.",
         "允许升级到正式版（默认关，只升 rc）": "Allow upgrades to stable releases (off by default: rc only)",
@@ -264,12 +265,12 @@ enum L10n {
         "下载没有响应": "The download did not respond",
         "校验值读取失败": "Could not read the checksum",
         "安装包校验不一致，已放弃更新": "Checksum mismatch on the installer, update aborted",
-        "安装包里没有 AgentBridge.app": "The installer does not contain AgentBridge.app",
+        "安装包里没有 %@": "The installer does not contain %@",
         "正在下载 %@…": "Downloading %@…",
         "更新失败：%@": "Update failed: %@",
         "发布接口返回 %d": "The release API returned %d",
         "下载失败（HTTP %d）": "Download failed (HTTP %d)",
-        "没有写入 %@ 的权限；先把 AgentBridge.app 拖进「应用程序」再更新": "No permission to write to %@; move AgentBridge.app into Applications first, then update",
+        "没有写入 %@ 的权限；先把 %@ 拖进「应用程序」再更新": "No permission to write to %@; move %@ into Applications first, then update",
         "%@ 执行失败（%d）": "%@ failed (exit code %d)",
     ]
 }

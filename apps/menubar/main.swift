@@ -107,8 +107,12 @@ final class AdminClient {
         if let home = ProcessInfo.processInfo.environment["AGENT_BRIDGE_HOME"], !home.isEmpty {
             return URL(fileURLWithPath: home, isDirectory: true)
         }
+        // 预览版与正式版各用一份状态目录，名字由 build.sh 写进 Info.plist：
+        // 桥的数据库、白名单、托管会话都不会互相覆盖，也能同时跑两份。
+        let name = (Bundle.main.object(forInfoDictionaryKey: "AgentBridgeStateDir") as? String)
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "AgentBridge"
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/AgentBridge", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/\(name)", isDirectory: true)
     }()
 
     static let portFileName = "admin-port"
@@ -514,7 +518,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bubbleWindow: NSWindow?
     private var bubbleToken = 0
 
+    /// 预览版以前和正式版共用一个 bundle id，分开之后偏好会留空（自动更新、到期提醒、
+    /// 输入校正都得重新勾一遍）。第一次启动时从旧 domain 搬一次，中继地址不搬：
+    /// 预览版连的是 preview 中继，搬过来会指错环境。
+    private func migratePreviewDefaults() {
+        guard let id = Bundle.main.bundleIdentifier, id.hasSuffix(".preview") else { return }
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "previewDefaultsMigrated") == nil else { return }
+        let legacy = defaults.persistentDomain(forName: "dev.agent-bridge.menubar") ?? [:]
+        for (key, value) in legacy where key != "relayUrl" && defaults.object(forKey: key) == nil {
+            defaults.set(value, forKey: key)
+        }
+        defaults.set(true, forKey: "previewDefaultsMigrated")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        migratePreviewDefaults()
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.image = statusIcon()
@@ -820,7 +839,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             menu.addItem(disabled(TF(T("菜单栏 app v%@ · %@"), Updater.currentVersion, channelLabel())))
             // 锁在预览版通道时不升级正式版，得让人知道这是有意的、去哪改。
-            if Updater.currentVersionIsPrerelease && !Updater.allowsReleaseUpgrade {
+            if Updater.isPreviewInstall {
+                menu.addItem(disabled(T("预览版与正式版是两份独立安装，各自更新")))
+            } else if Updater.currentVersionIsPrerelease && !Updater.allowsReleaseUpgrade {
                 menu.addItem(disabled(T("只更新预览版，正式版不提示（设定里可勾选升级到正式版）")))
             }
             if let failure = updater.lastFailure {
@@ -1520,7 +1541,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section(T("更新"))
         settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
         hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
-        if Updater.currentVersionIsPrerelease {
+        if Updater.currentVersionIsPrerelease && !Updater.isPreviewInstall {
             settingsReleaseUpgradeSwitch = toggle(T("允许升级到正式版（默认关，只升 rc）"), #selector(toggleAllowReleaseUpgrade(_:)))
             hint(TF(T("装在预览版 v%@：关着只升 rc；勾选后正式版也会提示并安装。"), Updater.currentVersion), height: 16)
         }
@@ -1714,6 +1735,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.canCreateDirectories = false
         panel.prompt = T("加入白名单")
         panel.message = T("选中的目录会加入托管白名单：远程设备只能在这些目录里新建会话。")
+        // 从已有白名单里挑一个当起点：面板一开就列 home 的话，桌面/文档/下载/外置磁盘
+        // 会被逐个读一遍，系统就挨个弹授权。
+        if let first = hostedConfig?.dirs.first {
+            panel.directoryURL = URL(fileURLWithPath: first, isDirectory: true)
+        }
         guard panel.runModal() == .OK else { return }
         let picked = panel.urls.map { $0.resolvingSymlinksInPath().path }
         guard !picked.isEmpty else { return }
