@@ -4203,6 +4203,10 @@ interface ChatState {
   retrying?: boolean;
   /** 已经翻到最早一条：轮询拿到的 nextBefore 不能再把「加载更早」解禁。 */
   historyEnd?: boolean;
+  /** 手动折叠起来的消息（按回合首条 messageId）；5 秒轮询重绘后仍保持折叠。 */
+  folded?: Set<string>;
+  /** 对话底部那排复制 / 分享 / 下载：不用滚回消息头。 */
+  bottomBar?: HTMLElement;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -4231,6 +4235,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const note = el("p", { className: "hint" });
   const list = el("div", { className: "transcript-body" });
   const status = el("p", { className: "hint" });
+  // 固定在输入区上方：复制/分享最后一条回复不用再滚回消息头。
+  const bottomBar = el("div", { className: "chat-bottom-actions" });
+  bottomBar.hidden = true;
   // 翻历史与 5 秒轮询是两条独立请求：共用一个 loading 会让点击被轮询默默吞掉。
   let loadingOlder = false;
   const loadOlder = button("", () => {
@@ -4260,6 +4267,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     loading: false,
     busy: false,
     interrupted: false,
+    bottomBar,
     contextButton,
     contextPop,
   };
@@ -4978,6 +4986,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
         note,
         list,
       ]),
+      bottomBar,
       composer,
       status,
     ]),
@@ -6503,9 +6512,17 @@ function queuedBubble(item: QueuedMessage): HTMLElement {
   return bubble;
 }
 
-function messageBubble(session: SessionSummary | null, message: MessageRecord): HTMLElement {
+function messageBubble(
+  session: SessionSummary | null,
+  message: MessageRecord,
+  folded?: Set<string> | null,
+): HTMLElement {
   const bubble = el("article", { className: `message ${message.role}` });
-  const hasText = message.blocks.some((block) => block.type === "text");
+  const text = message.blocks
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n\n");
+  const hasText = text !== "";
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: `role ${message.role}`, text: message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统") }),
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
@@ -6521,6 +6538,11 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     );
   }
   bubble.append(meta);
+  // 预览插在 meta 之后、正文之前，折叠时就地替换掉正文的位置。
+  if (hasText && folded) {
+    const toggle = foldButton(bubble, folded, message.messageId, text);
+    if (toggle) meta.append(toggle);
+  }
   for (const block of message.blocks) {
     bubble.append(
       block.type === "tool"
@@ -7177,6 +7199,59 @@ function messageActions(buttons: (HTMLElement | null)[]): HTMLElement {
   return el("span", { className: "message-actions" }, buttons.filter((item): item is HTMLElement => item !== null));
 }
 
+/** 正文短到这个程度就没有折叠的必要，折起来只是多一步操作。 */
+const FOLD_MIN_CHARS = 240;
+const FOLD_MIN_LINES = 4;
+
+/**
+ * 消息头右侧的折叠按钮，折叠后只留「头一行 + 末一行」两行预览。
+ * 状态记在 `folded` 里（按回合首条 messageId），否则 5 秒轮询重绘会把它翻开。
+ */
+function foldButton(
+  bubble: HTMLElement,
+  folded: Set<string>,
+  key: string,
+  text: string,
+): HTMLElement | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const lines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (trimmed.length < FOLD_MIN_CHARS && lines.length < FOLD_MIN_LINES) return null;
+  // 两行正好放「头」和「尾」：首行太长就截断，末行同理，中间省略不占行。
+  const clip = (line: string): string => (line.length > 64 ? `${line.slice(0, 64)}…` : line);
+  const head = clip(lines[0] ?? "");
+  const last = lines.length > 1 ? clip(lines[lines.length - 1] ?? "") : "";
+  const preview = el("div", {
+    className: "message-fold-preview",
+    text: last !== "" && last !== head ? `${head}\n${last}` : head,
+  });
+  bubble.append(preview);
+
+  const describe = (): string => (folded.has(key) ? tr("展开这条消息") : tr("折叠这条消息"));
+  const toggle = el(
+    "button",
+    { className: "share-btn fold-btn", attrs: { type: "button", "aria-expanded": String(!folded.has(key)) } },
+    [icon("chevron", "icon fold-chev")],
+  );
+  const sync = (): void => {
+    const isFolded = folded.has(key);
+    bubble.classList.toggle("is-folded", isFolded);
+    toggle.setAttribute("aria-expanded", String(!isFolded));
+    toggle.title = describe();
+    toggle.setAttribute("aria-label", describe());
+  };
+  toggle.addEventListener("click", () => {
+    if (folded.has(key)) folded.delete(key);
+    else folded.add(key);
+    sync();
+  });
+  sync();
+  return toggle;
+}
+
 /** 消息里所有正文块，按顺序拼回纯文本。 */
 function textBlocks(messages: MessageRecord[]): string {
   return messages
@@ -7297,6 +7372,8 @@ function assistantTurn(
   state: ChatState | null = null,
   /** 最新一回合才有；提问在等答案时回合是忙的，不能和下一步按钮共用同一个门槛。 */
   askState: ChatState | null = null,
+  /** 折叠状态（按回合首条 messageId）；任务页不传，就没有折叠按钮。 */
+  folded?: Set<string> | null,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: string[] = [];
@@ -7337,7 +7414,12 @@ function assistantTurn(
     );
   }
   bubble.append(meta);
-  let folded = steps.length === 0;
+  const foldKey = messages[0]?.messageId ?? "";
+  if (folded && foldKey) {
+    const toggle = foldButton(bubble, folded, foldKey, textBlocks(messages));
+    if (toggle) meta.append(toggle);
+  }
+  let foldedSteps = steps.length === 0;
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
@@ -7352,13 +7434,13 @@ function assistantTurn(
         continue;
       } else if (block.type === "ask") {
         bubble.append(askBox(block, askState));
-      } else if (!folded) {
+      } else if (!foldedSteps) {
         bubble.append(processFold(steps));
-        folded = true;
+        foldedSteps = true;
       }
     }
   }
-  if (!folded) bubble.append(processFold(steps));
+  if (!foldedSteps) bubble.append(processFold(steps));
   // 只有最新一回合的盒子可以点；历史回合保留文字说明。
   const latest = nextSteps[nextSteps.length - 1];
   if (latest) bubble.append(nextStepBox(latest, latest.pending ? (askState ?? state) : state));
@@ -7367,6 +7449,41 @@ function assistantTurn(
 
 function spinner(): HTMLElement {
   return el("span", { className: "spinner", attrs: { "aria-hidden": "true" } });
+}
+
+/** 最后一条助手回复所在的回合：`message.assistant` 连着的几条算一个回合。 */
+function lastAssistantTurn(messages: MessageRecord[]): MessageRecord[] {
+  let end = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "assistant") {
+      end = index;
+      break;
+    }
+  }
+  if (end < 0) return [];
+  let start = end;
+  while (start > 0 && messages[start - 1]?.role === "assistant") start -= 1;
+  return messages.slice(start, end + 1);
+}
+
+/** 对话底部那排操作跟着最后一条回复走；没有回复就让整条隐藏。 */
+function paintBottomActions(state: ChatState): void {
+  const bar = state.bottomBar;
+  if (!bar) return;
+  const turn = lastAssistantTurn(state.messages);
+  const text = turn.length > 0 ? textBlocks(turn) : "";
+  const lastText = [...turn]
+    .reverse()
+    .find((message) => message.blocks.some((block) => block.type === "text"));
+  bar.hidden = text === "" || lastText === undefined;
+  if (bar.hidden || !lastText) {
+    bar.replaceChildren();
+    return;
+  }
+  bar.replaceChildren(
+    copyButton(copySource(state.session.sessionId, turn), tr("复制最后一条回复")),
+    shareButton(state.session, lastText),
+  );
 }
 
 /** 只有 Bridge 托管的会话能从网页停回合，别的来源由桌面应用自己控制。 */
@@ -7411,6 +7528,7 @@ function markTurnState(list: HTMLElement, state: ChatState): void {
 }
 
 function renderMessages(state: ChatState): void {
+  paintBottomActions(state);
   const list = state.list;
   const distanceFromBottom = list.scrollHeight - list.scrollTop - list.clientHeight;
   const stick = distanceFromBottom < 80;
@@ -7424,6 +7542,7 @@ function renderMessages(state: ChatState): void {
     if (state.busy || state.interrupted) markTurnState(list, state);
     return;
   }
+  const folded = state.folded ?? (state.folded = new Set<string>());
   let turn: MessageRecord[] = [];
   const lastMessage = state.messages[state.messages.length - 1];
   const canAct = state.session.canSend && !state.busy && !state.interrupted && state.queued.length === 0;
@@ -7436,6 +7555,7 @@ function renderMessages(state: ChatState): void {
         turn,
         isLastTurn && canAct ? state : null,
         isLastTurn ? state : null,
+        folded,
       ),
     );
     turn = [];
@@ -7446,7 +7566,7 @@ function renderMessages(state: ChatState): void {
       continue;
     }
     flush();
-    list.append(messageBubble(state.session, message));
+    list.append(messageBubble(state.session, message, folded));
   }
   flush();
   appendQueued();
