@@ -136,6 +136,8 @@ export interface AdminSnapshot {
   devices: AdminDevice[];
   connections: AdminConnection[];
   devtools: DevtoolsStatus;
+  /** 这台 Mac 自己的操作记录（改设置、清理设备、打开远程页面），最新的在最前面。 */
+  hostLog: string[];
   /** Pairing channels that are still waiting for the confirm-code check. */
   pairings: AdminPairing[];
   /** Set when the relay could not be asked for the device list. */
@@ -159,7 +161,12 @@ export interface AdminActions {
   /** 删除已作废设备的记录：中继那边也要删，否则菜单栏还会把它们列出来。 */
   purgeRevokedDevices(): Promise<{ purged: number; failed: string[] }>;
   hostedConfig(): AdminHostedConfig;
-  setHostedConfig(patch: { allowBypassPermissions?: boolean }): AdminHostedConfig;
+  /** 只有本机 admin 接口能改白名单与权限策略：远程设备没有这条通路。 */
+  setHostedConfig(patch: { allowBypassPermissions?: boolean; dirs?: string[] }): AdminHostedConfig;
+  /** 这台机器上已有工程的目录（去重、只含仍存在的），用于一键导入白名单。 */
+  projectDirs(): Promise<string[]>;
+  /** 菜单栏把自己的动作（例如打开远程页面）记进本机操作日志。 */
+  recordHostEvent(line: string): void;
 }
 
 export interface AdminServerOptions {
@@ -281,9 +288,24 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           send(response, 200, await actions.setDevtools(capability, enabled, ttl));
           return;
         }
+        if (path === "/log" && request.method === "POST") {
+          const body = await readBody(request);
+          const line = typeof body["line"] === "string" ? body["line"].trim() : "";
+          if (!line) {
+            send(response, 400, { error: "line 不能为空" });
+            return;
+          }
+          actions.recordHostEvent(line.slice(0, 200));
+          send(response, 200, { ok: true });
+          return;
+        }
         if (path === "/messages" && request.method === "GET") {
           const since = Number(url.searchParams.get("since") ?? "0");
           send(response, 200, { messages: actions.recentMessages(Number.isFinite(since) ? since : 0) });
+          return;
+        }
+        if (path === "/projects" && request.method === "GET") {
+          send(response, 200, { dirs: await actions.projectDirs() });
           return;
         }
         if (path === "/hosted" && request.method === "GET") {
@@ -292,9 +314,12 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
         }
         if (path === "/hosted" && request.method === "POST") {
           const body = await readBody(request);
-          const patch: { allowBypassPermissions?: boolean } = {};
+          const patch: { allowBypassPermissions?: boolean; dirs?: string[] } = {};
           if (typeof body["allowBypassPermissions"] === "boolean") {
             patch.allowBypassPermissions = body["allowBypassPermissions"];
+          }
+          if (Array.isArray(body["dirs"])) {
+            patch.dirs = body["dirs"].filter((item): item is string => typeof item === "string");
           }
           send(response, 200, actions.setHostedConfig(patch));
           return;

@@ -71,6 +71,9 @@ const TRANSCRIPT_TAIL_BYTES = 262_144;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$/;
 /** pi 的思考等级（`pi --thinking` 与 pi-subagents 的 `thinking` 同一套，从低到高）。 */
 const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** 托管白名单最多这么多个目录：多到这份上说明是没整理过的清单，容易点错。 */
+const MAX_HOSTED_DIRS = 64;
 /** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
 const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
@@ -434,29 +437,26 @@ export class HostedSessionManager {
     return this.configForClient();
   }
 
-  /** 把目录加进托管白名单：只收已存在的绝对路径，重复添加是幂等的。 */
-  addDir(input: string): HostedDirsResult {
-    const target = this.normalizeDir(input);
-    if (!isDirectory(target)) throw new RpcError("invalid_params", `目录不存在：${target}`);
-    const known = this.config.dirs.map((dir) => canonical(expandHome(dir)) ?? resolve(expandHome(dir)));
-    if (!known.includes(target)) {
-      this.config = { ...this.config, dirs: [...this.config.dirs, target] };
-      this.writeConfig();
-      this.log(`hosted: 允许托管目录 ${target}`);
+  /**
+   * 整份替换托管白名单。只给本机 admin 接口用：远程设备不能让白名单多出目录，
+   * 否则「只有白名单里的目录能建会话」这层限制等于没有。
+   */
+  setDirs(input: string[]): HostedDirsResult {
+    const dirs: string[] = [];
+    for (const item of input) {
+      const raw = String(item ?? "").trim();
+      if (!raw) continue;
+      const target = this.normalizeDir(raw);
+      if (!isDirectory(target)) throw new RpcError("invalid_params", `目录不存在：${target}`);
+      if (!dirs.includes(target)) dirs.push(target);
     }
-    return this.configForClient();
-  }
-
-  /** 移出白名单：已有会话保留，只是不能再从这里新建。目录已被删掉时也允许移除。 */
-  removeDir(input: string): HostedDirsResult {
-    const target = this.normalizeDir(input);
-    const dirs = this.config.dirs.filter(
-      (dir) => (canonical(expandHome(dir)) ?? resolve(expandHome(dir))) !== target,
-    );
-    if (dirs.length !== this.config.dirs.length) {
+    if (dirs.length > MAX_HOSTED_DIRS) {
+      throw new RpcError("invalid_params", `托管目录最多 ${MAX_HOSTED_DIRS} 个`);
+    }
+    if (dirs.join("\n") !== this.config.dirs.join("\n")) {
       this.config = { ...this.config, dirs };
       this.writeConfig();
-      this.log(`hosted: 移除托管目录 ${target}`);
+      this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
     }
     return this.configForClient();
   }

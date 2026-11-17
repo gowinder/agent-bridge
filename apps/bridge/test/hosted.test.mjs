@@ -61,6 +61,27 @@ function harness(config = {}) {
   return { root, repo, outside, stateDir, spawns, manager };
 }
 
+test("the hosted allowlist can be replaced as a whole, and only with real folders", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const second = join(h.root, "second");
+  mkdirSync(second);
+
+  // 重复项去重、相对路径与不存在的目录一律拒绝：白名单里不能有写进去也建不了会话的路径。
+  const updated = h.manager.setDirs([h.repo, second, h.repo, ""]);
+  assert.deepEqual(updated.dirs.map((dir) => dir.path), [realpathSync(h.repo), realpathSync(second)]);
+  assert.throws(() => h.manager.setDirs(["relative/path"]), /绝对路径/);
+  assert.throws(() => h.manager.setDirs([join(h.root, "missing")]), /目录不存在/);
+
+  // 落盘：重启之后的进程仍然只认这份白名单。
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.dirs, [realpathSync(h.repo), realpathSync(second)]);
+
+  // 清空白名单后就不能再建会话。
+  h.manager.setDirs([]);
+  assert.throws(() => h.manager.create({ path: h.repo }), /白名单|目录/);
+});
+
 test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());

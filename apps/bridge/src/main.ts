@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import type { Server } from "node:http";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
@@ -488,6 +488,9 @@ async function commandServe(): Promise<void> {
   }, 60_000);
   deviceCheckTimer.unref();
 
+  /** 这台 Mac 自己的操作（改设置、清理设备、打开远程页面）也记一份，和设备日志分开。 */
+  const HOST_LOG_ID = "__host__";
+
   /** 菜单栏的每设备操作日志；存在本地库里，Bridge 重启后还在。 */
   const recordEvent = (deviceId: string, line: string): void => {
     try {
@@ -497,6 +500,7 @@ async function commandServe(): Promise<void> {
       log(`操作日志写入失败：${error instanceof Error ? error.message : String(error)}`);
     }
   };
+  const recordHostEvent = (line: string): void => recordEvent(HOST_LOG_ID, line);
 
   /** 菜单栏的日志页与气泡：最近收到的用户输入，内存里留这么多条。 */
   const recentMessages: AdminMessage[] = [];
@@ -550,6 +554,9 @@ async function commandServe(): Promise<void> {
           since: entry.since,
         })),
         devtools: devtoolsStatus,
+        hostLog: store
+          .deviceEvents(HOST_LOG_ID, 100)
+          .map((event) => formatDeviceEvent(event.at, event.line)),
         pairings: [...sessions.values()]
           .filter((entry) => entry.kind === "pair")
           .map((entry) => ({ channel: entry.channel, code: entry.code ?? null, since: entry.since })),
@@ -595,10 +602,19 @@ async function commandServe(): Promise<void> {
       return { revoked, closed, failed };
     },
     async createInvite(ttlSeconds: number) {
-      return mintInvite(api, store, config, ttlSeconds);
+      const invite = await mintInvite(api, store, config, ttlSeconds);
+      recordHostEvent(`生成配对邀请（${Math.round(ttlSeconds / 60)} 分钟有效）`);
+      return invite;
     },
     async setDevtools(capability: DevtoolsCapabilityName, enabled: boolean, ttlSeconds: number | null) {
-      return devtools.setEnabled(capability, enabled, ttlSeconds);
+      const status = devtools.setEnabled(capability, enabled, ttlSeconds);
+      const label = capability === "files" ? "文件浏览" : "命令执行";
+      const until = ttlSeconds ? `（${Math.round(ttlSeconds / 60)} 分钟后自动关闭）` : "";
+      recordHostEvent(`远程${label}${enabled ? `已开启${until}` : "已关闭"}`);
+      return status;
+    },
+    recordHostEvent(line: string) {
+      recordEvent(HOST_LOG_ID, line);
     },
     recentMessages(since: number) {
       // since=0 是初次加载：给最近一批，不要 200 条全倒给菜单栏。
@@ -644,15 +660,39 @@ async function commandServe(): Promise<void> {
           failed.push(`复查设备列表失败：${error instanceof Error ? error.message : String(error)}`);
         }
       }
+      if (purged.size > 0) recordHostEvent(`清理了 ${purged.size} 个已作废设备`);
       return { purged: purged.size, failed };
     },
     hostedConfig() {
       return adapters.hostedConfig();
     },
     setHostedConfig(patch) {
-      return typeof patch.allowBypassPermissions === "boolean"
-        ? adapters.setHostedAllowBypass(patch.allowBypassPermissions)
-        : adapters.hostedConfig();
+      if (Array.isArray(patch.dirs)) {
+        const before = adapters.hostedConfig().dirs.length;
+        const info = adapters.setHostedDirs(patch.dirs);
+        recordHostEvent(`托管白名单：${before} 个目录 → ${info.dirs.length} 个目录`);
+      }
+      if (typeof patch.allowBypassPermissions === "boolean") {
+        adapters.setHostedAllowBypass(patch.allowBypassPermissions);
+        recordHostEvent(patch.allowBypassPermissions ? "托管会话允许 bypassPermissions" : "托管会话不再允许 bypassPermissions");
+      }
+      return adapters.hostedConfig();
+    },
+    async projectDirs() {
+      const { projects } = await adapters.projects();
+      const dirs: string[] = [];
+      for (const project of projects) {
+        if (!project.cwd) continue;
+        let real: string;
+        try {
+          real = realpathSync(project.cwd);
+        } catch {
+          // 目录已经不在了：不往白名单里塞不存在的路径，否则建会话时才报错。
+          continue;
+        }
+        if (!dirs.includes(real)) dirs.push(real);
+      }
+      return dirs;
     },
   };
 

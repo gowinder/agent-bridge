@@ -115,12 +115,12 @@ const ACTIVITY_METHODS = new Set([
   "shell.exec",
   "shell.cancel",
   "file.upload.finish",
-  "hosted.addDir",
-  "hosted.removeDir",
   "hosted.create",
   "hosted.stop",
   "hosted.resume",
   "hosted.interrupt",
+  "fs.list",
+  "fs.read",
   "hosted.setModel",
   "hosted.setSubagentModel",
   "hosted.setThinking",
@@ -137,8 +137,14 @@ const ACTIVITY_METHODS = new Set([
   "device.rename",
 ]);
 
+/** 操作日志里的路径只要看得懂是哪一份，太长反而看不清。 */
+function shortPath(path: string): string {
+  const text = path.trim();
+  return text.length > 64 ? `…${text.slice(-63)}` : text;
+}
+
 /** 把一次请求压缩成一行给人看的操作记录；不关心的请求返回 null。 */
-function describeActivity(request: RequestMessage): string | null {
+export function describeActivity(request: RequestMessage): string | null {
   if (!ACTIVITY_METHODS.has(request.method)) return null;
   const params = isObject(request.params) ? request.params : {};
   const sessionId = stringParam(params, "sessionId");
@@ -152,6 +158,14 @@ function describeActivity(request: RequestMessage): string | null {
     const command = (stringParam(params, "command") ?? "").trim().split("\n")[0] ?? "";
     if (!command) return "执行命令";
     return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
+  }
+  if (request.method === "fs.list") {
+    const path = (stringParam(params, "path") ?? "").trim();
+    return `浏览项目目录${path ? `「${shortPath(path)}」` : ""}${suffix}`;
+  }
+  if (request.method === "fs.read") {
+    const path = (stringParam(params, "path") ?? "").trim();
+    return `查看文件${path ? `「${shortPath(path)}」` : ""}${suffix}`;
   }
   if (request.method === "hosted.setModel") {
     const model = (stringParam(params, "model") ?? "").trim();
@@ -173,11 +187,6 @@ function describeActivity(request: RequestMessage): string | null {
     const raw = params["triggerPercent"] ?? params["reserveTokens"];
     if (raw === null || raw === undefined) return `把自动压缩触发点改回默认${suffix}`;
     return `把自动压缩触发点改成窗口的 ${String(raw)}%${suffix}`;
-  }
-  if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
-    const path = (stringParam(params, "path") ?? "").trim();
-    const verb = request.method === "hosted.addDir" ? "添加" : "移除";
-    return path ? `${verb}托管目录「${path}」` : `${verb}托管目录`;
   }
   if (request.method === "session.create") {
     const appId = stringParam(params, "appId") ?? "";
@@ -355,11 +364,16 @@ export interface DeviceSessionOptions extends SessionOptions {
 /** 一条用户输入在日志里保留的最大长度。 */
 const MAX_LOGGED_MESSAGE_CHARS = 500;
 
+/** 同一段操作在日志里去重的窗口。 */
+const ACTIVITY_DEDUPE_MS = 30_000;
+
 export class DeviceSession implements ChannelSession {
   private handshake: NoiseHandshake | null = null;
   private secure: SecureChannel | null = null;
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
+  /** 文件浏览会连着点好几下：同一份记录 30 秒内只写一条。 */
+  private readonly activitySeen = new Map<string, number>();
 
   constructor(private readonly options: DeviceSessionOptions) {}
 
@@ -401,10 +415,25 @@ export class DeviceSession implements ChannelSession {
     await this.handleRequest(message);
   }
 
+  /**
+   * 读写类请求每点一次都记会把日志刷满；同一段描述 30 秒内只记一次。
+   * 其它写操作照旧每条都记。
+   */
+  private shouldLogActivity(key: string): boolean {
+    const now = Date.now();
+    for (const [old, at] of this.activitySeen) {
+      if (now - at >= ACTIVITY_DEDUPE_MS) this.activitySeen.delete(old);
+    }
+    const last = this.activitySeen.get(key);
+    if (last !== undefined) return false;
+    this.activitySeen.set(key, now);
+    return true;
+  }
+
   private async handleRequest(request: RequestMessage): Promise<void> {
     let response: ResponseMessage;
     const activity = describeActivity(request);
-    if (activity) this.options.activity?.(activity);
+    if (activity && this.shouldLogActivity(activity)) this.options.activity?.(activity);
     if (request.method === "message.send") this.reportMessage(request);
     try {
       response = { v: 1, kind: "response", id: request.id, ok: true, result: await this.dispatch(request) };
@@ -551,10 +580,10 @@ export class DeviceSession implements ChannelSession {
       }
       case "hosted.dirs":
         return this.options.adapters.hostedDirs();
+      // 白名单只能本机改：远程设备若能自己往里加目录，"只有白名单里的目录能建会话" 就形同虚设。
       case "hosted.addDir":
-        return this.options.adapters.hostedAddDir(stringParam(params, "path") ?? "");
       case "hosted.removeDir":
-        return this.options.adapters.hostedRemoveDir(stringParam(params, "path") ?? "");
+        throw new RpcError("unsupported", "托管目录只能在 Mac 菜单栏的「设定」里修改");
       case "hosted.create": {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");

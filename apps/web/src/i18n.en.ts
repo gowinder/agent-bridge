@@ -132,7 +132,7 @@ export const EN: Record<string, string> = {
   "，输出已截断": ", output truncated",
   "；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）":
     "; bypassPermissions is not exposed (allowBypassPermissions in hosted.json on the Mac)",
-  "；托管目录可在本页添加": "; hosted folders can be added on this page",
+  "；托管目录只能在 Mac 菜单栏的「设定」里修改": "; hosted folders are managed in the Mac menu bar app's Settings",
   "…（已截断）": "… (truncated)",
   "…（已截断）读取全文": "… (truncated) read the full text",
   "{0}\n[{1}{2} · {3}s]\n": "{0}\n[{1}{2} · {3}s]\n",
