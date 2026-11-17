@@ -73,6 +73,7 @@ struct Snapshot: Decodable {
     let devices: [DeviceInfo]
     let connections: [ConnectionInfo]
     let devtools: DevtoolsInfo?
+    let hostLog: [String]?
     let pairings: [PairingInfo]?
     let error: String?
 }
@@ -277,6 +278,11 @@ final class AdminClient {
     func setHostedAllowBypass(_ enabled: Bool) async throws -> HostedConfig {
         let data = try await request("POST", "/hosted", body: ["allowBypassPermissions": enabled])
         return try JSONDecoder().decode(HostedConfig.self, from: data)
+    }
+
+    /// 菜单栏自己的动作也记进本机操作日志；改设置那些 Bridge 自己会记。
+    func log(_ line: String) {
+        Task { _ = try? await request("POST", "/log", body: ["line": line]) }
     }
 
     /// 这台机器上已有工程的目录，用于把白名单一次配好。
@@ -762,6 +768,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if bridgeProcess?.isRunning == true {
             menu.addItem(item(T("停止 Bridge"), #selector(stopBridge), ""))
         }
+        if let hostLog = snapshot.hostLog, !hostLog.isEmpty {
+            menu.addItem(hostLogMenuItem(hostLog))
+        }
         menu.addItem(item(T("打开日志"), #selector(openLog), ""))
         menu.addItem(item(T("退出"), #selector(quit), "q"))
     }
@@ -834,6 +843,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.submenu = sub
             return entry
         }
+        for line in lines.prefix(3) { sub.addItem(logLineItem(line)) }
+        if lines.count > 3 {
+            sub.addItem(.separator())
+            let more = NSMenuItem(title: TF(T("更多…（共 %d 条）"), lines.count), action: nil, keyEquivalent: "")
+            more.isEnabled = true
+            let moreSub = NSMenu()
+            for line in lines { moreSub.addItem(logLineItem(line)) }
+            more.submenu = moreSub
+            sub.addItem(more)
+        }
+        entry.submenu = sub
+        return entry
+    }
+
+    /// 菜单里的「本机操作日志」：最近三条，后面挂「更多」看全部。
+    private func hostLogMenuItem(_ lines: [String]) -> NSMenuItem {
+        let entry = NSMenuItem(title: T("本机操作日志"), action: nil, keyEquivalent: "")
+        entry.isEnabled = true
+        let sub = NSMenu()
         for line in lines.prefix(3) { sub.addItem(logLineItem(line)) }
         if lines.count > 3 {
             sub.addItem(.separator())
@@ -1020,7 +1048,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setDevtools(capability: "terminal", enabled: false, ttlSeconds: nil)
     }
 
-    private func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?) {
+    /// 命令执行不受目录限制，唯一一道防线是使用者知道自己在开什么：连过三次确认才真开。
+    private func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?, confirmed: Bool = false) {
+        if capability == "terminal", enabled, !confirmed {
+            confirmTerminal()
+            return
+        }
         Task {
             do {
                 try await client.setDevtools(capability: capability, enabled: enabled, ttlSeconds: ttlSeconds)
@@ -1029,6 +1062,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 alert(T("设置远程工具失败"), error.localizedDescription)
             }
         }
+    }
+
+    /// 三步警告；任一步点取消就什么都不改（设置页的开关会被 refresh 恢复到实际状态）。
+    private func confirmTerminal(step: Int = 1) {
+        let warnings: [(String, String)] = [
+            (
+                T("开启远程命令执行（1/3）"),
+                T("打开后，所有已配对的设备都能在这台 Mac 上执行命令：读写整台机器的文件、访问网络、安装软件。")
+            ),
+            (
+                T("开启远程命令执行（2/3）"),
+                T("目录限制管不住命令内容：一条 cd ~ 就离开工程目录了，Bridge 拦不住。只在设备都可信时打开。")
+            ),
+            (
+                T("开启远程命令执行（3/3）"),
+                T("最后确认。用完请回菜单关掉，或改用「开启 1 小时」这类会自动关闭的方式。")
+            ),
+        ]
+        let index = min(max(step, 1), warnings.count) - 1
+        let confirm = NSAlert()
+        confirm.alertStyle = .critical
+        confirm.messageText = warnings[index].0
+        confirm.informativeText = warnings[index].1
+        confirm.addButton(withTitle: step >= warnings.count ? T("确认开启") : T("继续"))
+        confirm.addButton(withTitle: T("取消"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertFirstButtonReturn else {
+            Task { await refresh() }
+            return
+        }
+        if step >= warnings.count {
+            setDevtools(capability: "terminal", enabled: true, ttlSeconds: nil, confirmed: true)
+            return
+        }
+        confirmTerminal(step: step + 1)
     }
 
     @objc private func copyPairLink() {
@@ -1220,6 +1288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openWeb() {
         guard let raw = snapshot?.webUrl, let url = URL(string: raw) else { return }
         NSWorkspace.shared.open(url)
+        client.log(T("从菜单栏打开了远程页面"))
     }
 
     @objc private func openLog() {

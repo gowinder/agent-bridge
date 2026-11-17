@@ -136,6 +136,8 @@ export interface AdminSnapshot {
   devices: AdminDevice[];
   connections: AdminConnection[];
   devtools: DevtoolsStatus;
+  /** 这台 Mac 自己的操作记录（改设置、清理设备、打开远程页面），最新的在最前面。 */
+  hostLog: string[];
   /** Pairing channels that are still waiting for the confirm-code check. */
   pairings: AdminPairing[];
   /** Set when the relay could not be asked for the device list. */
@@ -163,6 +165,8 @@ export interface AdminActions {
   setHostedConfig(patch: { allowBypassPermissions?: boolean; dirs?: string[] }): AdminHostedConfig;
   /** 这台机器上已有工程的目录（去重、只含仍存在的），用于一键导入白名单。 */
   projectDirs(): Promise<string[]>;
+  /** 菜单栏把自己的动作（例如打开远程页面）记进本机操作日志。 */
+  recordHostEvent(line: string): void;
 }
 
 export interface AdminServerOptions {
@@ -282,6 +286,17 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
           const enabled = body["enabled"] === true;
           const ttl = typeof body["ttlSeconds"] === "number" ? body["ttlSeconds"] : null;
           send(response, 200, await actions.setDevtools(capability, enabled, ttl));
+          return;
+        }
+        if (path === "/log" && request.method === "POST") {
+          const body = await readBody(request);
+          const line = typeof body["line"] === "string" ? body["line"].trim() : "";
+          if (!line) {
+            send(response, 400, { error: "line 不能为空" });
+            return;
+          }
+          actions.recordHostEvent(line.slice(0, 200));
+          send(response, 200, { ok: true });
           return;
         }
         if (path === "/messages" && request.method === "GET") {
