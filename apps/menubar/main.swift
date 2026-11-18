@@ -1411,7 +1411,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             return
         }
-        let width: CGFloat = 620
+        // 720 宽：状态目录这类长路径放得下，说明文字也不用挤成三行。
+        let width: CGFloat = 720
         // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉；托管目录下面又多了一行
         // 按钮；再加「提示」区的标题与一行开关（约 70），806 已经放不下，统一给到 880。
         let height: CGFloat = 880
@@ -1461,85 +1462,134 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func valueLabel(_ text: String, mono: Bool = false) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = mono ? .monospacedSystemFont(ofSize: 11, weight: .regular) : .systemFont(ofSize: 12)
+        label.font = mono ? .monospacedSystemFont(ofSize: 11.5, weight: .regular) : .systemFont(ofSize: 12.5)
         label.lineBreakMode = .byTruncatingMiddle
         label.isSelectable = true
         return label
     }
 
-    /// 内容高度超过窗口时整页滚动，所以坐标从上往下累加（配合 `FlippedView`）。
+    /// 卡片式布局：每个分组是一块圆角背景，标题在卡片外；坐标从上往下累加（配合 `FlippedView`）。
+    /// 内容高度超过窗口时整页滚动。
     private func buildGeneralTab(size: NSSize) -> (view: NSView, height: CGFloat) {
         let view = FlippedView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height))
         view.autoresizingMask = [.width]
-        let margin: CGFloat = 24
-        let labelWidth: CGFloat = 128
-        let valueX = margin + labelWidth + 12
-        let valueWidth = size.width - valueX - margin
-        var y: CGFloat = 16
+        let margin: CGFloat = 28
+        // 右侧留出滚动条的位置，否则状态目录这类长文本会被压在滚动条下面。
+        let rightInset: CGFloat = 28
+        let contentRight = size.width - rightInset
+        let cardWidth = contentRight - margin
+        let cardPad: CGFloat = 16
+        let labelWidth: CGFloat = 118
+        let valueX = cardPad + labelWidth + 16
+        let valueWidth = cardWidth - valueX - cardPad
+        var pageY: CGFloat = 20
+        var cardY: CGFloat = 12
+        var currentCard: FlippedView?
 
-        func take(_ height: CGFloat, gap: CGFloat = 8) -> CGFloat {
-            let top = y
-            y += height + gap
+        func pageTake(_ height: CGFloat, gap: CGFloat = 10) -> CGFloat {
+            let top = pageY
+            pageY += height + gap
             return top
         }
+        func cardTake(_ height: CGFloat, gap: CGFloat = 12) -> CGFloat {
+            let top = cardY
+            cardY += height + gap
+            return top
+        }
+        /// 说明文字按实际换行高度排版，写死高度会把最后一行裁掉。
+        func measuredHeight(_ text: String, font: NSFont, width: CGFloat) -> CGFloat {
+            let storage = NSTextStorage(string: text, attributes: [.font: font])
+            let container = NSTextContainer(size: NSSize(width: width, height: .greatestFiniteMagnitude))
+            container.lineFragmentPadding = 0
+            let manager = NSLayoutManager()
+            manager.addTextContainer(container)
+            storage.addLayoutManager(manager)
+            manager.ensureLayout(for: container)
+            return ceil(manager.usedRect(for: container).height)
+        }
+        func finishSection() {
+            guard let card = currentCard else { return }
+            let height = cardY + cardPad - 4
+            card.frame = NSRect(x: margin, y: pageTake(height, gap: 20), width: cardWidth, height: height)
+            view.addSubview(card)
+            currentCard = nil
+        }
         func section(_ title: String) {
-            let rule = NSBox(frame: NSRect(x: margin, y: y, width: size.width - margin * 2, height: 1))
-            rule.boxType = .separator
-            view.addSubview(rule)
-            y += 12
+            finishSection()
             let label = NSTextField(labelWithString: title)
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
-            label.frame = NSRect(x: margin, y: take(14, gap: 4), width: size.width - margin * 2, height: 14)
+            label.frame = NSRect(x: margin + 2, y: pageTake(14, gap: 8), width: cardWidth, height: 14)
             view.addSubview(label)
+            let box = FlippedView(frame: .zero)
+            box.wantsLayer = true
+            box.layer?.cornerRadius = 10
+            box.layer?.backgroundColor = cardBackground().cgColor
+            box.layer?.borderWidth = 1
+            box.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+            currentCard = box
+            cardY = 12
         }
-        func row(_ caption: String, _ field: NSTextField, height: CGFloat = 17) {
-            let top = take(height, gap: 10)
+        func row(_ caption: String, _ field: NSTextField, height: CGFloat = 20) {
+            guard let card = currentCard else { return }
+            let top = cardTake(height)
             let label = NSTextField(labelWithString: caption)
-            label.font = .systemFont(ofSize: 12)
+            label.font = .systemFont(ofSize: 12.5)
             label.textColor = .secondaryLabelColor
             label.alignment = .right
             label.lineBreakMode = .byTruncatingTail
-            label.frame = NSRect(x: margin, y: top + 1, width: labelWidth, height: 16)
+            label.frame = NSRect(x: cardPad, y: top + 2, width: labelWidth, height: 16)
             field.frame = NSRect(x: valueX, y: top, width: valueWidth, height: height)
-            view.addSubview(label)
-            view.addSubview(field)
+            card.addSubview(label)
+            card.addSubview(field)
         }
         func toggle(_ title: String, _ action: Selector) -> NSSwitch {
-            let top = take(22, gap: 10)
+            let card = currentCard!
+            let top = cardTake(24)
             let label = NSTextField(labelWithString: title)
-            label.font = .systemFont(ofSize: 12)
+            label.font = .systemFont(ofSize: 12.5)
             label.lineBreakMode = .byTruncatingTail
-            label.frame = NSRect(x: margin, y: top + 3, width: size.width - margin * 2 - 60, height: 16)
-            view.addSubview(label)
-            let control = NSSwitch(frame: NSRect(x: size.width - margin - 38, y: top, width: 38, height: 22))
+            label.frame = NSRect(x: cardPad, y: top + 4, width: cardWidth - cardPad * 2 - 52, height: 17)
+            card.addSubview(label)
+            let control = NSSwitch(frame: NSRect(x: cardWidth - cardPad - 38, y: top + 1, width: 38, height: 22))
             control.target = self
             control.action = action
-            view.addSubview(control)
+            card.addSubview(control)
             return control
         }
-        func hint(_ text: String, height: CGFloat = 28) {
+        func hint(_ text: String) {
+            guard let card = currentCard else { return }
+            let width = cardWidth - valueX - cardPad
+            let font = NSFont.systemFont(ofSize: 11.5)
+            let height = max(measuredHeight(text, font: font, width: width - 4), 15)
             let label = NSTextField(wrappingLabelWithString: text)
-            label.font = .systemFont(ofSize: 11)
-            label.textColor = .tertiaryLabelColor
-            label.frame = NSRect(x: margin, y: take(height, gap: 10), width: size.width - margin * 2, height: height)
-            view.addSubview(label)
+            label.font = font
+            label.textColor = .secondaryLabelColor
+            label.maximumNumberOfLines = 0
+            label.usesSingleLineMode = false
+            label.lineBreakMode = .byWordWrapping
+            label.cell?.wraps = true
+            label.cell?.isScrollable = false
+            label.frame = NSRect(x: valueX, y: cardTake(height, gap: 10), width: width, height: height)
+            card.addSubview(label)
         }
 
         // 顶部状态条：一个圆点 + 一行摘要，比一行纯文字更容易一眼看出好坏。
-        let pill = NSView(frame: NSRect(x: margin, y: take(32, gap: 16), width: size.width - margin * 2, height: 32))
+        let pill = NSView(frame: NSRect(x: margin, y: pageTake(40, gap: 22), width: cardWidth, height: 40))
         pill.wantsLayer = true
-        pill.layer?.cornerRadius = 9
-        pill.layer?.backgroundColor = NSColor.unemphasizedSelectedContentBackgroundColor.cgColor
-        let dot = NSView(frame: NSRect(x: 12, y: 12, width: 8, height: 8))
+        pill.layer?.cornerRadius = 10
+        pill.layer?.backgroundColor = cardBackground().cgColor
+        pill.layer?.borderWidth = 1
+        pill.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+        let dot = NSView(frame: NSRect(x: 16, y: 16, width: 8, height: 8))
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 4
         dot.layer?.backgroundColor = NSColor.systemGray.cgColor
         pill.addSubview(dot)
         let status = NSTextField(labelWithString: "…")
-        status.font = .systemFont(ofSize: 12, weight: .medium)
+        status.font = .systemFont(ofSize: 12.5, weight: .medium)
         status.lineBreakMode = .byTruncatingTail
-        status.frame = NSRect(x: 26, y: 8, width: pill.frame.width - 36, height: 16)
+        status.frame = NSRect(x: 32, y: 12, width: pill.frame.width - 48, height: 16)
         pill.addSubview(status)
         view.addSubview(pill)
         settingsStatusDot = dot
@@ -1559,49 +1609,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let portButton = NSButton(title: T("修改…"), target: self, action: #selector(changePort))
         portButton.bezelStyle = .rounded
         portButton.controlSize = .small
-        portButton.font = .systemFont(ofSize: 11)
+        portButton.font = .systemFont(ofSize: 11.5)
         if let portLabel = settingsPortLabel {
-            portLabel.frame.size.width = max(60, valueWidth - 74)
-            portButton.frame = NSRect(x: size.width - margin - 64, y: portLabel.frame.origin.y - 2, width: 64, height: 20)
+            portLabel.frame.size.width = max(60, valueWidth - 76)
+            portButton.frame = NSRect(x: cardWidth - cardPad - 66, y: portLabel.frame.origin.y - 1, width: 66, height: 22)
+            currentCard?.addSubview(portButton)
         }
-        view.addSubview(portButton)
 
         section(T("托管会话"))
         settingsBypassSwitch = toggle(T("允许 bypassPermissions（跳过权限确认）"), #selector(toggleBypass(_:)))
         hint(T("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。"))
         // 白名单只能在这台机器上改：远程设备连「加目录」的入口都没有。
         let dirsCaption = NSTextField(labelWithString: T("托管目录"))
-        dirsCaption.font = .systemFont(ofSize: 12)
+        dirsCaption.font = .systemFont(ofSize: 12.5)
         dirsCaption.textColor = .secondaryLabelColor
         dirsCaption.alignment = .right
         dirsCaption.lineBreakMode = .byTruncatingTail
-        let dirsTop = take(84, gap: 8)
-        dirsCaption.frame = NSRect(x: margin, y: dirsTop + 1, width: labelWidth, height: 16)
-        view.addSubview(dirsCaption)
-        let dirsScroll = NSScrollView(frame: NSRect(x: valueX, y: dirsTop, width: valueWidth, height: 84))
+        let dirsTop = cardTake(96)
+        dirsCaption.frame = NSRect(x: cardPad, y: dirsTop + 2, width: labelWidth, height: 16)
+        currentCard?.addSubview(dirsCaption)
+        let dirsScroll = NSScrollView(frame: NSRect(x: valueX, y: dirsTop, width: valueWidth, height: 96))
         dirsScroll.hasVerticalScroller = true
         dirsScroll.autohidesScrollers = true
-        dirsScroll.borderType = .bezelBorder
+        dirsScroll.scrollerStyle = .overlay
+        dirsScroll.borderType = .noBorder
         dirsScroll.drawsBackground = false
-        let dirsDoc = FlippedView(frame: NSRect(x: 0, y: 0, width: valueWidth - 2, height: 84))
+        dirsScroll.wantsLayer = true
+        dirsScroll.layer?.cornerRadius = 8
+        dirsScroll.layer?.borderWidth = 1
+        dirsScroll.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.7).cgColor
+        dirsScroll.layer?.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.25).cgColor
+        let dirsDoc = FlippedView(frame: NSRect(x: 0, y: 0, width: valueWidth, height: 96))
         dirsDoc.autoresizingMask = [.width]
         dirsScroll.documentView = dirsDoc
-        view.addSubview(dirsScroll)
+        currentCard?.addSubview(dirsScroll)
         settingsDirsDoc = dirsDoc
-        let dirButtonsY = take(22, gap: 6)
+        let dirButtonsY = cardTake(24, gap: 10)
         let addDir = NSButton(title: T("添加目录…"), target: self, action: #selector(addHostedDir))
         addDir.bezelStyle = .rounded
         addDir.controlSize = .small
-        addDir.font = .systemFont(ofSize: 11)
-        addDir.frame = NSRect(x: valueX, y: dirButtonsY, width: 92, height: 20)
-        view.addSubview(addDir)
+        addDir.font = .systemFont(ofSize: 11.5)
+        addDir.frame = NSRect(x: valueX, y: dirButtonsY, width: 96, height: 22)
+        currentCard?.addSubview(addDir)
         settingsAddDirButton = addDir
         let importDirs = NSButton(title: T("导入现有工程目录"), target: self, action: #selector(importHostedDirs))
         importDirs.bezelStyle = .rounded
         importDirs.controlSize = .small
-        importDirs.font = .systemFont(ofSize: 11)
-        importDirs.frame = NSRect(x: valueX + 100, y: dirButtonsY, width: 132, height: 20)
-        view.addSubview(importDirs)
+        importDirs.font = .systemFont(ofSize: 11.5)
+        importDirs.frame = NSRect(x: valueX + 104, y: dirButtonsY, width: 142, height: 22)
+        currentCard?.addSubview(importDirs)
         settingsImportDirsButton = importDirs
         settingsIdleLabel = valueLabel("…")
         row(T("空闲超时"), settingsIdleLabel!)
@@ -1617,13 +1673,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         section(T("更新"))
         settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
-        hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
+        hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"))
         if Updater.currentVersionIsPrerelease && !Updater.isPreviewInstall {
             settingsReleaseUpgradeSwitch = toggle(T("允许升级到正式版（默认关，只升 rc）"), #selector(toggleAllowReleaseUpgrade(_:)))
-            hint(TF(T("装在预览版 v%@：关着只升 rc；勾选后正式版也会提示并安装。"), Updater.currentVersion), height: 16)
+            hint(TF(T("装在预览版 v%@：关着只升 rc；勾选后正式版也会提示并安装。"), Updater.currentVersion))
         }
+        finishSection()
 
-        return (view, y + 8)
+        return (view, pageY + 8)
+    }
+
+    /// 卡片的底色：浅色下用白，深色下比窗口背景亮一档，否则卡片和背景糊在一起只剩边框。
+    private func cardBackground() -> NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                ? NSColor(calibratedWhite: 0.16, alpha: 1)
+                : NSColor.white
+        }
     }
 
     private func buildLogTab(size: NSSize) -> NSView {
@@ -1800,58 +1866,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    /// 托管目录列表：一行一个目录，右边是「移除」；`nil` 表示还没读到。
+    /// 托管目录列表：一行一个目录，右边是移除按钮；`nil` 表示还没读到。
     private func renderHostedDirs(_ dirs: [HostedDir]?) {
         guard let doc = settingsDirsDoc else { return }
         for sub in doc.subviews { sub.removeFromSuperview() }
         let width = doc.superview?.bounds.width ?? doc.frame.width
         doc.frame.size.width = width
-        let rowHeight: CGFloat = 26
+        let rowHeight: CGFloat = 30
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         guard let dirs, !dirs.isEmpty else {
             let text = dirs == nil
                 ? (reachable ? T("读取中…") : T("Bridge 未运行，无法读取"))
                 : T("（还没有托管目录）")
             let empty = NSTextField(labelWithString: text)
-            empty.font = .systemFont(ofSize: 11)
+            empty.font = .systemFont(ofSize: 11.5)
             empty.textColor = .tertiaryLabelColor
-            empty.frame = NSRect(x: 8, y: 8, width: width - 16, height: 16)
+            empty.frame = NSRect(x: 14, y: 12, width: width - 28, height: 16)
             doc.addSubview(empty)
-            doc.frame.size.height = max(doc.superview?.bounds.height ?? 84, 84)
+            doc.frame.size.height = max(doc.superview?.bounds.height ?? 96, 96)
             return
         }
         for (index, dir) in dirs.enumerated() {
-            let row = NSView(frame: NSRect(x: 0, y: CGFloat(index) * rowHeight, width: width, height: rowHeight))
+            let top = CGFloat(index) * rowHeight
+            let row = NSView(frame: NSRect(x: 0, y: top, width: width, height: rowHeight))
             let shown = dir.path.hasPrefix(home + "/") ? "~" + dir.path.dropFirst(home.count) : dir.path
             let name = NSTextField(labelWithString: shown)
-            name.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            name.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
             name.lineBreakMode = .byTruncatingMiddle
             name.toolTip = dir.path
-            name.frame = NSRect(x: 8, y: 5, width: width - 190, height: 16)
+            name.frame = NSRect(x: 14, y: 7, width: width - 176, height: 16)
             row.addSubview(name)
 
             let facts = NSTextField(labelWithString: dir.exists
                 ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
                 : T("目录已删除"))
             facts.font = .systemFont(ofSize: 11)
-            facts.textColor = dir.exists ? .secondaryLabelColor : .systemOrange
+            facts.textColor = dir.exists ? .tertiaryLabelColor : .systemOrange
             facts.alignment = .right
             facts.lineBreakMode = .byTruncatingTail
-            facts.frame = NSRect(x: width - 190, y: 5, width: 104, height: 16)
+            facts.frame = NSRect(x: width - 166, y: 7, width: 96, height: 16)
             row.addSubview(facts)
 
-            let remove = NSButton(title: T("移除"), target: self, action: #selector(removeHostedDir(_:)))
-            remove.bezelStyle = .rounded
-            remove.controlSize = .mini
-            remove.font = .systemFont(ofSize: 11)
+            // 用系统设置里那种红色减号，比一个小方块按钮轻。
+            let remove = NSButton(frame: NSRect(x: width - 44, y: 6, width: 18, height: 18))
+            remove.isBordered = false
+            remove.bezelStyle = .inline
+            remove.image = NSImage(systemSymbolName: "minus.circle.fill", accessibilityDescription: T("移除"))
+            remove.imagePosition = .imageOnly
+            remove.contentTintColor = .systemRed
             remove.identifier = NSUserInterfaceItemIdentifier(dir.path)
             remove.toolTip = T("从托管白名单移除（已有会话不受影响）")
-            remove.frame = NSRect(x: width - 76, y: 3, width: 64, height: 18)
+            remove.target = self
+            remove.action = #selector(removeHostedDir(_:))
             row.addSubview(remove)
 
+            if index < dirs.count - 1 {
+                let rule = NSBox(frame: NSRect(x: 14, y: rowHeight - 1, width: width - 28, height: 1))
+                rule.boxType = .separator
+                row.addSubview(rule)
+            }
             doc.addSubview(row)
         }
-        doc.frame.size.height = max(CGFloat(dirs.count) * rowHeight + 4, 84)
+        doc.frame.size.height = max(CGFloat(dirs.count) * rowHeight + 2, 96)
     }
 
     /// 把一个目录移出白名单；已有会话保留，只是不能再从这里新建。
