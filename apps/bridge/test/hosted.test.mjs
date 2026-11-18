@@ -517,6 +517,56 @@ test("rail and messages report context usage from assistant events", (t) => {
   assert.equal(h.manager.messagesFor(session.sessionId, { limit: 50 }).context.usedTokens, 35_200);
 });
 
+test("per-message usage rolls up into session tokens and per-turn detail", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  const child = h.spawns[0].child;
+  await h.manager.send(session.sessionId, "第一轮");
+  child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: "好" }],
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        output_tokens: 100,
+      },
+    },
+  });
+  await h.manager.send(session.sessionId, "第二轮");
+  child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: "好" }],
+      usage: {
+        input_tokens: 20,
+        cache_read_input_tokens: 2000,
+        cache_creation_input_tokens: 500,
+        output_tokens: 200,
+      },
+    },
+  });
+
+  const page = h.manager.messagesFor(session.sessionId, { limit: 50 });
+  const assistant = page.messages.filter((message) => message.role === "assistant");
+  assert.deepEqual(assistant[0].usage, { input: 10, cacheRead: 1000, cacheWrite: 0, output: 100 });
+  assert.deepEqual(assistant[1].usage, { input: 20, cacheRead: 2000, cacheWrite: 500, output: 200 });
+  assert.equal(page.tokens.input, 30);
+  assert.equal(page.tokens.cacheRead, 3000);
+  assert.equal(page.tokens.cacheWrite, 500);
+  assert.equal(page.tokens.output, 300);
+  assert.equal(page.tokens.turns.length, 2);
+  const users = page.messages.filter((message) => message.role === "user");
+  assert.deepEqual(
+    page.tokens.turns.map((turn) => turn.messageId),
+    users.map((message) => message.messageId),
+  );
+});
+
 test("context usage is recorded even when the assistant event has no blocks", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());

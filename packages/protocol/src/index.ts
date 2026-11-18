@@ -555,6 +555,8 @@ export interface MessageRecord {
   blocks: MessageBlock[];
   /** `peer` marks a message injected by another local agent session. */
   origin?: "local" | "peer";
+  /** 这条助手消息对应那一次调用的 token 用量；客户端没上报时没有。 */
+  usage?: TokenUsage;
 }
 
 export interface AppListResult {
@@ -757,6 +759,30 @@ export interface ContextDetail {
   value: string;
 }
 
+/** 一次模型调用的 token 用量。 */
+export interface TokenUsage {
+  /** 没命中缓存的输入。 */
+  input: number;
+  /** 命中缓存、直接复用的输入（cacheRead）。 */
+  cacheRead: number;
+  /** 写进缓存的输入（cacheWrite），不计入「命中」。 */
+  cacheWrite: number;
+  output: number;
+}
+
+/** 一个回合（一条用户消息到下一条之前）的用量合计。 */
+export interface TurnTokens {
+  /** 回合里第一条用户消息的 id；网页端据此把用量行挂到该回合末尾。 */
+  messageId: string;
+  usage: TokenUsage;
+}
+
+/** 整个会话的用量累计。 */
+export interface SessionTokens extends TokenUsage {
+  /** 每个回合的合计，最早的在前；只有真的用到 token 的回合才在列表里。 */
+  turns: TurnTokens[];
+}
+
 /** How much of the model context window the session currently occupies. */
 export interface ContextUsage {
   usedTokens: number;
@@ -776,6 +802,8 @@ export interface MessageListResult {
   note?: string;
   /** Context window usage of the session, when the client exposes it. */
   context?: ContextUsage;
+  /** 整个会话的 token 累计（不只是当前这一页）。客户端没上报用量时没有。 */
+  tokens?: SessionTokens;
   /** Slash commands (skills included) the client accepts in this session; names without the slash. */
   slashCommands?: string[];
   /** The client is still working on the latest turn. */
@@ -841,6 +869,8 @@ export interface RailTask {
 export interface SessionRailResult {
   environment: RailRow[];
   context?: ContextUsage;
+  /** 整个会话的 token 累计与每轮明细。 */
+  tokens?: SessionTokens;
   servers: Array<{ name: string; detail?: string }>;
   tasks: RailTask[];
   note?: string;

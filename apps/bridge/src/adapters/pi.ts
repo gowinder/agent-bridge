@@ -13,9 +13,11 @@ import type {
   SessionModelsResult,
   SessionRailResult,
   SessionSummary,
+  SessionTokens,
 } from "@craftstead/protocol";
 import { piBinary } from "../hosted/pi-binary.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { sessionTokensOf, tokenUsageFromPi } from "../context-usage.js";
 import { toolSummaryOf } from "../tool-summary.js";
 
 /**
@@ -57,6 +59,8 @@ interface PiEntry {
     model?: string;
     provider?: string;
     timestamp?: number;
+    /** pi 每次模型调用都带一条；会话级那条多一个 turns 字段。 */
+    usage?: unknown;
   };
 }
 
@@ -75,6 +79,7 @@ interface ParsedLog {
   messages: MessageRecord[];
   texts: Map<string, string[]>;
   model: string;
+  tokens?: SessionTokens;
 }
 
 export class PiAdapter implements SessionAdapter {
@@ -165,8 +170,10 @@ export class PiAdapter implements SessionAdapter {
     const children = this.records()
       .filter((item) => item.parentSession === record.id)
       .slice(0, MAX_RAIL_TASKS);
+    const tokens = this.parse(record, sessionId).tokens;
     return {
       environment,
+      ...(tokens ? { tokens } : {}),
       servers: [],
       tasks: children.map((child) => ({
         taskId: child.id,
@@ -372,10 +379,12 @@ export class PiAdapter implements SessionAdapter {
       }
       if (blocks.length === 0) continue;
       if (role === "assistant" && entry.message.model) model = entry.message.model;
-      messages.push({ messageId, sessionId, role, createdAt, blocks });
+      const usage = role === "assistant" ? tokenUsageFromPi(entry.message.usage) : undefined;
+      messages.push({ messageId, sessionId, role, createdAt, blocks, ...(usage ? { usage } : {}) });
       if (parts.length > 0) texts.set(messageId, parts);
     }
-    return { messages, texts, model };
+    const tokens = sessionTokensOf(messages);
+    return { messages, texts, model, ...(tokens ? { tokens } : {}) };
   }
 
   private page(parsed: ParsedLog, page: MessagePage): MessageListResult {
@@ -393,6 +402,7 @@ export class PiAdapter implements SessionAdapter {
       completeness: "partial",
       note: "读取 pi 会话里的用户／助手文本与工具调用；不含推理内容、图片与工具输出",
     };
+    if (parsed.tokens) result.tokens = parsed.tokens;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
     return result;
   }

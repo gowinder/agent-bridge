@@ -44,7 +44,12 @@ import type {
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText } from "../adapters/types.js";
 import { toolSummaryOf } from "../tool-summary.js";
-import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js";
+import {
+  contextUsageFromUsage,
+  sanitizeContextUsage,
+  sessionTokensOf,
+  tokenUsageFromClaude,
+} from "../context-usage.js";
 import { effortLevels } from "../effort.js";
 import { modelCatalog } from "../model-catalog.js";
 import { subagentTasks } from "../subagents.js";
@@ -618,6 +623,8 @@ export class HostedSessionManager {
       ...(record.context ? { context: record.context } : {}),
       ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
     };
+    const tokens = sessionTokensOf(all);
+    if (tokens) result.tokens = tokens;
     const first = pageMessages[0];
     if (start > 0 && first) result.nextBefore = first.messageId;
     if (!live) {
@@ -668,7 +675,9 @@ export class HostedSessionManager {
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
     const pi = record.agent === "pi";
+    const tokens = sessionTokensOf(this.messagesOf(record.id));
     return {
+      ...(tokens ? { tokens } : {}),
       environment: [
         { label: "工作目录", value: record.cwd },
         ...(pi
@@ -1673,7 +1682,7 @@ export class HostedSessionManager {
         }
       },
       {
-        assistant: (blocks) => {
+        assistant: (blocks, usage) => {
           if (record.title === "托管会话") {
             const text = blocks.find((block) => block.type === "text" && block.text.trim());
             if (text) record.title = truncateTitle(text.text);
@@ -1684,6 +1693,7 @@ export class HostedSessionManager {
             role: "assistant",
             createdAt: Date.now(),
             blocks,
+            ...(usage ? { usage } : {}),
           });
           this.touch(record);
         },
@@ -2019,12 +2029,14 @@ export class HostedSessionManager {
         const textBlock = blocks.find((block) => block.type === "text" && block.text.trim());
         if (textBlock) record.title = truncateTitle(textBlock.text);
       }
+      const turnUsage = tokenUsageFromClaude(message["usage"]);
       this.appendRecord(record, {
         messageId: randomUUID(),
         sessionId: record.id,
         role: "assistant",
         createdAt: Date.now(),
         blocks,
+        ...(turnUsage ? { usage: turnUsage } : {}),
       });
       this.touch(record);
       return;

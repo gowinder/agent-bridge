@@ -19,6 +19,7 @@ import type {
   ContextUsage,
   MessageBlock,
   MessageListResult,
+  SessionTokens,
   MessageQuestion,
   MessageQuestionOption,
   MessageRecord,
@@ -32,7 +33,7 @@ import type {
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
-import { contextUsageFromUsage } from "../context-usage.js";
+import { contextUsageFromUsage, sessionTokensOf, tokenUsageFromClaude } from "../context-usage.js";
 import { modelCatalog } from "../model-catalog.js";
 import { subagentDirsFor, subagentTasks as readSubagentTasks } from "../subagents.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
@@ -98,6 +99,8 @@ interface CachedMessages {
   size: number;
   messages: MessageRecord[];
   context?: ContextUsage;
+  /** 整个会话的 token 累计，跟着 messages 一起缓存。 */
+  tokens?: SessionTokens;
   busy?: BusyState;
   interrupted?: boolean;
   /** 还有 AskUserQuestion 没有对应的 tool_result：客户端正等着用户选。 */
@@ -470,6 +473,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       note: "仅主链文本与工具调用摘要；不含侧链、图片与工具输出全文",
     };
     if (parsed.context) result.context = parsed.context;
+    if (parsed.tokens) result.tokens = parsed.tokens;
     if (parsed.busy) result.busy = true;
     if (parsed.interrupted) result.interrupted = true;
     if (start > 0) result.nextBefore = messages[0]?.messageId;
@@ -499,6 +503,11 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     };
     const context = this.contextFor(record);
     if (context) result.context = context;
+    const transcript = record.cliSessionId ? this.transcriptPath(record.cliSessionId) : null;
+    if (transcript) {
+      const tokens = this.readTranscript(transcript, sessionId).tokens;
+      if (tokens) result.tokens = tokens;
+    }
     return result;
   }
 
@@ -1030,6 +1039,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
   ): {
     messages: MessageRecord[];
     context?: ContextUsage;
+    tokens?: SessionTokens;
     busy: boolean;
     interrupted: boolean;
     needsDecision: boolean;
@@ -1051,6 +1061,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       return {
         messages: cached.messages,
         ...(cached.context ? { context: cached.context } : {}),
+        ...(cached.tokens ? { tokens: cached.tokens } : {}),
         busy: running,
         interrupted,
         needsDecision: running && cached.pendingAsk === true,
@@ -1103,11 +1114,13 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       running && pendingAsk
         ? askBlock([...pendingAsks.values()].pop(), MAX_BLOCK_CHARS)?.questions
         : undefined;
+    const tokens = sessionTokensOf(messages);
     this.messageCache.set(path, {
       mtimeMs,
       size,
       messages,
       ...(context ? { context } : {}),
+      ...(tokens ? { tokens } : {}),
       busy,
       interrupted,
       pendingAsk,
@@ -1116,6 +1129,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     return {
       messages,
       ...(context ? { context } : {}),
+      ...(tokens ? { tokens } : {}),
       busy: running,
       interrupted,
       needsDecision: running && pendingAsk,
@@ -1150,6 +1164,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         origin = "peer";
       }
     }
+    const usage = role === "assistant" ? tokenUsageFromClaude(entry.message?.usage) : undefined;
     return {
       messageId: entry.uuid ?? `${sessionId}:${index}`,
       sessionId,
@@ -1157,6 +1172,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
       createdAt: entry.timestamp ? Date.parse(entry.timestamp) || 0 : 0,
       blocks,
       origin,
+      ...(usage ? { usage } : {}),
     };
   }
 
