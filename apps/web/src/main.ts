@@ -629,9 +629,14 @@ async function watchSessions(): Promise<void> {
     // The list poller compares against this snapshot, so a change seen here would otherwise
     // never repaint; re-render the visible list from the data this watcher just stored.
     if (document.visibilityState !== "visible") return;
+    if (snapshotSignature() === before) return;
     const route = parseRoute();
-    if (route.level !== "clients" && route.level !== "projects" && route.level !== "sessions") return;
-    if (snapshotSignature() !== before) repaintList();
+    if (route.level === "clients" || route.level === "projects" || route.level === "sessions") {
+      repaintList();
+      return;
+    }
+    // 停在聊天/任务页时整页重绘会打断正在输入的内容，只把侧栏的状态角标换掉。
+    syncDockSessions();
   } catch {
     // The connection layer already reports disconnects; the next tick retries.
   }
@@ -2054,6 +2059,52 @@ function dockStatePills(session: SessionSummary): HTMLElement[] {
   return pills;
 }
 
+/** 侧栏条目上会随快照变化的那几位：运行中 / 有进程 / 未读 / 待回答。 */
+function dockStateKey(session: SessionSummary): string {
+  return [
+    session.busy ? 1 : 0,
+    session.live ? 1 : 0,
+    unreadAt(session.sessionId) !== undefined ? 1 : 0,
+    session.needsDecision ? 1 : 0,
+  ].join("");
+}
+
+/**
+ * 聊天页不重建整页，但侧栏那份会话状态不能一直停在上次进来时的样子：只把状态变了的
+ * 条目换成新按钮，历史搜索的输入框、列表滚动位置都不动。
+ */
+function syncDockSessions(): void {
+  if (!snapshot) return;
+  const byId = new Map(snapshot.sessions.map((item) => [item.sessionId, item]));
+  const current = dockActive(parseRoute()).sessionId;
+  for (const node of [...document.querySelectorAll<HTMLElement>(".dock-session, .dock-history-row")]) {
+    const sessionId = node.dataset.sessionId;
+    const session = sessionId ? byId.get(sessionId) : undefined;
+    if (!session) continue;
+    const state = dockStateKey(session);
+    if (node.dataset.state === state) continue;
+    if (node.classList.contains("dock-history-row")) {
+      // 历史行的标题与滚动位置要留着（可能正在搜索），只换右边那组状态。
+      const facts = node.querySelector(".dock-history-facts");
+      if (!facts) continue;
+      facts.replaceChildren(
+        el("span", {
+          className: "dock-history-meta",
+          text: `${agentLabel(session.kind, session.hostedAgent)} · ${recentTime(session.updatedAt)}`,
+        }),
+        ...dockStatePills(session),
+      );
+      node.dataset.state = state;
+      node.classList.toggle("is-active", current === session.sessionId);
+      continue;
+    }
+    const focused = document.activeElement === node;
+    const next = dockSessionButton(session, node.classList.contains("is-active"));
+    node.replaceWith(next);
+    if (focused) next.focus();
+  }
+}
+
 function dockSessionButton(session: SessionSummary, active: boolean): HTMLButtonElement {
   const pills = dockStatePills(session);
   const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
@@ -2065,6 +2116,8 @@ function dockSessionButton(session: SessionSummary, active: boolean): HTMLButton
     ...(pills.length > 0 ? [el("span", { className: "dock-session-pills" }, pills)] : []),
   ]);
   node.title = session.title;
+  node.dataset.sessionId = session.sessionId;
+  node.dataset.state = dockStateKey(session);
   if (active) node.setAttribute("aria-current", "page");
   node.addEventListener("click", () => {
     navigate({
@@ -2218,6 +2271,8 @@ function renderDockHistoryList(): void {
       ]),
     ]);
     node.title = `${session.title}\n${session.projectId}`;
+    node.dataset.sessionId = session.sessionId;
+    node.dataset.state = dockStateKey(session);
     if (current) node.setAttribute("aria-current", "page");
     node.addEventListener("click", () => {
       navigate({
@@ -3396,6 +3451,22 @@ function startSnapshotPolling(token: number): void {
     if (document.visibilityState !== "visible") return;
     void refreshSnapshot(token);
   }, 5_000);
+}
+
+/**
+ * 聊天页只轮询当前会话，侧栏那批会话走的是 session.list 快照（10 秒一次）。
+ * 发送或回合状态一变就先按已知状态改掉快照里的这一条，侧栏「运行中」才不会滞后。
+ */
+function markSessionState(sessionId: string, busy: boolean): void {
+  if (!snapshot) return;
+  const index = snapshot.sessions.findIndex((item) => item.sessionId === sessionId);
+  const session = snapshot.sessions[index];
+  if (!session) return;
+  if (session.busy === busy && (!busy || session.live)) return;
+  const sessions = [...snapshot.sessions];
+  sessions[index] = busy ? { ...session, busy: true, live: true } : { ...session, busy: false };
+  snapshot = { ...snapshot, sessions };
+  syncDockSessions();
 }
 
 function snapshotSignature(): string {
@@ -6569,6 +6640,7 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
     state.paintReset?.();
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
+    markSessionState(state.session.sessionId, state.busy);
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
     state.interrupted = result.interrupted === true;
     if (busyChanged) paintStopButton(state);
@@ -8036,6 +8108,7 @@ async function sendMessage(
       state.busy = true;
       state.interrupted = false;
       paintStopButton(state);
+      markSessionState(state.session.sessionId, true);
       renderMessages(state);
     }
     status.textContent = state.session.hosted
