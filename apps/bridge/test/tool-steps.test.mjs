@@ -59,3 +59,23 @@ test("不是工具调用的文本原样保留", () => {
   assert.equal(view.detail, "thinking through the problem");
   assert.equal(view.body, "thinking through the problem");
 });
+
+test("工具自带的 description 当作这一步的标题，不再加动作标签", () => {
+  const view = stepView({
+    type: "tool",
+    text: '调用 Bash {"command":"ls -la /Users/whwbsrwn | head -50","description":"List home directory"}',
+    summary: "List home directory",
+  });
+  assert.equal(view.detail, "List home directory");
+  assert.equal(view.described, true);
+  assert.equal(view.label, "运行");
+});
+
+test("没有 summary 时退回「动作标签 + 目标」", () => {
+  const view = stepView({
+    type: "tool",
+    text: '调用 Read {"file_path":"/a/b/AGENTS.md"}',
+  });
+  assert.equal(view.detail, "/a/b/AGENTS.md");
+  assert.equal(view.described, undefined);
+});

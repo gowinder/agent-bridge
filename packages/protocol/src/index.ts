@@ -535,6 +535,8 @@ export interface MessageBlock {
   type: "text" | "tool" | "next-step" | "ask";
   text: string;
   truncated?: boolean;
+  /** `tool` only: 工具自己写的一句话说明（Bash 的 description / Codex 的 justification）。 */
+  summary?: string;
   /** `next-step` only: the question the client drew above the buttons. */
   ask?: string;
   /** `next-step` only: the buttons the desktop client offered. */

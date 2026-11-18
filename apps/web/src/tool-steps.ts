@@ -84,6 +84,8 @@ export interface StepView {
   label: string;
   detail: string;
   body: string;
+  /** detail 是工具自己的说明（不是推断出来的目标）：这时不再加动作标签。 */
+  described?: boolean;
 }
 
 /**
@@ -117,6 +119,11 @@ export function stepView(block: MessageBlock): StepView {
   const name = call.name;
   const argsRaw = call.args;
   const { label, keys } = toolAction(name);
+  // 工具自己写了说明（Claude Code 的 Bash description）就用它，比「运行 + 命令」更像人话。
+  const described = block.summary?.trim();
+  if (described) {
+    return { label, detail: described, body: prettyToolArgs(argsRaw), described: true };
+  }
   let detail = "";
   if (argsRaw && !argsRaw.startsWith("{")) {
     // 纯文本参数（`Bash pwd; ls -la`、`Read /path/to/file`）：它本身就是目标。
