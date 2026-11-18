@@ -119,10 +119,19 @@ export interface AdminMessage {
   text: string;
 }
 
+/** 白名单里的一个托管目录。只剩历史会话的目录不在里面（不能新建，也不用管）。 */
+export interface AdminHostedDir {
+  path: string;
+  /** false = 目录已经被删掉了；留着这条记录，移除时也允许。 */
+  exists: boolean;
+  /** 用这个目录的托管会话数。 */
+  sessionCount: number;
+}
+
 /** 设置界面要看的托管配置，对应状态目录里的 hosted.json。 */
 export interface AdminHostedConfig {
   allowBypassPermissions: boolean;
-  dirs: string[];
+  dirs: AdminHostedDir[];
   idleTimeoutMs: number;
 }
 

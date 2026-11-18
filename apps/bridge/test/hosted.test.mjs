@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { summarizeHostedDirs } from "../dist/adapters/index.js";
 import { HostedAdapter } from "../dist/adapters/hosted.js";
 import { HostedSessionManager } from "../dist/hosted/manager.js";
 
@@ -846,4 +847,21 @@ test("删除托管会话：先停进程，再删记录与聊天记录文件", as
   assert.equal(existsSync(transcript), false);
   assert.equal(h.spawns[0].child.signals.length, 1);
   assert.throws(() => h.manager.archive(session.sessionId, true), /未知托管会话/);
+});
+
+test("the settings summary lists allowlisted folders with existence and session counts", () => {
+  // 菜单栏的「托管目录」列表用这份：只剩历史会话的目录不能新建，所以不进列表。
+  const summary = summarizeHostedDirs({
+    enabled: true,
+    allowBypassPermissions: false,
+    idleTimeoutMs: 60_000,
+    permissionModes: [],
+    dirs: [
+      { path: "/repo", name: "repo", sessionCount: 2, exists: true, allowed: true },
+      { path: "/gone", name: "gone", sessionCount: 1, exists: false, allowed: false },
+    ],
+  });
+  assert.deepEqual(summary.dirs, [{ path: "/repo", exists: true, sessionCount: 2 }]);
+  assert.equal(summary.idleTimeoutMs, 60_000);
+  assert.equal(summary.allowBypassPermissions, false);
 });
