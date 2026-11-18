@@ -82,6 +82,40 @@ test("the hosted allowlist can be replaced as a whole, and only with real folder
   assert.throws(() => h.manager.create({ path: h.repo }), /白名单|目录/);
 });
 
+test("a leftover deleted folder is skipped instead of failing the whole allowlist write", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const gone = join(h.root, "gone");
+  mkdirSync(gone);
+  h.manager.setDirs([h.repo, gone]);
+  rmSync(gone, { recursive: true, force: true });
+
+  // 已经不存在的旧目录：跳过，不要把整份写入顶掉（界面上没有移除入口）。
+  const updated = h.manager.setDirs([h.repo, gone]);
+  assert.deepEqual(updated.dirs.map((dir) => dir.path), [realpathSync(h.repo)]);
+  // 新加的目录不存在仍然要报错。
+  const fresh = join(h.root, "never-existed");
+  assert.throws(() => h.manager.setDirs([h.repo, fresh]), /目录不存在/);
+});
+
+test("sessions whose folder left the allowlist stay visible but not allowed", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const extra = join(h.root, "extra");
+  mkdirSync(extra);
+  h.manager.setDirs([h.repo, extra]);
+  h.manager.create({ path: extra });
+  h.manager.setDirs([h.repo]);
+
+  const dirs = h.manager.configForClient().dirs;
+  const kept = dirs.find((dir) => dir.path === realpathSync(h.repo));
+  const dropped = dirs.find((dir) => dir.path === realpathSync(extra));
+  assert.equal(kept?.allowed, true);
+  // 历史会话的目录仍然列出来（否则会话看起来没有目录），但不能再被授权。
+  assert.equal(dropped?.allowed, false);
+  assert.throws(() => h.manager.create({ path: extra }), /白名单|目录/);
+});
+
 test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
@@ -207,13 +241,17 @@ test("extra args reject the flags that decide identity and permissions", (t) => 
     "--dangerously-skip-permissions",
     "--permission-mode=bypassPermissions",
     "--resume",
+    // 白名单管的是「会话建在哪个目录」，这些旗标能把别的目录拉进来。
+    "--add-dir /tmp/extra",
+    "--add-dir=/tmp/extra",
+    "--mcp-config /tmp/mcp.json",
+    "--allowedTools Bash",
   ]) {
     assert.throws(() => h.manager.create({ path: h.repo, args: [flag] }), /启动参数不接受/);
   }
   assert.equal(h.spawns.length, 0);
-  h.manager.create({ path: h.repo, args: ["--add-dir /tmp/extra"] });
-  const args = h.spawns[0].args;
-  assert.equal(args[args.indexOf("--add-dir") + 1], "/tmp/extra");
+  h.manager.create({ path: h.repo, args: ["--verbose"] });
+  assert.ok(h.spawns[0].args.includes("--verbose"));
 });
 
 test("setAllowBypassPermissions rewrites hosted.json and takes effect at once", (t) => {

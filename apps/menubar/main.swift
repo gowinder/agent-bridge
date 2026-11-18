@@ -1079,7 +1079,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 命令执行不受目录限制，唯一一道防线是使用者知道自己在开什么：连过三次确认才真开。
     private func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?, confirmed: Bool = false) {
         if capability == "terminal", enabled, !confirmed {
-            confirmTerminal()
+            confirmTerminal(ttlSeconds: ttlSeconds)
             return
         }
         Task {
@@ -1093,7 +1093,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 三步警告；任一步点取消就什么都不改（设置页的开关会被 refresh 恢复到实际状态）。
-    private func confirmTerminal(step: Int = 1) {
+    private func confirmTerminal(ttlSeconds: Double?, step: Int = 1) {
         let warnings: [(String, String)] = [
             (
                 T("开启远程命令执行（1/3）"),
@@ -1121,10 +1121,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         if step >= warnings.count {
-            setDevtools(capability: "terminal", enabled: true, ttlSeconds: nil, confirmed: true)
+            // 一定要把 ttl 带过去：菜单里的「开启 1 / 8 / 24 小时」就是靠它自动关闭，
+            // 这里丢掉就成了「点了 1 小时，实际永久开启」。
+            setDevtools(capability: "terminal", enabled: true, ttlSeconds: ttlSeconds, confirmed: true)
             return
         }
-        confirmTerminal(step: step + 1)
+        confirmTerminal(ttlSeconds: ttlSeconds, step: step + 1)
     }
 
     @objc private func copyPairLink() {
