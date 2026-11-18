@@ -27,6 +27,8 @@ import type {
   MessageQuestion,
   MessageRecord,
   MessageSendResult,
+  SessionTokens,
+  TokenUsage,
   MessageTextResult,
   Method,
   ModelOption,
@@ -4714,6 +4716,8 @@ interface ChatState {
   /** The latest turn was stopped by the user. */
   interrupted: boolean;
   context?: ContextUsage;
+  /** 整个会话的 token 累计与每轮明细；客户端没上报时没有。 */
+  tokens?: SessionTokens;
   /** 客户端报告的斜杠命令与技能（名字不带斜杠），输入「/」时提示。 */
   slashCommands?: string[];
   /** 「停止」按钮：只在 Bridge 托管的会话且回合还在跑时出现。 */
@@ -6022,6 +6026,7 @@ function paintRail(state: RailState, result: SessionRailResult): void {
   state.body.replaceChildren(
     railSection(tr("环境"), result.environment.map(railRow)),
     railSection(tr("上下文"), [railContext(result.context)]),
+    railSection(tr("用量"), [railTokens(result.tokens)], result.tokens?.turns.length),
     railSection(
       tr("连接器"),
       result.servers.length > 0
@@ -6607,6 +6612,76 @@ function railContext(context: ContextUsage | undefined): HTMLElement {
   return wrap;
 }
 
+/** Claude 的 input_tokens 只统计没命中缓存的部分，用户想看的「输入」是三者之和。 */
+function totalInput(usage: TokenUsage): number {
+  return usage.input + usage.cacheWrite + usage.cacheRead;
+}
+
+function turnUsageOf(tokens: SessionTokens | undefined, messageId: string): TokenUsage | undefined {
+  return tokens?.turns.find((turn) => turn.messageId === messageId)?.usage;
+}
+
+function turnUsageRow(usage: TokenUsage): HTMLElement {
+  const item = (label: string, value: number): HTMLElement =>
+    el("span", { className: "turn-usage-item" }, [
+      el("span", { className: "turn-usage-label", text: label }),
+      el("strong", { text: formatTokens(value) }),
+    ]);
+  return el("div", { className: "turn-usage" }, [
+    el("span", { className: "turn-usage-tag", text: tr("本轮") }),
+    item(tr("输入"), totalInput(usage)),
+    item(tr("缓存命中"), usage.cacheRead),
+    item(tr("输出"), usage.output),
+  ]);
+}
+
+function railTokens(tokens: SessionTokens | undefined): HTMLElement {
+  if (!tokens) return el("p", { className: "rail-empty", text: tr("这个会话还没有 token 用量") });
+  const wrap = el("div", { className: "rail-tokens" });
+  const rows: Array<[string, number]> = [
+    [tr("输入"), totalInput(tokens)],
+    [tr("缓存命中"), tokens.cacheRead],
+    [tr("缓存写入"), tokens.cacheWrite],
+    [tr("输出"), tokens.output],
+  ];
+  for (const [label, value] of rows) {
+    wrap.append(
+      el("div", { className: "rail-token-row" }, [
+        el("span", { className: "rail-label", text: label }),
+        el("strong", { className: "rail-token-value", text: formatTokens(value) }),
+      ]),
+    );
+  }
+  if (tokens.turns.length > 0) {
+    const details = el("details", { className: "rail-turns" });
+    details.append(
+      el("summary", { text: tr("每轮明细（{0}）", tokens.turns.length) }),
+    );
+    const table = el("div", { className: "rail-turn-table" });
+    table.append(
+      el("div", { className: "rail-turn-head" }, [
+        el("span", { text: "" }),
+        el("span", { text: tr("输入") }),
+        el("span", { text: tr("命中") }),
+        el("span", { text: tr("输出") }),
+      ]),
+    );
+    tokens.turns.forEach((turn, index) => {
+      table.append(
+        el("div", { className: "rail-turn-row" }, [
+          el("span", { className: "rail-turn-index", text: String(index + 1) }),
+          el("span", { text: formatTokens(totalInput(turn.usage)) }),
+          el("span", { text: formatTokens(turn.usage.cacheRead) }),
+          el("span", { text: formatTokens(turn.usage.output) }),
+        ]),
+      );
+    });
+    details.append(table);
+    wrap.append(details);
+  }
+  return wrap;
+}
+
 function railTasks(state: RailState, tasks: RailTask[]): Node[] {
   if (tasks.length === 0) {
     return [
@@ -6710,6 +6785,8 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
     } else if (compactChanged) {
       paintContext(state);
     }
+    // 无条件覆盖：客户端换了会话或没上报用量时，旧数字不能留着。
+    state.tokens = result.tokens;
     if (result.slashCommands) state.slashCommands = result.slashCommands;
     state.paintReset?.();
     const busyChanged = (result.busy === true) !== state.busy;
@@ -8100,6 +8177,8 @@ function renderMessages(state: ChatState): void {
   }
   const folded = state.folded ?? (state.folded = new Set<string>());
   let turn: MessageRecord[] = [];
+  /** 当前回合的首条用户消息 id；用量按它去 tokens.turns 里找。 */
+  let turnId = "";
   const lastMessage = state.messages[state.messages.length - 1];
   const canAct = state.session.canSend && !state.busy && !state.interrupted && state.queued.length === 0;
   const flush = (): void => {
@@ -8114,6 +8193,9 @@ function renderMessages(state: ChatState): void {
         folded,
       ),
     );
+    // 回合末尾补一行用量：整轮加起来比逐条更接近「这轮花了多少」。
+    const usage = turnUsageOf(state.tokens, turnId || turn[0]?.messageId || "");
+    if (usage) list.append(turnUsageRow(usage));
     turn = [];
   };
   for (const message of state.messages) {
@@ -8123,6 +8205,7 @@ function renderMessages(state: ChatState): void {
     }
     flush();
     list.append(messageBubble(state.session, message, folded));
+    turnId = message.messageId;
   }
   flush();
   appendQueued();

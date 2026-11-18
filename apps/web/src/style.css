@@ -2153,6 +2153,81 @@ details[open] > .dock-project-head::before {
   font-size: 12px;
 }
 
+.rail-tokens {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  font-size: 12.5px;
+}
+
+.rail-token-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rail-token-value {
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-turns {
+  margin-top: 4px;
+}
+
+.rail-turns > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 11.5px;
+  list-style: none;
+}
+
+.rail-turns > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rail-turns > summary::before {
+  content: "›";
+  display: inline-block;
+  margin-right: 5px;
+  transition: transform 0.15s ease;
+}
+
+.rail-turns[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.rail-turn-table {
+  display: grid;
+  grid-template-columns: 20px 1fr 1fr 1fr;
+  gap: 3px 6px;
+  margin-top: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.rail-turn-head,
+.rail-turn-row {
+  display: contents;
+}
+
+.rail-turn-head {
+  color: var(--muted);
+}
+
+.rail-turn-head > span:not(:first-child) {
+  text-align: right;
+}
+
+.rail-turn-index {
+  color: var(--muted);
+  text-align: right;
+}
+
+.rail-turn-row > span:not(.rail-turn-index) {
+  text-align: right;
+}
+
 .rail-meter {
   height: 5px;
   border-radius: 999px;
@@ -3497,6 +3572,40 @@ body.has-file-preview {
   color: var(--muted);
   font-family: var(--font-sans);
   font-size: 11px;
+}
+
+/* 每个回合末尾的 token 用量：一行，次要信息，不抢正文的注意力。 */
+.turn-usage {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 14px;
+  margin: 2px 0 0;
+  padding-top: 9px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.turn-usage-tag {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.turn-usage-item {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-usage-label {
+  color: var(--muted);
+}
+
+.turn-usage strong {
+  color: var(--text);
+  font-weight: 600;
 }
 
 .turn-step-body {
