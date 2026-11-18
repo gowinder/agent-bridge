@@ -4573,6 +4573,8 @@ interface ChatState {
   slashCommands?: string[];
   /** 「停止」按钮：只在 Bridge 托管的会话且回合还在跑时出现。 */
   stopButton?: HTMLButtonElement;
+  /** 拿到 slashCommands 之后才知道客户端支不支持 /clear：重新决定「清空历史」显不显示。 */
+  paintReset?: () => void;
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
@@ -4764,10 +4766,48 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     sendButton.disabled = uploading || (input.value.trim().length === 0 && ready === 0);
   }
 
+  /**
+   * 「清空历史开始对话」：只在客户端明确支持 /clear 时才出现（托管 Claude 会把
+   * slash_commands 报上来），否则勾了也发不出去。勾选只对这一次发送生效，
+   * 发完自动收回，免得下次误清。
+   */
+  const resetToggle = el("input", { attrs: { type: "checkbox", "aria-label": tr("清空历史开始对话") } });
+  const resetLabel = el("label", { className: "composer-reset", attrs: { title: tr("先发送 /clear，再发这条") } }, [
+    resetToggle,
+    el("span", { className: "composer-reset-text", text: tr("清空历史开始对话") }),
+  ]);
+  resetLabel.hidden = true;
+
+  function paintResetToggle(): void {
+    const supported = (state.slashCommands ?? []).includes("clear") && canSend;
+    resetLabel.hidden = !supported;
+    if (!supported) resetToggle.checked = false;
+  }
+  state.paintReset = paintResetToggle;
+
   const submit = (): void => {
     if (sendButton.disabled) return;
-    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
+    void submitWithOptionalReset();
   };
+
+  async function submitWithOptionalReset(): Promise<void> {
+    if (!resetLabel.hidden && resetToggle.checked) {
+      sendButton.disabled = true;
+      status.classList.remove("error");
+      status.textContent = tr("正在清空会话历史…");
+      try {
+        await call<MessageSendResult>("message.send", { sessionId: state.session.sessionId, text: "/clear" }, 60_000);
+      } catch (error) {
+        status.classList.add("error");
+        status.textContent = messageOf(error);
+        updateSendState();
+        return;
+      }
+      resetToggle.checked = false;
+    }
+    await sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
+  }
+
   const sendButton = button(tr("发送"), submit, "btn primary");
   sendButton.disabled = !canSend;
 
@@ -4867,6 +4907,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       refreshButton,
       contextButton,
       stopButton,
+      resetLabel,
       sendButton,
       collapseButton,
     ]),
@@ -6525,6 +6566,7 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
       paintContext(state);
     }
     if (result.slashCommands) state.slashCommands = result.slashCommands;
+    state.paintReset?.();
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
