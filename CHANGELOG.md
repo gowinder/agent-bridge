@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.11.4-rc.15] - 2026-11-18
+
 ### Added
 
 - 执行过程里每一步优先显示工具自己写的一句话说明（Claude Code 的 Bash `description`、Codex 的 `justification`），点开这一步才是具体命令 —— 和 Claude 桌面版一样能直接看出「这一步在做什么」。没有自带说明的工具仍然显示「动作标签 + 目标」（如「读取 AGENTS.md」）。
