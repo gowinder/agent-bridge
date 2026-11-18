@@ -317,7 +317,6 @@ export const EN: Record<string, string> = {
   "填 1 到 100 之间的整数（百分比）": "Enter a whole number between 1 and 100 (percent)",
   填到输入框: "Put it in the composer",
   展开查看全文: "Tap to show the full text",
-  收起: "Collapse",
   "填这台 Mac 上已存在的绝对路径，添加后即可从这里新建托管会话。":
     "Enter an absolute path that exists on this Mac; once added you can start hosted sessions from here.",
   复制全文: "Copy full text",
