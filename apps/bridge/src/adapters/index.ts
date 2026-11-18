@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AdminHostedConfig } from "../admin.js";
 import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
@@ -97,35 +98,21 @@ export class SessionAdapters {
   }
 
   /** 设置界面看到的托管配置，对应状态目录里的 hosted.json。 */
-  hostedConfig(): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
-    const info = this.hostedManager.configForClient();
-    return {
-      allowBypassPermissions: info.allowBypassPermissions,
-      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
-      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
-      idleTimeoutMs: info.idleTimeoutMs,
-    };
+  hostedConfig(): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.configForClient());
   }
 
-  setHostedAllowBypass(enabled: boolean): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
-    const info = this.hostedManager.setAllowBypassPermissions(enabled);
-    return {
-      allowBypassPermissions: info.allowBypassPermissions,
-      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
-      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
-      idleTimeoutMs: info.idleTimeoutMs,
-    };
+  setHostedAllowBypass(enabled: boolean): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.setAllowBypassPermissions(enabled));
   }
 
   /** 整份替换托管白名单，只给本机 admin 接口用。 */
-  setHostedDirs(dirs: string[]): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
-    const info = this.hostedManager.setDirs(dirs);
-    return {
-      allowBypassPermissions: info.allowBypassPermissions,
-      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
-      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
-      idleTimeoutMs: info.idleTimeoutMs,
-    };
+  setHostedDirs(dirs: string[]): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.setDirs(dirs));
+  }
+
+  private hostedSummary(info: HostedDirsResult): AdminHostedConfig {
+    return summarizeHostedDirs(info);
   }
 
   hostedOptions(): HostedOptionsResult {
@@ -514,6 +501,20 @@ function demote(
 ): SessionListResult["completeness"] {
   const rank = { complete: 0, partial: 1, unknown: 2, unavailable: 3 } as const;
   return rank[next] > rank[current] ? next : current;
+}
+
+/**
+ * 设置界面要看的白名单：只剩历史会话的目录不列出来（它们本来就不能新建，
+ * 菜单栏整份写回时混进去等于重新授权）。
+ */
+export function summarizeHostedDirs(info: HostedDirsResult): AdminHostedConfig {
+  return {
+    allowBypassPermissions: info.allowBypassPermissions,
+    dirs: info.dirs
+      .filter((dir) => dir.allowed !== false)
+      .map((dir) => ({ path: dir.path, exists: dir.exists, sessionCount: dir.sessionCount })),
+    idleTimeoutMs: info.idleTimeoutMs,
+  };
 }
 
 export type { AppInfo };

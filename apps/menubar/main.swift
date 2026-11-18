@@ -56,11 +56,49 @@ struct ReceivedMessage: Decodable {
     let text: String
 }
 
+/// 白名单里的一个托管目录。
+struct HostedDir: Decodable {
+    let path: String
+    /// false = 目录已经被删掉了，记录还留着（可以移除）。
+    let exists: Bool
+    /// 用这个目录的托管会话数。
+    let sessionCount: Int
+
+    /// 老 Bridge 的 `/hosted` 给的是路径字符串数组，读出来当「存在、0 个会话」，设定页不至于空掉。
+    init(from decoder: Decoder) throws {
+        if let single = try? decoder.singleValueContainer(), let path = try? single.decode(String.self) {
+            self.init(path: path, exists: true, sessionCount: 0)
+            return
+        }
+        let keyed = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            path: try keyed.decode(String.self, forKey: .path),
+            exists: try keyed.decodeIfPresent(Bool.self, forKey: .exists) ?? true,
+            sessionCount: try keyed.decodeIfPresent(Int.self, forKey: .sessionCount) ?? 0
+        )
+    }
+
+    init(path: String, exists: Bool, sessionCount: Int) {
+        self.path = path
+        self.exists = exists
+        self.sessionCount = sessionCount
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case path, exists, sessionCount
+    }
+}
+
 /// 托管会话的设定，对应状态目录里的 hosted.json。
 struct HostedConfig: Decodable {
     let allowBypassPermissions: Bool
-    let dirs: [String]
+    let dirs: [HostedDir]
     let idleTimeoutMs: Double
+}
+
+/// 从上往下排的容器。设定页内容比窗口高，滚动时非 flipped 的 documentView 会贴着底边显示。
+final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }
 
 struct Snapshot: Decodable {
@@ -479,7 +517,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsStateDirLabel: NSTextField?
     private var settingsPortLabel: NSTextField?
     private var settingsBypassSwitch: NSSwitch?
-    private var settingsDirsLabel: NSTextField?
+    private var settingsDirsDoc: FlippedView?
     private var settingsAddDirButton: NSButton?
     private var settingsImportDirsButton: NSButton?
     private var settingsIdleLabel: NSTextField?
@@ -1391,7 +1429,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tabs.autoresizingMask = [.width, .height]
         let general = NSTabViewItem(identifier: "general")
         general.label = T("常规")
-        general.view = buildGeneralTab(size: NSSize(width: width, height: height - 40))
+        let settingsSize = NSSize(width: width, height: height - 40)
+        let (settingsContent, settingsHeight) = buildGeneralTab(size: settingsSize)
+        let settingsScroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: width, height: height - 40))
+        settingsScroll.hasVerticalScroller = true
+        settingsScroll.autohidesScrollers = true
+        settingsScroll.drawsBackground = false
+        settingsScroll.autoresizingMask = [.width, .height]
+        settingsContent.frame = NSRect(
+            x: 0, y: 0, width: width, height: max(settingsHeight, settingsSize.height)
+        )
+        settingsScroll.documentView = settingsContent
+        general.view = settingsScroll
         let log = NSTabViewItem(identifier: "log")
         log.label = T("日志")
         log.view = buildLogTab(size: NSSize(width: width, height: height - 40))
@@ -1418,26 +1467,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return label
     }
 
-    private func buildGeneralTab(size: NSSize) -> NSView {
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height))
-        view.autoresizingMask = [.width, .height]
+    /// 内容高度超过窗口时整页滚动，所以坐标从上往下累加（配合 `FlippedView`）。
+    private func buildGeneralTab(size: NSSize) -> (view: NSView, height: CGFloat) {
+        let view = FlippedView(frame: NSRect(x: 0, y: 0, width: size.width, height: size.height))
+        view.autoresizingMask = [.width]
         let margin: CGFloat = 24
         let labelWidth: CGFloat = 128
         let valueX = margin + labelWidth + 12
         let valueWidth = size.width - valueX - margin
-        var y = size.height - 16
+        var y: CGFloat = 16
 
         func take(_ height: CGFloat, gap: CGFloat = 8) -> CGFloat {
-            y -= height
-            let origin = y
-            y -= gap
-            return origin
+            let top = y
+            y += height + gap
+            return top
         }
         func section(_ title: String) {
-            let rule = NSBox(frame: NSRect(x: margin, y: y + 4, width: size.width - margin * 2, height: 1))
+            let rule = NSBox(frame: NSRect(x: margin, y: y, width: size.width - margin * 2, height: 1))
             rule.boxType = .separator
             view.addSubview(rule)
-            y -= 20
+            y += 12
             let label = NSTextField(labelWithString: title)
             label.font = .systemFont(ofSize: 11, weight: .semibold)
             label.textColor = .secondaryLabelColor
@@ -1520,9 +1569,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section(T("托管会话"))
         settingsBypassSwitch = toggle(T("允许 bypassPermissions（跳过权限确认）"), #selector(toggleBypass(_:)))
         hint(T("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。"))
-        settingsDirsLabel = valueLabel("…", mono: true)
-        row(T("托管目录"), settingsDirsLabel!)
         // 白名单只能在这台机器上改：远程设备连「加目录」的入口都没有。
+        let dirsCaption = NSTextField(labelWithString: T("托管目录"))
+        dirsCaption.font = .systemFont(ofSize: 12)
+        dirsCaption.textColor = .secondaryLabelColor
+        dirsCaption.alignment = .right
+        dirsCaption.lineBreakMode = .byTruncatingTail
+        let dirsTop = take(84, gap: 8)
+        dirsCaption.frame = NSRect(x: margin, y: dirsTop + 1, width: labelWidth, height: 16)
+        view.addSubview(dirsCaption)
+        let dirsScroll = NSScrollView(frame: NSRect(x: valueX, y: dirsTop, width: valueWidth, height: 84))
+        dirsScroll.hasVerticalScroller = true
+        dirsScroll.autohidesScrollers = true
+        dirsScroll.borderType = .bezelBorder
+        dirsScroll.drawsBackground = false
+        let dirsDoc = FlippedView(frame: NSRect(x: 0, y: 0, width: valueWidth - 2, height: 84))
+        dirsDoc.autoresizingMask = [.width]
+        dirsScroll.documentView = dirsDoc
+        view.addSubview(dirsScroll)
+        settingsDirsDoc = dirsDoc
         let dirButtonsY = take(22, gap: 6)
         let addDir = NSButton(title: T("添加目录…"), target: self, action: #selector(addHostedDir))
         addDir.bezelStyle = .rounded
@@ -1558,7 +1623,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             hint(TF(T("装在预览版 v%@：关着只升 rc；勾选后正式版也会提示并安装。"), Updater.currentVersion), height: 16)
         }
 
-        return view
+        return (view, y + 8)
     }
 
     private func buildLogTab(size: NSSize) -> NSView {
@@ -1682,15 +1747,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if let hosted = hostedConfig {
             settingsBypassSwitch?.state = hosted.allowBypassPermissions ? .on : .off
-            settingsDirsLabel?.stringValue = hosted.dirs.isEmpty
-                ? T("（没有可用的托管目录）")
-                : hosted.dirs.joined(separator: "、")
-            settingsDirsLabel?.toolTip = hosted.dirs.joined(separator: "\n")
+            renderHostedDirs(hosted.dirs)
             settingsIdleLabel?.stringValue = TF(T("%d 分钟"), Int((hosted.idleTimeoutMs / 60_000).rounded()))
         } else {
             settingsBypassSwitch?.state = .off
-            settingsDirsLabel?.stringValue = reachable ? T("读取中…") : T("Bridge 未运行，无法读取")
-            settingsDirsLabel?.toolTip = nil
+            renderHostedDirs(nil)
             settingsIdleLabel?.stringValue = ""
         }
         settingsBypassSwitch?.isEnabled = reachable && hostedConfig != nil
@@ -1739,6 +1800,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// 托管目录列表：一行一个目录，右边是「移除」；`nil` 表示还没读到。
+    private func renderHostedDirs(_ dirs: [HostedDir]?) {
+        guard let doc = settingsDirsDoc else { return }
+        for sub in doc.subviews { sub.removeFromSuperview() }
+        let width = doc.superview?.bounds.width ?? doc.frame.width
+        doc.frame.size.width = width
+        let rowHeight: CGFloat = 26
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        guard let dirs, !dirs.isEmpty else {
+            let text = dirs == nil
+                ? (reachable ? T("读取中…") : T("Bridge 未运行，无法读取"))
+                : T("（还没有托管目录）")
+            let empty = NSTextField(labelWithString: text)
+            empty.font = .systemFont(ofSize: 11)
+            empty.textColor = .tertiaryLabelColor
+            empty.frame = NSRect(x: 8, y: 8, width: width - 16, height: 16)
+            doc.addSubview(empty)
+            doc.frame.size.height = max(doc.superview?.bounds.height ?? 84, 84)
+            return
+        }
+        for (index, dir) in dirs.enumerated() {
+            let row = NSView(frame: NSRect(x: 0, y: CGFloat(index) * rowHeight, width: width, height: rowHeight))
+            let shown = dir.path.hasPrefix(home + "/") ? "~" + dir.path.dropFirst(home.count) : dir.path
+            let name = NSTextField(labelWithString: shown)
+            name.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            name.lineBreakMode = .byTruncatingMiddle
+            name.toolTip = dir.path
+            name.frame = NSRect(x: 8, y: 5, width: width - 190, height: 16)
+            row.addSubview(name)
+
+            let facts = NSTextField(labelWithString: dir.exists
+                ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
+                : T("目录已删除"))
+            facts.font = .systemFont(ofSize: 11)
+            facts.textColor = dir.exists ? .secondaryLabelColor : .systemOrange
+            facts.alignment = .right
+            facts.lineBreakMode = .byTruncatingTail
+            facts.frame = NSRect(x: width - 190, y: 5, width: 104, height: 16)
+            row.addSubview(facts)
+
+            let remove = NSButton(title: T("移除"), target: self, action: #selector(removeHostedDir(_:)))
+            remove.bezelStyle = .rounded
+            remove.controlSize = .mini
+            remove.font = .systemFont(ofSize: 11)
+            remove.identifier = NSUserInterfaceItemIdentifier(dir.path)
+            remove.toolTip = T("从托管白名单移除（已有会话不受影响）")
+            remove.frame = NSRect(x: width - 76, y: 3, width: 64, height: 18)
+            row.addSubview(remove)
+
+            doc.addSubview(row)
+        }
+        doc.frame.size.height = max(CGFloat(dirs.count) * rowHeight + 4, 84)
+    }
+
+    /// 把一个目录移出白名单；已有会话保留，只是不能再从这里新建。
+    @objc private func removeHostedDir(_ sender: NSButton) {
+        guard let path = sender.identifier?.rawValue, !path.isEmpty else { return }
+        let remaining = (hostedConfig?.dirs ?? []).map(\.path).filter { $0 != path }
+        guard remaining.count != (hostedConfig?.dirs.count ?? 0) else { return }
+        Task {
+            do {
+                hostedConfig = try await client.setHostedDirs(remaining)
+                renderSettings()
+                // 白名单变了，网页的工程列表也得跟着刷新。
+                snapshot = nil
+                await refresh()
+            } catch {
+                alert(T("保存白名单失败"), error.localizedDescription)
+                renderSettings()
+            }
+        }
+    }
+
     /// 添加托管目录：只收这台机器上真实存在的目录，加进去后网页才能在那里建会话。
     @objc private func addHostedDir() {
         let panel = NSOpenPanel()
@@ -1750,7 +1884,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         panel.message = T("选中的目录会加入托管白名单：远程设备只能在这些目录里新建会话。")
         // 从已有白名单里挑一个当起点：面板一开就列 home 的话，桌面/文档/下载/外置磁盘
         // 会被逐个读一遍，系统就挨个弹授权。
-        if let first = hostedConfig?.dirs.first {
+        if let first = hostedConfig?.dirs.first?.path {
             panel.directoryURL = URL(fileURLWithPath: first, isDirectory: true)
         }
         guard panel.runModal() == .OK else { return }
@@ -1779,7 +1913,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 合并进现有白名单再整份写回；已经有的不重复加，一个都没多就不打扰。
     private func applyHostedDirs(adding more: [String]) {
-        let existing = hostedConfig?.dirs ?? []
+        let existing = (hostedConfig?.dirs ?? []).map(\.path)
         var merged = existing
         for path in more where !merged.contains(path) { merged.append(path) }
         guard merged.count != existing.count else {
