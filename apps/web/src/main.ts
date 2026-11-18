@@ -73,6 +73,7 @@ import {
 } from "./credentials.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
+import { stepView } from "./tool-steps.js";
 import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
 import { PeerError, type PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
@@ -6548,12 +6549,7 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
   }
 }
 
-function stepTitle(text: string): string {
-  const line = (text.split("\n")[0] ?? "").trim();
-  return line.length > 76 ? `${line.slice(0, 76)}…` : line || tr("过程");
-}
-
-function processFold(steps: string[]): HTMLDetailsElement {
+function processFold(steps: MessageBlock[]): HTMLDetailsElement {
   const fold = el("details", { className: "turn-steps" });
   fold.append(
     el("summary", { className: "turn-steps-summary" }, [
@@ -6563,15 +6559,17 @@ function processFold(steps: string[]): HTMLDetailsElement {
     el(
       "div",
       { className: "turn-steps-body" },
-      steps.map((text) => {
+      steps.map((block) => {
+        const view = stepView(block);
         const step = el("details", { className: "turn-step" });
-        step.append(
-          el("summary", { className: "turn-step-summary" }, [
-            icon("chevron", "icon turn-step-chev"),
-            el("span", { className: "turn-step-title", text: stepTitle(text) }),
-          ]),
-          el("div", { className: "turn-step-body", text }),
-        );
+        const summary = el("summary", { className: "turn-step-summary" }, [
+          icon("chevron", "icon turn-step-chev"),
+        ]);
+        if (view.label) summary.append(el("span", { className: "turn-step-tag", text: tr(view.label) }));
+        summary.append(el("span", { className: "turn-step-title", text: view.detail || tr("过程") }));
+        const body = el("div", { className: "turn-step-body", text: view.body });
+        if (block.truncated) body.append(el("span", { className: "turn-step-note", text: tr("…（已截断）") }));
+        step.append(summary, body);
         return step;
       }),
     ),
@@ -7768,7 +7766,7 @@ function assistantTurn(
   folded?: Set<string> | null,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
-  const steps: string[] = [];
+  const steps: MessageBlock[] = [];
   const nextSteps: MessageBlock[] = [];
   let peer = false;
   let lastText: MessageRecord | undefined;
@@ -7783,7 +7781,7 @@ function assistantTurn(
       } else if (block.type === "ask") {
         continue;
       } else {
-        steps.push(block.truncated ? tr(`{0}\n…（已截断）`, block.text) : block.text);
+        steps.push(block);
       }
     }
     if (hasText) lastText = message;

@@ -3479,6 +3479,26 @@ body.has-file-preview {
   white-space: nowrap;
 }
 
+/* 折叠态的动作标签（运行 / 读取 / 编辑…）：中文用正文字体，别跟着等宽走。 */
+.turn-step-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.turn-step-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
 .turn-step-body {
   padding: 0 10px 9px;
   font-family: var(--font-mono);
