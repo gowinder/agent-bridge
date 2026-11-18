@@ -3563,6 +3563,33 @@ body.has-file-preview {
   display: none;
 }
 
+/* 「清空历史开始对话」：贴在发送键左边的勾选框，只在客户端支持 /clear 时出现。 */
+.composer-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.composer-reset[hidden] {
+  display: none;
+}
+
+.composer-reset:hover {
+  color: var(--text);
+}
+
+.composer-reset input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .composer-input {
   min-width: 0;
   border-color: transparent;
@@ -4507,6 +4534,11 @@ body.has-file-preview {
 }
 
 @media (max-width: 720px) {
+  /* 手机上第二行排不下整句话，只留勾选框（title 里仍有说明）。 */
+  .composer-reset-text {
+    display: none;
+  }
+
   .brand-name,
   .craftstead-name,
   .conn {
