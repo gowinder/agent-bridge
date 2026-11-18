@@ -16,12 +16,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DEFAULT_COMPACTION_TRIGGER_PERCENT } from "@craftstead/protocol";
 import type {
   ContextUsage,
   HostedAgent,
   HostedAgentOption,
+  HostedCreateDefaults,
   HostedCreateParams,
   HostedDirInfo,
   HostedDirsResult,
@@ -42,6 +43,7 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText } from "../adapters/types.js";
+import { toolSummaryOf } from "../tool-summary.js";
 import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js";
 import { effortLevels } from "../effort.js";
 import { modelCatalog } from "../model-catalog.js";
@@ -70,6 +72,9 @@ const TRANSCRIPT_TAIL_BYTES = 262_144;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$/;
 /** pi 的思考等级（`pi --thinking` 与 pi-subagents 的 `thinking` 同一套，从低到高）。 */
 const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/** 托管白名单最多这么多个目录：多到这份上说明是没整理过的清单，容易点错。 */
+const MAX_HOSTED_DIRS = 64;
 /** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
 const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
@@ -103,6 +108,15 @@ const BLOCKED_EXTRA_ARGS = new Set([
   "--dangerously-skip-permissions",
   // settings 文件里能写 permissions.allow 和 hooks，等于绕过上面的模式门禁。
   "--settings",
+  // 这组能把白名单之外的目录拉进工作区、或换一套 MCP / 工具配置：
+  // 白名单管的是「能建在哪」，这些旗标一放，目录边界就没了。
+  "--add-dir",
+  "--mcp-config",
+  "--allowedTools",
+  "--allowed-tools",
+  "--disallowedTools",
+  "--disallowed-tools",
+  "--append-system-prompt",
 ]);
 
 /** pi 这边同理：会话身份、协议模式与信任开关由 Bridge 决定。 */
@@ -188,6 +202,8 @@ export function remoteHostedModes(allowBypassPermissions: boolean): HostedPermis
 export interface HostedConfig {
   /** Directories allowed to host sessions. Absolute paths after `~` expansion. */
   dirs: string[];
+  /** 上一次新建托管会话用的选项：网页下次打开新建面板时据此预填。 */
+  lastCreate?: HostedCreateDefaults;
   idleTimeoutMs: number;
   /** 是否允许托管会话使用 bypassPermissions；默认 false。 */
   allowBypassPermissions: boolean;
@@ -364,6 +380,7 @@ export class HostedSessionManager {
         name: basename(path) || path,
         sessionCount: [...this.records.values()].filter((record) => record.cwd === path).length,
         exists,
+        allowed: true,
       });
       seen.add(path);
     }
@@ -375,6 +392,7 @@ export class HostedSessionManager {
         name: basename(record.cwd) || record.cwd,
         sessionCount: [...this.records.values()].filter((item) => item.cwd === record.cwd).length,
         exists: false,
+        allowed: false,
       });
       seen.add(record.cwd);
     }
@@ -384,6 +402,7 @@ export class HostedSessionManager {
       idleTimeoutMs: this.config.idleTimeoutMs,
       permissionModes: this.remotePermissionModes(),
       allowBypassPermissions: this.config.allowBypassPermissions,
+      ...(this.config.lastCreate ? { lastCreate: this.config.lastCreate } : {}),
     };
     if (!result.enabled) {
       result.note = `尚未配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`;
@@ -396,17 +415,20 @@ export class HostedSessionManager {
     this.config = readConfig(this.stateDir);
   }
 
-  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
-  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+  /**
+   * 读盘、改几个键、写回：运行中手改过 hosted.json（还没重启）时，不会被内存里的旧配置冲掉。
+   * 只用于「顺手记一下」的改动；改 dirs 这类设置仍走 writeConfig。
+   */
+  private patchConfigFile(patch: Record<string, unknown>): void {
     const path = join(this.stateDir, "hosted.json");
     let raw: Record<string, unknown> = {};
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
       if (isRecord(parsed)) raw = parsed;
     } catch {
-      // 没有文件或内容坏了：按只有这一项的新配置写。
+      // 没有文件或内容坏了：按只有这几项的新配置写。
     }
-    raw["allowBypassPermissions"] = enabled;
+    Object.assign(raw, patch);
     try {
       mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
       const tmp = `${path}.tmp`;
@@ -418,35 +440,58 @@ export class HostedSessionManager {
         `写入 hosted.json 失败：${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  /** 只改 allowBypassPermissions，其余键原样保留；写盘后立即生效。 */
+  setAllowBypassPermissions(enabled: boolean): HostedDirsResult {
+    this.patchConfigFile({ allowBypassPermissions: enabled });
     this.reloadConfig();
     return this.configForClient();
   }
 
-  /** 把目录加进托管白名单：只收已存在的绝对路径，重复添加是幂等的。 */
-  addDir(input: string): HostedDirsResult {
-    const target = this.normalizeDir(input);
-    if (!isDirectory(target)) throw new RpcError("invalid_params", `目录不存在：${target}`);
-    const known = this.config.dirs.map((dir) => canonical(expandHome(dir)) ?? resolve(expandHome(dir)));
-    if (!known.includes(target)) {
-      this.config = { ...this.config, dirs: [...this.config.dirs, target] };
+  /**
+   * 整份替换托管白名单。只给本机 admin 接口用：远程设备不能让白名单多出目录，
+   * 否则「只有白名单里的目录能建会话」这层限制等于没有。
+   */
+  setDirs(input: string[]): HostedDirsResult {
+    const dirs: string[] = [];
+    const current = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
+    for (const item of input) {
+      const raw = String(item ?? "").trim();
+      if (!raw) continue;
+      const target = this.normalizeDir(raw);
+      if (!isDirectory(target)) {
+        // 已经在白名单里的目录被删了：跳过，不要让整份写入失败。否则只要留着一个
+        // 早已删掉的旧目录，「添加目录」就永远报错，而界面上没有移除入口。
+        if (current.has(this.compareDir(target))) {
+          this.log(`hosted: 跳过已不存在的托管目录 ${target}`);
+          continue;
+        }
+        throw new RpcError("invalid_params", `目录不存在：${target}`);
+      }
+      if (!dirs.includes(target)) dirs.push(target);
+    }
+    if (dirs.length > MAX_HOSTED_DIRS) {
+      throw new RpcError("invalid_params", `托管目录最多 ${MAX_HOSTED_DIRS} 个`);
+    }
+    if (dirs.join("\n") !== this.config.dirs.join("\n")) {
+      this.config = { ...this.config, dirs };
       this.writeConfig();
-      this.log(`hosted: 允许托管目录 ${target}`);
+      this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
     }
     return this.configForClient();
   }
 
-  /** 移出白名单：已有会话保留，只是不能再从这里新建。目录已被删掉时也允许移除。 */
-  removeDir(input: string): HostedDirsResult {
-    const target = this.normalizeDir(input);
-    const dirs = this.config.dirs.filter(
-      (dir) => (canonical(expandHome(dir)) ?? resolve(expandHome(dir))) !== target,
-    );
-    if (dirs.length !== this.config.dirs.length) {
-      this.config = { ...this.config, dirs };
-      this.writeConfig();
-      this.log(`hosted: 移除托管目录 ${target}`);
+  /**
+   * 目录已经不在时 realpath 会失败，退一步解析父目录：这样 `/var/…` 与 `/private/var/…`
+   * 这类系统性符号链接能对齐，否则「早已删掉、但还在白名单里」的旧目录永远匹配不上。
+   */
+  private compareDir(path: string): string {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return path;
     }
-    return this.configForClient();
   }
 
   /** 统一成绝对路径（~ 展开、存在的路径取 realpath）；不检查目录是否存在。 */
@@ -467,6 +512,7 @@ export class HostedSessionManager {
       idleTimeoutMs: this.config.idleTimeoutMs,
       allowBypassPermissions: this.config.allowBypassPermissions,
       ...(this.config.cliPath ? { cliPath: this.config.cliPath } : {}),
+      ...(this.config.lastCreate ? { lastCreate: this.config.lastCreate } : {}),
     };
     try {
       mkdirSync(this.stateDir, { recursive: true });
@@ -556,7 +602,9 @@ export class HostedSessionManager {
     let end = all.length;
     if (page.before) {
       const index = all.findIndex((message) => message.messageId === page.before);
-      if (index >= 0) end = index;
+      // 找不到游标就报错，别静默退回最新一页：网页那边会以为「加载更早」点了没反应。
+      if (index === -1) throw new RpcError("invalid_params", "未知的分页游标");
+      end = index;
     }
     const start = Math.max(0, end - page.limit);
     // 全文留到 message.text 再给，列表里还是截到 MAX_BLOCK_CHARS：帧大小与渲染成本不变。
@@ -697,6 +745,12 @@ export class HostedSessionManager {
     }
     this.records.set(id, record);
     this.persistRecords();
+    try {
+      this.rememberCreateDefaults(agent, permissionMode, { model, effort, subagentModel, thinking, subagentThinking });
+    } catch (error) {
+      // 记住默认值只是下次新建时省点事：写 hosted.json 失败不该让已经起来的会话看起来创建失败。
+      this.log(`hosted: 记住新建选项失败：${error instanceof Error ? error.message : String(error)}`);
+    }
     this.log(`hosted: created ${id} in ${cwd} (${permissionMode})`);
     return this.summary(record);
   }
@@ -792,9 +846,14 @@ export class HostedSessionManager {
         result.currentName = models.find((item) => item.id === current)?.name ?? current;
       }
       if (record.subagentModel) result.subagentModel = record.subagentModel;
+      if (record.subagentThinking) result.subagentThinking = record.subagentThinking;
+      result.canSwitchThinking = true;
+      result.canSwitchSubagentThinking = true;
+      result.thinkingLevels = [...PI_THINKING_LEVELS];
+      if (record.thinking) result.thinking = record.thinking;
       result.note =
         models.length > 0
-          ? "换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话；子代理模型只影响之后新派生的子代理。"
+          ? "思考等级立刻生效（改回跟随 pi 设置要重启进程）；换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话；子代理的设置只影响之后新派生的子代理。"
           : "pi 的模型清单要等会话跑过一次才拿得到。";
       return result;
     }
@@ -845,29 +904,47 @@ export class HostedSessionManager {
   }
 
   /**
-   * 单独改这个会话派生子代理用的模型（只对 pi 有效）。
+   * 只改这个会话派生子代理用的模型或思考等级（只对 pi 有效）。
    * pi 只在启动时读 settings.json，所以空闲进程要先停掉，下一条消息按新设置重新打开会话；
-   * 已经在跑的子代理不受影响，只有之后新派生的才用新模型。
-   * `value` 传 null 表示改回跟随 pi 自己的设置。
+   * 已经在跑的子代理不受影响，只有之后新派生的才用新设置。
+   * 传 null 表示改回跟随 pi 自己的设置。
    */
   async setSubagentModel(sessionId: string, value: string | null): Promise<SessionSummary> {
+    return this.applySubagentSetting(sessionId, { model: value });
+  }
+
+  /** 子代理的思考等级，语义同 `setSubagentModel`。 */
+  async setSubagentThinking(sessionId: string, value: string | null): Promise<SessionSummary> {
+    return this.applySubagentSetting(sessionId, { thinking: value });
+  }
+
+  private async applySubagentSetting(
+    sessionId: string,
+    patch: { model?: string | null; thinking?: string | null },
+  ): Promise<SessionSummary> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     if (record.agent !== "pi") {
-      throw new RpcError("unsupported", "只有 pi 托管会话可以单独设置子代理模型");
+      throw new RpcError("unsupported", "只有 pi 托管会话可以单独设置子代理");
     }
     const live = this.live.get(record.id);
-    const model = this.model(value?.trim() || undefined);
+    const model = patch.model === undefined ? record.subagentModel : this.model(patch.model?.trim() || undefined);
+    const thinking =
+      patch.thinking === undefined
+        ? record.subagentThinking
+        : patch.thinking === null
+          ? undefined
+          : this.thinkingLevel(patch.thinking);
     if (live?.busy || live?.pending || live?.piPending) {
-      throw new RpcError("conflict", "这一轮还在跑，等它结束再换子代理模型");
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再改子代理设置");
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    // 只改模型时思考等级与压缩触发点沿用记录里的值；都没有覆盖项就把目录清掉。
+    // 没改的那几项沿用记录里的值；三项都没有值就把目录清掉。
     const reserveTokens = this.compactionReserveFor(record);
-    if (model || record.subagentThinking || reserveTokens !== undefined) {
-      if (!preparePiAgentDir(agentDir, { model, thinking: record.subagentThinking, reserveTokens })) {
-        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理模型没有生效`);
+    if (model || thinking || reserveTokens !== undefined) {
+      if (!preparePiAgentDir(agentDir, { model, thinking, reserveTokens })) {
+        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理设置没有生效`);
       }
     } else {
       removePiAgentDir(agentDir);
@@ -876,6 +953,42 @@ export class HostedSessionManager {
     await this.stopInSessiond(record.id, true);
     if (model) record.subagentModel = model;
     else delete record.subagentModel;
+    if (thinking) record.subagentThinking = thinking;
+    else delete record.subagentThinking;
+    this.touch(record);
+    return this.summary(record);
+  }
+
+  /**
+   * 换这个会话的思考等级（只对 pi 有效）。`value` 传 null 表示改回跟随 pi 设置。
+   * pi 的 RPC 有原生 `set_thinking_level`：进程在跑就直接改，不用重启；
+   * 但「取消等级」pi 没有对应 RPC，只能停掉进程，让下次启动不带 `--thinking`。
+   */
+  async setThinking(sessionId: string, value: string | null): Promise<SessionSummary> {
+    const record = this.record(sessionId);
+    if (!record) throw new RpcError("not_found", "未知托管会话");
+    if (record.agent !== "pi") {
+      throw new RpcError("unsupported", "只有 pi 托管会话有思考等级");
+    }
+    const level = value === null ? undefined : this.thinkingLevel(value);
+    const live = this.live.get(record.id);
+    if (level && live?.pi) {
+      const result = await live.pi.setThinkingLevel(level);
+      if (result.error) {
+        throw new RpcError("invalid_params", `pi 设置思考等级失败：${result.error}`);
+      }
+      record.thinking = level;
+      this.touch(record);
+      return this.summary(record);
+    }
+    if (live?.busy || live?.pending || live?.piPending) {
+      throw new RpcError("conflict", "这一轮还在跑，等它结束再换思考等级");
+    }
+    // 进程不在、或者要改回跟随 pi 设置：停掉旧进程，下一条消息按新参数启动。
+    if (live) this.kill(record.id);
+    await this.stopInSessiond(record.id, true);
+    if (level) record.thinking = level;
+    else delete record.thinking;
     this.touch(record);
     return this.summary(record);
   }
@@ -1010,6 +1123,48 @@ export class HostedSessionManager {
     }
   }
 
+  /**
+   * 记住这次新建用的选项，写回 hosted.json。Claude Code 与 pi 的模型清单不通用，
+   * 所以各存各的：切引擎时只覆盖自己那一份，另一份留着。
+   */
+  private rememberCreateDefaults(
+    agent: HostedAgent,
+    permissionMode: HostedPermissionMode,
+    used: {
+      model?: string;
+      effort?: string;
+      subagentModel?: string;
+      thinking?: string;
+      subagentThinking?: string;
+    },
+  ): void {
+    const prev = this.config.lastCreate ?? {};
+    // pi 的 permissionMode 只是占位（它没有权限模式），沿用上一次 Claude Code 用的那个。
+    const next: HostedCreateDefaults = {
+      agent,
+      permissionMode: agent === "pi" ? (prev.permissionMode ?? permissionMode) : permissionMode,
+    };
+    // 本次用的引擎以「这次选了什么」为准：选回默认就不写这项，下次预填跟着回到默认；
+    // 另一个引擎的那份原样留着，来回切引擎不会互相清空。
+    if (agent === "pi") {
+      if (prev.model) next.model = prev.model;
+      if (prev.effort) next.effort = prev.effort;
+      if (used.model) next.piModel = used.model;
+      if (used.thinking) next.piThinking = used.thinking;
+      if (used.subagentModel) next.subagentModel = used.subagentModel;
+      if (used.subagentThinking) next.subagentThinking = used.subagentThinking;
+    } else {
+      if (prev.piModel) next.piModel = prev.piModel;
+      if (prev.piThinking) next.piThinking = prev.piThinking;
+      if (prev.subagentModel) next.subagentModel = prev.subagentModel;
+      if (prev.subagentThinking) next.subagentThinking = prev.subagentThinking;
+      if (used.model) next.model = used.model;
+      if (used.effort) next.effort = used.effort;
+    }
+    this.patchConfigFile({ lastCreate: next });
+    this.config.lastCreate = next;
+  }
+
   /** 新建托管会话可选的模型与思考程度，取自本机 CLI。 */
   options(): HostedOptionsResult {
     const models = modelCatalog();
@@ -1045,6 +1200,7 @@ export class HostedSessionManager {
       for (const item of record.piModels ?? []) addPiModel(item);
     }
     if (piModels.length > 0) result.piModels = piModels;
+    if (this.config.lastCreate) result.lastCreate = this.config.lastCreate;
     return result;
   }
 
@@ -2106,7 +2262,8 @@ export class HostedSessionManager {
       canSend: dirExists,
       hosted: true,
       hostedState: live ? "running" : "stopped",
-      ...(record.agent === "pi" ? { hostedAgent: "pi" as const } : {}),
+      // 老记录没有 agent 字段，那是 Claude Code 时代留下的；一律写出来，网页的图标/文案才分得清。
+      hostedAgent: record.agent === "pi" ? "pi" : "claude",
       permissionMode: record.permissionMode,
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
@@ -2524,16 +2681,34 @@ function readConfig(stateDir: string): HostedConfig {
       ? raw["dirs"].filter((item): item is string => typeof item === "string" && item.trim() !== "")
       : [];
     const idle = isRecord(raw) ? numberOr(raw["idleTimeoutMs"], DEFAULT_IDLE_TIMEOUT_MS) : DEFAULT_IDLE_TIMEOUT_MS;
+    const lastCreate = isRecord(raw) ? readCreateDefaults(raw["lastCreate"]) : undefined;
     const config: HostedConfig = {
       dirs,
       idleTimeoutMs: Math.max(idle, 60_000),
       allowBypassPermissions: isRecord(raw) && raw["allowBypassPermissions"] === true,
       ...(isRecord(raw) && typeof raw["cliPath"] === "string" ? { cliPath: raw["cliPath"] } : {}),
+      ...(lastCreate ? { lastCreate } : {}),
     };
     return config;
   } catch {
     return { dirs: [], idleTimeoutMs: DEFAULT_IDLE_TIMEOUT_MS, allowBypassPermissions: false };
   }
+}
+
+/** hosted.json 里的新建默认值：只认已知字段，手改坏了也不至于让 Bridge 起不来。 */
+function readCreateDefaults(raw: unknown): HostedCreateDefaults | undefined {
+  if (!isRecord(raw)) return undefined;
+  const out: HostedCreateDefaults = {};
+  if (raw["agent"] === "pi" || raw["agent"] === "claude") out.agent = raw["agent"];
+  const mode = raw["permissionMode"];
+  if (typeof mode === "string" && HOSTED_PERMISSION_MODES.includes(mode as HostedPermissionMode)) {
+    out.permissionMode = mode as HostedPermissionMode;
+  }
+  for (const key of ["model", "effort", "piModel", "piThinking", "subagentModel", "subagentThinking"] as const) {
+    const value = raw[key];
+    if (typeof value === "string" && value.trim() !== "") out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function expandHome(path: string): string {
@@ -2662,7 +2837,12 @@ function blocksFromContent(content: unknown): MessageBlock[] {
     } else if (item["type"] === "tool_use") {
       const name = typeof item["name"] === "string" ? item["name"] : "tool";
       const input = isRecord(item["input"]) ? item["input"] : {};
-      blocks.push({ type: "tool", text: truncate(`${name} ${describeToolInput(input)}`, MAX_BLOCK_CHARS).text });
+      const summary = toolSummaryOf(input);
+      blocks.push({
+        type: "tool",
+        text: truncate(`${name} ${describeToolInput(input)}`, MAX_BLOCK_CHARS).text,
+        ...(summary ? { summary } : {}),
+      });
     }
   }
   return blocks;

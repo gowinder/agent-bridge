@@ -96,11 +96,15 @@ export const RELAY_CHANNEL_BYTES = 16;
 export const METHODS = [
   "pair.request",
   "host.info",
+  // 心跳：网页每 20 秒发一次，用来发现「socket 还在、通道其实已经死了」的连接。
+  "host.ping",
   "host.capabilities",
   "app.list",
   "project.list",
   "session.list",
   "session.get",
+  // 历史对话搜索：标题在前端本地过滤，勾了「搜对话内容」才问 Bridge 要全文命中。
+  "session.search",
   "session.rail",
   "session.models",
   "session.compact",
@@ -117,6 +121,8 @@ export const METHODS = [
   "hosted.resume",
   "hosted.setModel",
   "hosted.setSubagentModel",
+  "hosted.setThinking",
+  "hosted.setSubagentThinking",
   "hosted.setCompaction",
   "hosted.archive",
   "hosted.delete",
@@ -247,6 +253,11 @@ export interface DeviceSummary {
   expiresAt: number | null;
   revokedAt: number | null;
   lastSeenAt: number | null;
+}
+
+/** 心跳响应：只回一个时间戳，不读写任何状态，也不进操作日志。 */
+export interface HostPingResult {
+  at: number;
 }
 
 export interface HostInfoResult {
@@ -466,7 +477,7 @@ export interface SessionSummary {
   hostedState?: "running" | "idle" | "stopped";
   /** `hosted` only: the permission mode Bridge passes to the CLI. */
   permissionMode?: string;
-  /** `hosted` only: which CLI holds the process. Absent means Claude Code. */
+  /** `hosted` only: which CLI holds the process. 老桥没这个字段时按 Claude Code 处理。 */
   hostedAgent?: HostedAgent;
   /** `hosted` only: the --model Bridge passes to the CLI; absent means the CLI default. */
   model?: string;
@@ -524,6 +535,8 @@ export interface MessageBlock {
   type: "text" | "tool" | "next-step" | "ask";
   text: string;
   truncated?: boolean;
+  /** `tool` only: 工具自己写的一句话说明（Bash 的 description / Codex 的 justification）。 */
+  summary?: string;
   /** `next-step` only: the question the client drew above the buttons. */
   ask?: string;
   /** `next-step` only: the buttons the desktop client offered. */
@@ -614,6 +627,30 @@ export type HostedPermissionMode = "manual" | "acceptEdits" | "auto" | "bypassPe
 /** Bridge 托管会话可以由哪个 CLI 持有：Claude Code（stream-json）或 pi（rpc）。 */
 export type HostedAgent = "claude" | "pi";
 
+/**
+ * 上一次成功创建托管会话时用的选项：存在 Bridge 的 hosted.json 里，
+ * 网页下次打开新建面板就按它填默认值，换浏览器、清缓存都不丢。
+ * 启动参数（args）不在这里：它按浏览器本地的「保存过的参数 + 勾选」走。
+ */
+export interface HostedCreateDefaults {
+  /** 上次用的引擎。 */
+  agent?: HostedAgent;
+  /** Claude Code 的权限模式；pi 没有这一项，创建 pi 会话时保留上次 Claude Code 用的模式。 */
+  permissionMode?: HostedPermissionMode;
+  /** 上次 Claude Code 会话用的 `--model`；缺省表示 CLI 默认。 */
+  model?: string;
+  /** 上次 Claude Code 会话用的 `--effort`。 */
+  effort?: string;
+  /** 上次 pi 会话的主模型；和 Claude Code 的 model 分开记，切引擎时互不覆盖。 */
+  piModel?: string;
+  /** 上次 pi 会话的 `--thinking`。 */
+  piThinking?: string;
+  /** 上次 pi 子代理用的模型。 */
+  subagentModel?: string;
+  /** 上次 pi 子代理的思考等级。 */
+  subagentThinking?: string;
+}
+
 /** 新建面板里可选的托管引擎；available 为 false 时按钮置灰并显示 detail。 */
 export interface HostedAgentOption {
   id: HostedAgent;
@@ -629,6 +666,11 @@ export interface HostedDirInfo {
   sessionCount: number;
   /** false when the directory was removed after it was allowlisted. */
   exists: boolean;
+  /**
+   * false = 只在历史会话里出现过、已经不在白名单里。这类目录仍要显示（否则历史会话
+   * 看起来没有目录），但不能再用来新建会话，也不能被菜单栏合并时写回白名单。
+   */
+  allowed?: boolean;
 }
 
 export interface HostedDirsResult {
@@ -638,6 +680,8 @@ export interface HostedDirsResult {
   permissionModes: HostedPermissionMode[];
   /** hosted.json 的 allowBypassPermissions 开关；false 时 permissionModes 不含 bypassPermissions。 */
   allowBypassPermissions: boolean;
+  /** 上一次新建托管会话用的选项，网页打开新建面板前用它预填。 */
+  lastCreate?: HostedCreateDefaults;
   note?: string;
 }
 
@@ -684,6 +728,8 @@ export interface HostedOptionsResult {
    * 一条 pi 会话都没跑过时没有这个字段，网页退回手填。
    */
   piModels?: ModelOption[];
+  /** 上次创建时用的选项，新建面板据此预填；从没建过就没有这个字段。 */
+  lastCreate?: HostedCreateDefaults;
   note?: string;
 }
 
@@ -804,6 +850,24 @@ export interface SessionRailParams {
   sessionId: string;
 }
 
+export interface SessionSearchParams {
+  /** 关键词；空格分隔的多个词要求全部命中，不区分大小写。 */
+  query: string;
+  /** 要搜哪些会话。Bridge 只认的会话才搜，读不到 transcript 的直接跳过。 */
+  sessionIds: string[];
+}
+
+export interface SessionSearchResult {
+  /** 命中的 sessionId，顺序不保证。 */
+  matches: string[];
+  /** 实际搜过几个会话（读不到 transcript 的不算）。 */
+  searched: number;
+  /** 读 transcript 失败的会话数；这些没算进 searched。 */
+  errors?: number;
+  /** 超过时间预算时为 true：结果是部分结果。 */
+  partial?: boolean;
+}
+
 export interface SessionModelsParams {
   sessionId: string;
 }
@@ -832,6 +896,16 @@ export interface SessionModelsResult {
   subagentModel?: string;
   /** 能否从网页换子代理模型（只有 pi 托管会话可以）。 */
   canSwitchSubagent?: boolean;
+  /** pi 托管会话：主会话的思考等级；缺省表示跟随 pi 自己的设置。 */
+  thinking?: string;
+  /** 能否从网页换思考等级（只有 pi 托管会话可以）。 */
+  canSwitchThinking?: boolean;
+  /** pi 的可用思考等级，从低到高。 */
+  thinkingLevels?: string[];
+  /** pi 托管会话：新派生子代理用的思考等级；缺省表示跟随 pi 自己的设置。 */
+  subagentThinking?: string;
+  /** 能否从网页换子代理思考等级（只有 pi 托管会话可以）。 */
+  canSwitchSubagentThinking?: boolean;
   note?: string;
 }
 

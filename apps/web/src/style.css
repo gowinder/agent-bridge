@@ -563,6 +563,64 @@ a.crumb:hover {
   }
 }
 
+/*
+ * 窄屏没有常驻侧栏，顶栏左侧的按钮把同一个 dock 拉成左侧抽屉：
+ * 结构 / 历史 / 待办三个 tab 原样可用，宽屏 CSS 不认 `is-open`，桌面布局不变。
+ */
+.dock-toggle,
+.dock-head,
+.dock-scrim {
+  display: none;
+}
+
+body.dock-open {
+  overflow: hidden;
+}
+
+@media (max-width: 1119px) {
+  .dock-toggle {
+    display: inline-flex;
+  }
+
+  .dock-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 0 2px;
+  }
+
+  .dock-head-title {
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+  }
+
+  .dock.is-open {
+    display: flex;
+    position: fixed;
+    inset: 0 auto 0 0;
+    top: 0;
+    z-index: calc(var(--z-sheet) + 1);
+    width: min(340px, 88vw);
+    height: 100dvh;
+    padding: max(14px, env(safe-area-inset-top)) 10px calc(24px + env(safe-area-inset-bottom)) 14px;
+    border-right: 1px solid var(--line);
+    background: var(--surface);
+    box-shadow: 0 0 40px rgba(0, 0, 0, 0.28);
+    overflow-y: auto;
+  }
+
+  .dock-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-sheet);
+    background: rgba(0, 0, 0, 0.42);
+  }
+}
+
 .dock-tabs {
   display: flex;
   gap: 3px;
@@ -750,6 +808,61 @@ details[open] > .dock-project-head::before {
   background: var(--surface-2);
 }
 
+.dock-history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dock-search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dock-search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border-radius: 7px;
+  border: 1px solid var(--line);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.dock-search-input:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+}
+
+.dock-search-input::placeholder {
+  color: var(--muted);
+}
+
+.dock-search-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.dock-search-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dock-search-status[hidden] {
+  display: none;
+}
+
 .dock-history-row {
   display: flex;
   flex-direction: column;
@@ -903,6 +1016,28 @@ details[open] > .dock-project-head::before {
   font-size: 12.5px;
 }
 
+/* 点开的待办：不再截成一行，换行铺开整段；按钮挪到下方，别把正文挤成一窄条。 */
+.todo-item.is-expanded {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.todo-item.is-expanded .todo-main {
+  align-items: flex-start;
+}
+
+.todo-item.is-expanded .todo-title {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: anywhere;
+}
+
+.todo-item.is-expanded .todo-actions {
+  align-self: flex-end;
+  padding: 0 4px 4px 0;
+}
+
 .todo-item.is-done .todo-title {
   color: var(--muted);
   text-decoration: line-through;
@@ -916,8 +1051,16 @@ details[open] > .dock-project-head::before {
 }
 
 .todo-item:hover .todo-actions,
-.todo-item:focus-within .todo-actions {
+.todo-item:focus-within .todo-actions,
+.todo-item.is-expanded .todo-actions {
   opacity: 1;
+}
+
+/* 触屏没有 hover：操作按钮常显，否则编辑/删除永远点不到。 */
+@media (hover: none) {
+  .todo-actions {
+    opacity: 1;
+  }
 }
 
 .todo-action {
@@ -1245,24 +1388,6 @@ details[open] > .dock-project-head::before {
   gap: 7px;
   min-width: 0;
   flex: 1;
-}
-
-/* 工程列表页的「添加目录」表单：路径输入单独一行，提示跟在下面。 */
-.add-dir {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 12px;
-}
-
-.add-dir .input {
-  flex: 1 1 320px;
-}
-
-.add-dir .hint {
-  flex-basis: 100%;
-  margin: 0;
 }
 
 .chat-head {
@@ -2382,6 +2507,26 @@ details[open] > .dock-project-head::before {
   color: var(--muted);
 }
 
+/* 加载失败时给一个「重试」：小字块里不额外撑间距，按钮压到和提示同高。 */
+.rail-empty p,
+.file-preview-note p {
+  margin: 0 0 6px;
+}
+
+.rail-empty .btn,
+.file-preview-note .btn,
+.hint.warn .btn {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.hint.warn:has(.btn) {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .rail-note {
   margin: 0;
   padding: 10px 12px 0;
@@ -2498,6 +2643,62 @@ details[open] > .dock-project-head::before {
 .message.system {
   background: var(--surface-2);
   border-left-color: transparent;
+}
+
+/* 折叠后只留两行预览（头一行 + 末一行）和操作区，正文全部收起。 */
+.message-fold-preview {
+  display: none;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre-line;
+  overflow: hidden;
+}
+
+.message.is-folded > .message-fold-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.message.is-folded
+  > *:not(.message-meta):not(.message-fold-preview):not(.thinking-row):not(.message-foot) {
+  display: none;
+}
+
+/* 箭头：展开时朝下（点它收起），折叠时朝右。 */
+.fold-chev {
+  transform: rotate(90deg);
+  transition: transform 160ms ease;
+}
+
+.message.is-folded .fold-chev {
+  transform: rotate(0deg);
+}
+
+/* 消息卡片底部那排：长消息读到底就能复制/分享。 */
+.message-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  opacity: 0.45;
+  transition: opacity 160ms ease;
+}
+
+.message:hover .message-foot,
+.message-foot:focus-within {
+  opacity: 1;
+}
+
+.message-foot .share-btn {
+  margin-left: 0;
+}
+
+@media (hover: none) {
+  .message-foot {
+    opacity: 1;
+  }
 }
 
 .message-meta {
@@ -3278,6 +3479,26 @@ body.has-file-preview {
   white-space: nowrap;
 }
 
+/* 折叠态的动作标签（运行 / 读取 / 编辑…）：中文用正文字体，别跟着等宽走。 */
+.turn-step-tag {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 5px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-family: var(--font-sans);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+.turn-step-note {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-family: var(--font-sans);
+  font-size: 11px;
+}
+
 .turn-step-body {
   padding: 0 10px 9px;
   font-family: var(--font-mono);
@@ -3303,8 +3524,23 @@ body.has-file-preview {
 
 .composer-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: flex-end;
   gap: 8px;
+}
+
+/*
+ * 输入框独占一行，按钮排到下一行。模型选择这类按钮很宽，和输入框挤同一行时
+ * 输入框只剩半行字要折成好几行，按钮上方却空着——两行反而省高度。
+ */
+.composer-input {
+  flex: 1 1 100%;
+  order: -1;
+}
+
+/* 第二行：附件靠左，刷新、模型、发送等靠右。 */
+.composer-row .attach-btn {
+  margin-right: auto;
 }
 
 /* Keep the primary action the same height as the icon buttons beside it. */
@@ -3327,8 +3563,34 @@ body.has-file-preview {
   display: none;
 }
 
+/* 「清空历史开始对话」：贴在发送键左边的勾选框，只在客户端支持 /clear 时出现。 */
+.composer-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.composer-reset[hidden] {
+  display: none;
+}
+
+.composer-reset:hover {
+  color: var(--text);
+}
+
+.composer-reset input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .composer-input {
-  flex: 1;
   min-width: 0;
   border-color: transparent;
   background: transparent;
@@ -3359,18 +3621,11 @@ body.has-file-preview {
  */
 @container chat-body (max-width: 700px) {
   .composer-row {
-    flex-wrap: wrap;
     align-items: center;
   }
 
   .composer-input {
-    flex-basis: 100%;
-    order: -1;
     min-height: 40px;
-  }
-
-  .composer-row .btn.primary {
-    margin-left: auto;
   }
 }
 
@@ -3696,6 +3951,37 @@ body.has-file-preview {
 
 .model-item.is-current {
   background: color-mix(in srgb, var(--text) 6%, transparent);
+}
+
+/* 思考等级：一排小 chip，选项少、一行能放完。 */
+.model-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 2px 6px 8px;
+}
+
+.thinking-chip {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.thinking-chip:hover {
+  border-color: color-mix(in srgb, var(--text) 22%, transparent);
+  color: var(--text);
+}
+
+.thinking-chip.is-current {
+  border-color: var(--accent);
+  color: var(--accent-ink);
+  background: var(--accent);
 }
 
 .model-item.is-switchable {
@@ -4248,6 +4534,11 @@ body.has-file-preview {
 }
 
 @media (max-width: 720px) {
+  /* 手机上第二行排不下整句话，只留勾选框（title 里仍有说明）。 */
+  .composer-reset-text {
+    display: none;
+  }
+
   .brand-name,
   .craftstead-name,
   .conn {
@@ -4317,8 +4608,15 @@ body.has-file-preview {
     border-radius: 9px;
   }
 
+  /* 手机上只收起次要状态：未读 / 执行中 / 待回答是回来找会话的唯一线索，得留着。 */
   .row .pill {
     display: none;
+  }
+
+  .row .pill.unread,
+  .row .pill.warn,
+  .row .pill.busy {
+    display: inline-flex;
   }
 
   .main.chat {
@@ -4433,18 +4731,11 @@ body.has-file-preview {
   }
 
   .composer-row {
-    flex-wrap: wrap;
     align-items: center;
   }
 
   .composer-input {
-    flex-basis: 100%;
-    order: -1;
     min-height: 40px;
-  }
-
-  .composer-row .btn.primary {
-    margin-left: auto;
   }
 
   .composer-collapse {

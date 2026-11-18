@@ -4,6 +4,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { MessageBlock, MessageRecord } from "@craftstead/protocol";
 import { subagentDirsFor } from "../subagents.js";
+import { toolSummaryOf } from "../tool-summary.js";
 import { piRunDir } from "./pi-subagents.js";
 
 /** events.jsonl 可能很大（工具输出全在里面），超过这个就不读，免得一次塞进内存。 */
@@ -124,7 +125,14 @@ function blocksOf(content: unknown, claude = false): MessageBlock[] {
       const name = typeof raw["name"] === "string" ? raw["name"] : "tool";
       const input = claude ? raw["input"] : raw["arguments"];
       const args = input === undefined ? "" : JSON.stringify(input);
-      blocks.push({ type: "tool", ...truncate(`调用 ${name} ${args}`.trim(), MAX_TOOL_CHARS) });
+      {
+        const summary = toolSummaryOf(args);
+        blocks.push({
+          type: "tool",
+          ...truncate(`调用 ${name} ${args}`.trim(), MAX_TOOL_CHARS),
+          ...(summary ? { summary } : {}),
+        });
+      }
     } else if (kind === (claude ? "tool_result" : "toolResult")) {
       const text = resultText(raw["content"]);
       if (text) blocks.push({ type: "tool", ...truncate(text, MAX_BLOCK_CHARS) });

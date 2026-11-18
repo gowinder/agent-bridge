@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -61,6 +61,61 @@ function harness(config = {}) {
   return { root, repo, outside, stateDir, spawns, manager };
 }
 
+test("the hosted allowlist can be replaced as a whole, and only with real folders", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const second = join(h.root, "second");
+  mkdirSync(second);
+
+  // 重复项去重、相对路径与不存在的目录一律拒绝：白名单里不能有写进去也建不了会话的路径。
+  const updated = h.manager.setDirs([h.repo, second, h.repo, ""]);
+  assert.deepEqual(updated.dirs.map((dir) => dir.path), [realpathSync(h.repo), realpathSync(second)]);
+  assert.throws(() => h.manager.setDirs(["relative/path"]), /绝对路径/);
+  assert.throws(() => h.manager.setDirs([join(h.root, "missing")]), /目录不存在/);
+
+  // 落盘：重启之后的进程仍然只认这份白名单。
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.dirs, [realpathSync(h.repo), realpathSync(second)]);
+
+  // 清空白名单后就不能再建会话。
+  h.manager.setDirs([]);
+  assert.throws(() => h.manager.create({ path: h.repo }), /白名单|目录/);
+});
+
+test("a leftover deleted folder is skipped instead of failing the whole allowlist write", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const gone = join(h.root, "gone");
+  mkdirSync(gone);
+  h.manager.setDirs([h.repo, gone]);
+  rmSync(gone, { recursive: true, force: true });
+
+  // 已经不存在的旧目录：跳过，不要把整份写入顶掉（界面上没有移除入口）。
+  const updated = h.manager.setDirs([h.repo, gone]);
+  assert.deepEqual(updated.dirs.map((dir) => dir.path), [realpathSync(h.repo)]);
+  // 新加的目录不存在仍然要报错。
+  const fresh = join(h.root, "never-existed");
+  assert.throws(() => h.manager.setDirs([h.repo, fresh]), /目录不存在/);
+});
+
+test("sessions whose folder left the allowlist stay visible but not allowed", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const extra = join(h.root, "extra");
+  mkdirSync(extra);
+  h.manager.setDirs([h.repo, extra]);
+  h.manager.create({ path: extra });
+  h.manager.setDirs([h.repo]);
+
+  const dirs = h.manager.configForClient().dirs;
+  const kept = dirs.find((dir) => dir.path === realpathSync(h.repo));
+  const dropped = dirs.find((dir) => dir.path === realpathSync(extra));
+  assert.equal(kept?.allowed, true);
+  // 历史会话的目录仍然列出来（否则会话看起来没有目录），但不能再被授权。
+  assert.equal(dropped?.allowed, false);
+  assert.throws(() => h.manager.create({ path: extra }), /白名单|目录/);
+});
+
 test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   const h = harness();
   t.after(() => h.manager.dispose());
@@ -84,6 +139,80 @@ test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   assert.equal(args[args.indexOf("--session-id") + 1], session.sessionId.replace("hosted:", ""));
   assert.ok(!args.includes("--dangerously-skip-permissions"));
   assert.equal(options.cwd, realpathSync(h.repo));
+});
+
+test("session summaries say which CLI holds the process", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, permissionMode: "manual" });
+  // 网页要靠这个字段决定图标与文案：kind 只说明「托管」，引擎藏在 hostedAgent 里。
+  assert.equal(h.manager.session(session.sessionId)?.hostedAgent, "claude");
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId)?.hostedAgent, "claude");
+});
+
+test("creating a session remembers the options for the next one", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({ path: h.repo, permissionMode: "acceptEdits", model: "claude-opus-5-5", effort: "high" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "claude",
+    permissionMode: "acceptEdits",
+    model: "claude-opus-5-5",
+    effort: "high",
+  });
+  // 记在 Bridge 的状态目录里，换浏览器、重启 Bridge 都还在。
+  const next = new HostedSessionManager({ stateDir: h.stateDir, spawn: () => new FakeChild() });
+  t.after(() => next.dispose());
+  assert.deepEqual(next.options().lastCreate, config.lastCreate);
+});
+
+test("a failure to remember the options does not fail the create", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  // hosted.json 换成同名目录：记住默认值时写盘必然失败。
+  rmSync(join(h.stateDir, "hosted.json"));
+  mkdirSync(join(h.stateDir, "hosted.json"));
+  const session = h.manager.create({ path: h.repo, permissionMode: "manual" });
+  // 进程已经起来、记录已经入库，不能因为「顺手记一下选项」失败就报创建失败。
+  assert.ok(h.manager.session(session.sessionId));
+});
+
+test("choosing the CLI default again clears the remembered model", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({ path: h.repo, model: "claude-opus-5-5", effort: "high" });
+  h.manager.create({ path: h.repo, permissionMode: "manual" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  // 第二次都选了默认：记忆里不能再留着上一次的 model/effort。
+  assert.deepEqual(config.lastCreate, { agent: "claude", permissionMode: "manual" });
+});
+
+test("remembering options keeps hand edits to hosted.json", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const path = join(h.stateDir, "hosted.json");
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  // 运行中手改、还没重启：创建会话时按「读盘改一个键」写回，不能把这份改动冲掉。
+  raw.idleTimeoutMs = 123_000;
+  writeFileSync(path, JSON.stringify(raw));
+  h.manager.create({ path: h.repo, permissionMode: "manual" });
+  const config = JSON.parse(readFileSync(path, "utf8"));
+  assert.equal(config.idleTimeoutMs, 123_000);
+  assert.equal(config.lastCreate.permissionMode, "manual");
+});
+
+test("a hand-edited permissionMode in hosted.json is ignored", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const path = join(h.stateDir, "hosted.json");
+  const raw = JSON.parse(readFileSync(path, "utf8"));
+  raw.lastCreate = { agent: "claude", permissionMode: "nonsense", model: "claude-opus-5-5" };
+  writeFileSync(path, JSON.stringify(raw));
+  h.manager.reloadConfig();
+  const defaults = h.manager.options().lastCreate;
+  assert.equal(defaults?.permissionMode, undefined);
+  assert.equal(defaults?.model, "claude-opus-5-5");
 });
 
 test("router model names with a slash reach argv and survive a restart", (t) => {
@@ -112,13 +241,17 @@ test("extra args reject the flags that decide identity and permissions", (t) => 
     "--dangerously-skip-permissions",
     "--permission-mode=bypassPermissions",
     "--resume",
+    // 白名单管的是「会话建在哪个目录」，这些旗标能把别的目录拉进来。
+    "--add-dir /tmp/extra",
+    "--add-dir=/tmp/extra",
+    "--mcp-config /tmp/mcp.json",
+    "--allowedTools Bash",
   ]) {
     assert.throws(() => h.manager.create({ path: h.repo, args: [flag] }), /启动参数不接受/);
   }
   assert.equal(h.spawns.length, 0);
-  h.manager.create({ path: h.repo, args: ["--add-dir /tmp/extra"] });
-  const args = h.spawns[0].args;
-  assert.equal(args[args.indexOf("--add-dir") + 1], "/tmp/extra");
+  h.manager.create({ path: h.repo, args: ["--verbose"] });
+  assert.ok(h.spawns[0].args.includes("--verbose"));
 });
 
 test("setAllowBypassPermissions rewrites hosted.json and takes effect at once", (t) => {
@@ -517,6 +650,48 @@ test("a bridge restart replays the unfinished turn in a new process", async (t) 
     .messagesFor(session.sessionId, { limit: 50 })
     .messages.flatMap((message) => message.blocks.map((block) => block.text));
   assert.ok(texts.includes("Bridge 重启，已自动续跑上次未结束的一轮"));
+});
+
+test("paging back through history walks to the oldest message", (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, permissionMode: "manual" });
+  const id = session.sessionId.replace(/^hosted:/, "");
+  // 造 120 条历史，直接写转录文件（manager 的缓存还没读它）。
+  const lines = [];
+  for (let index = 0; index < 120; index += 1) {
+    lines.push(
+      JSON.stringify({
+        messageId: `m${index}`,
+        sessionId: session.sessionId,
+        role: index % 2 === 0 ? "user" : "assistant",
+        createdAt: 1000 + index,
+        blocks: [{ type: "text", text: `消息 ${index}` }],
+      }),
+    );
+  }
+  writeFileSync(join(h.stateDir, "hosted", `${id}.jsonl`), `${lines.join("\n")}\n`);
+
+  const first = h.manager.messagesFor(session.sessionId, { limit: 50 });
+  assert.equal(first.messages.length, 50);
+  assert.equal(first.messages[0].messageId, "m70");
+  assert.equal(first.nextBefore, "m70");
+
+  const second = h.manager.messagesFor(session.sessionId, { limit: 50, before: first.nextBefore });
+  assert.equal(second.messages[0].messageId, "m20");
+  assert.equal(second.messages.at(-1).messageId, "m69");
+  assert.equal(second.nextBefore, "m20");
+
+  const third = h.manager.messagesFor(session.sessionId, { limit: 50, before: second.nextBefore });
+  assert.equal(third.messages.length, 20);
+  assert.equal(third.messages[0].messageId, "m0");
+  assert.equal(third.nextBefore, undefined);
+
+  // 游标不在了要报错：静默退回最新一页会让网页以为点击没反应。
+  assert.throws(
+    () => h.manager.messagesFor(session.sessionId, { limit: 50, before: "nope" }),
+    /未知的分页游标/,
+  );
 });
 
 test("stopping a session keeps a bridge restart from replaying the turn", async (t) => {

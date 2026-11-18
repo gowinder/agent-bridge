@@ -16,6 +16,7 @@ import type {
 } from "@craftstead/protocol";
 import { piBinary } from "../hosted/pi-binary.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { toolSummaryOf } from "../tool-summary.js";
 
 /**
  * pi 把会话存成 `~/.pi/agent/sessions/<编码后的 cwd>/<时间戳>_<会话 id>.jsonl`。
@@ -359,7 +360,14 @@ export class PiAdapter implements SessionAdapter {
           continue;
         }
         if (part.type === "toolCall" && role === "assistant") {
-          blocks.push({ type: "tool", ...truncate(`调用 ${part.name} ${part.args}`.trim(), 300) });
+          {
+            const summary = toolSummaryOf(part.args);
+            blocks.push({
+              type: "tool",
+              ...truncate(`调用 ${part.name} ${part.args}`.trim(), 300),
+              ...(summary ? { summary } : {}),
+            });
+          }
         }
       }
       if (blocks.length === 0) continue;

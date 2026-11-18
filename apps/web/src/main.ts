@@ -5,6 +5,7 @@ import type {
   ContextUsage,
   DeviceSummary,
   DevtoolsStatus,
+  ErrorCode,
   FileUploadBeginResult,
   FileUploadChunkResult,
   FileUploadFinishResult,
@@ -14,6 +15,7 @@ import type {
   FsRoot,
   FsRootsResult,
   HostedAgent,
+  HostedCreateDefaults,
   HostedDirsResult,
   HostedInterruptResult,
   HostedOptionsResult,
@@ -42,6 +44,7 @@ import type {
   SessionModelsResult,
   SessionRailResult,
   SessionRenameResult,
+  SessionSearchResult,
   SessionSummary,
   ShellCancelResult,
   ShellEventData,
@@ -70,8 +73,9 @@ import {
 } from "./credentials.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
+import { stepView } from "./tool-steps.js";
 import { connectDevice, finishPairing, startPairing, type PairingChallenge } from "./pairing.js";
-import type { PeerClient } from "./peer.js";
+import { PeerError, type PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
 import { langSwitchLabel, serverTr, toggleLang, tr } from "./i18n";
@@ -176,6 +180,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2.6 6H6V2.6"/><path d="M13.4 6H10V2.6"/><path d="M10 13.4V10h3.4"/><path d="M6 13.4V10H2.6"/></svg>',
+  menu:
+    '<svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h11"/></svg>',
   more:
     '<svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor"><circle cx="3.6" cy="8" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="12.4" cy="8" r="1.25"/></svg>',
   pin:
@@ -259,6 +265,21 @@ const app: HTMLDivElement = root;
 
 let active: PeerClient | null = null;
 let generation = 0;
+/** 可见时的心跳间隔与判定窗口；手机挂起后回来靠它第一时间发现「假活」。 */
+const HEARTBEAT_MS = 20_000;
+/**
+ * Bridge 的请求是一条串行队列：搜索预算 8 秒、压缩能跑两分钟。探活给的时间比队列
+ * 里最长的那类任务短，就会把「正在忙」误判成「已经死了」并主动拆链。
+ */
+const HEARTBEAT_TIMEOUT_MS = 20_000;
+/** 连续两次探活都没回音才算死：一次超时可能只是它排在长任务后面。 */
+const HEARTBEAT_MISSES = 2;
+/** 请求超时/回到前台时的短探活：够快，又不至于把慢请求误判成断线。 */
+const PROBE_TIMEOUT_MS = 10_000;
+/** 探活失败计数，见 HEARTBEAT_MISSES。 */
+let heartbeatMisses = 0;
+/** 心跳定时器：页面可见时每 20 秒 ping 一次，隐藏时停掉省电。 */
+let heartbeatTimer: number | null = null;
 /** 刚配对完回到首页时提示一句回落地页的入口；只影响一次渲染。 */
 let justPaired = false;
 let retryTimer: number | null = null;
@@ -281,6 +302,25 @@ let hostedDraft: {
   /** 子代理的思考等级（`subagents.defaultThinking`）；空串表示跟随 pi 设置。 */
   subagentThinking: string;
 } | null = null;
+/**
+ * 上一次新建托管会话时用的选项，存在 Bridge 的 hosted.json 里（换浏览器也在），
+ * 会话列表页先取一次，点「新建」时就能直接拿来填默认值。
+ */
+let hostedCreateDefaults: HostedCreateDefaults | null = null;
+
+/**
+ * 点「新建」时现取一次：别的标签页或浏览器刚建过会话，缓存就会过期，
+ * 拿旧值预填再直接提交会把刚记住的选项又覆盖回去。`hosted.dirs` 是轻量的那份。
+ */
+async function fetchHostedCreateDefaults(): Promise<HostedCreateDefaults | null> {
+  try {
+    const config = await call<HostedDirsResult>("hosted.dirs");
+    hostedCreateDefaults = config.lastCreate ?? null;
+  } catch {
+    // 取不到就沿用缓存（可能为空），按默认值建也不影响创建。
+  }
+  return hostedCreateDefaults;
+}
 /** 会话列表页是否显示已归档的会话；只影响本页，不进快照。 */
 let showArchived = false;
 /** 桌面客户端（dsh）新建会话面板的草稿，同样在重绘时保留。 */
@@ -597,9 +637,14 @@ async function watchSessions(): Promise<void> {
     // The list poller compares against this snapshot, so a change seen here would otherwise
     // never repaint; re-render the visible list from the data this watcher just stored.
     if (document.visibilityState !== "visible") return;
+    if (snapshotSignature() === before) return;
     const route = parseRoute();
-    if (route.level !== "clients" && route.level !== "projects" && route.level !== "sessions") return;
-    if (snapshotSignature() !== before) repaintList();
+    if (route.level === "clients" || route.level === "projects" || route.level === "sessions") {
+      repaintList();
+      return;
+    }
+    // 停在聊天/任务页时整页重绘会打断正在输入的内容，只把侧栏的状态角标换掉。
+    syncDockSessions();
   } catch {
     // The connection layer already reports disconnects; the next tick retries.
   }
@@ -673,6 +718,8 @@ function hashFor(route: Route): string {
 }
 
 function navigate(route: Route, replace = false): void {
+  // 窄屏抽屉里点条目就跳走，跳之前先收起，免得新页面还压着遮罩。
+  if (dockOpen) setDockOpen(false);
   const hash = hashFor(route);
   if (location.hash === hash) {
     void renderRoute();
@@ -703,6 +750,7 @@ function stopActive(): void {
     retryTimer = null;
   }
   stopPolling();
+  stopHeartbeat();
   stopSessionWatch();
   active?.stop();
   active = null;
@@ -717,6 +765,137 @@ function stopPolling(): void {
     pollTimer = null;
   }
 }
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function startHeartbeat(): void {
+  stopHeartbeat();
+  // 后台标签页的定时器本来就会被节流，这里干脆不发，省电也省流量。
+  if (document.visibilityState !== "visible") return;
+  heartbeatTimer = window.setInterval(() => void heartbeatTick(), HEARTBEAT_MS);
+}
+
+/** 通道还在但可能已经死了：只有 Bridge 真的回话才能证明它活着。 */
+/**
+ * `host.ping` 是 0.11.4 才有的空方法。更早的 Bridge 不认识它：`parseWireMessage`
+ * 按 METHODS 白名单校验，不在表里整帧丢弃，既不回包也不报错 —— 探活必然超时，
+ * 网页就会每 20 秒断一次链（而网页是随部署立即生效的）。这类旧 Bridge 退回
+ * 用各版本都有的 `host.info` 做探活。
+ */
+/** `0.11.4-rc.17` → 按 0.11.4 比（预发布后缀不参与）。 */
+function atLeastVersion(version: string, want: [number, number, number]): boolean {
+  const base = (version.split("-")[0] ?? "").split(".").map((part) => Number(part) || 0);
+  for (let index = 0; index < 3; index += 1) {
+    const have = base[index] ?? 0;
+    const need = want[index] ?? 0;
+    if (have !== need) return have > need;
+  }
+  return true;
+}
+
+function heartbeatMethod(): "host.ping" | "host.info" {
+  const version = connected?.info.version;
+  return version !== undefined && atLeastVersion(version, [0, 11, 4]) ? "host.ping" : "host.info";
+}
+
+async function pingHost(timeoutMs: number): Promise<boolean> {
+  const client = active;
+  if (!client) return false;
+  try {
+    await client.request(heartbeatMethod(), undefined, timeoutMs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 丢掉当前连接并进入重连。故意保留 `connected`/`snapshot`：
+ * 页面继续显示断线前的数据，重连成功后 `renderRoute(soft)` 会把它们刷新掉，
+ * 用户不会突然看到白屏或者被踢回首页。
+ */
+function connectionLost(message: string): void {
+  const device = connected?.device;
+  if (!device) return;
+  // 已经在重连的路上：重复调度会把退避重置回第 1 次。
+  if (active === null && retryTimer !== null) return;
+  stopPolling();
+  stopHeartbeat();
+  active?.stop();
+  active = null;
+  setReconnecting(message);
+  scheduleRetry(device, 1);
+}
+
+async function heartbeatTick(): Promise<void> {
+  if (!active || document.visibilityState !== "visible") return;
+  if (await pingHost(HEARTBEAT_TIMEOUT_MS)) {
+    heartbeatMisses = 0;
+    return;
+  }
+  heartbeatMisses += 1;
+  if (heartbeatMisses < HEARTBEAT_MISSES) return;
+  heartbeatMisses = 0;
+  connectionLost(tr("连接无响应，正在重连…"));
+}
+
+/** 一次请求超时可能只是它慢（压缩能跑两分钟），用短探活区分「慢」和「死了」。 */
+let probing = false;
+
+async function probeAfterTimeout(): Promise<void> {
+  // 轮询与多个请求可能同时超时：只发一次探活，别把刚恢复的链路再压死。
+  if (probing) return;
+  probing = true;
+  try {
+    if (await pingHost(PROBE_TIMEOUT_MS)) {
+      heartbeatMisses = 0;
+      return;
+    }
+    // 请求超时最常见的原因就是 Bridge 正忙着跑长任务，这时探活也答不上来。
+    // 记一次，等心跳累计到两次再判死，不然会把好好的连接掐掉。
+    heartbeatMisses += 1;
+    if (heartbeatMisses < HEARTBEAT_MISSES) return;
+    heartbeatMisses = 0;
+    connectionLost(tr("连接无响应，正在重连…"));
+  } finally {
+    probing = false;
+  }
+}
+
+/**
+ * 「重试」按钮的语义：连接还在就重发请求；连接已经没了就先重建连接 ——
+ * 直接重发只会再等一次超时，用户会以为按钮坏了。
+ */
+function retryAction(retry: () => void): () => void {
+  return () => {
+    if (active && !active.isDead) {
+      retry();
+      return;
+    }
+    const device = connected?.device;
+    if (!device) {
+      retry();
+      return;
+    }
+    scheduleRetry(device, 1);
+  };
+}
+
+// 回到前台先探活：手机挂起时 socket 常常已经死了但 close 事件不会来。
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") {
+    stopHeartbeat();
+    return;
+  }
+  if (!active) return;
+  startHeartbeat();
+  void probeAfterTimeout();
+});
 
 function showHome(): void {
   stopActive();
@@ -740,9 +919,41 @@ function showPairError(message: string): void {
   );
 }
 
-/** 超时/断线这类错误值得就地重试；参数错了之类重试也没用。 */
+/** RPC 层失败：把桥端给的 `error.code` 带出来，重试与否按 code 判断而不是猜文案。 */
+class RpcCallError extends Error {
+  constructor(
+    readonly code: ErrorCode | undefined,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RpcCallError";
+  }
+}
+
+/** 等等再试有意义：限流、桥端内部错误、这一轮还在跑、适配器刚起来、游标过期。 */
+const RETRYABLE_RPC_CODES = new Set<ErrorCode>([
+  "rate_limited",
+  "internal",
+  "conflict",
+  "adapter_unavailable",
+  "stale_cursor",
+]);
+
+/** 中继侧：Bridge 刚起来、通道被占、限流；重新连一次或稍等就能过。 */
+const RETRYABLE_RELAY_CODES = new Set(["bridge_offline", "channel_in_use", "rate_limited"]);
+
+/**
+ * 值得就地重试的错误：请求超时、通道断开、Bridge 没连上中继、限流这类。
+ * 参数错了、找不到、没权限之类重试也没用，不给「重试」按钮。
+ */
 function isRetryableError(error: unknown): boolean {
-  return /超时|已断开|已关闭|中继.*失败|Failed to fetch|NetworkError/i.test(messageOf(error));
+  if (error instanceof PeerError) return true;
+  if (error instanceof RpcCallError) {
+    return error.code !== undefined && RETRYABLE_RPC_CODES.has(error.code);
+  }
+  if (error instanceof RelayError) return RETRYABLE_RELAY_CODES.has(error.code);
+  // 浏览器把网络层失败统一报成 TypeError（Failed to fetch）：重发一次可能就成功。
+  return error instanceof TypeError;
 }
 
 /**
@@ -762,7 +973,7 @@ function flashNotice(message: string, retry?: () => void): void {
         tr("重试"),
         () => {
           box.remove();
-          retry();
+          retryAction(retry)();
         },
         "btn primary small float-notice-retry",
       ),
@@ -789,12 +1000,12 @@ function statusError(state: ChatState, error: unknown, retry: () => void): void 
     el("span", { text }),
     button(
       tr("重试"),
-      () => {
+      retryAction(() => {
         state.retrying = true;
         state.status.classList.remove("error");
         state.status.textContent = tr("正在重试…");
         retry();
-      },
+      }),
       "btn ghost small status-retry",
     ),
   );
@@ -1536,9 +1747,26 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   opened.client.onEvent((message) => {
     if (message.event === "shell.output") handleShellEvent(message.data as ShellEventData);
   });
-  const infoResponse = await opened.client.request("host.info");
-  const devicesResponse = await opened.client.request("device.list");
+  // 读循环自己判死时走这条：socket 可能还开着，`closed()` 永远不会 resolve。
+  opened.client.onDead(() => {
+    if (gen + 1 !== generation || active !== opened.client) return;
+    connectionLost(tr("连接已断开，正在重连…"));
+  });
+  let infoResponse: Awaited<ReturnType<typeof opened.client.request>>;
+  let devicesResponse: Awaited<ReturnType<typeof opened.client.request>>;
+  try {
+    infoResponse = await opened.client.request("host.info");
+    devicesResponse = await opened.client.request("device.list");
+  } catch (error) {
+    // 握手成功了但通道马上又断：这里不能把 active 留在半初始化状态，
+    // 否则页面停在「正在连接」，之后也没有任何代码会去重连它。
+    opened.client.stop();
+    active = null;
+    throw error;
+  }
   if (!infoResponse.ok || !devicesResponse.ok) {
+    opened.client.stop();
+    active = null;
     throw new Error(infoResponse.error?.message ?? devicesResponse.error?.message ?? tr("读取主机信息失败"));
   }
   connected = {
@@ -1552,18 +1780,19 @@ async function connectAndShow(device: DeviceMeta, attempt = 0): Promise<void> {
   }
   await renderRoute(soft);
   startSessionWatch();
+  startHeartbeat();
   progressDone();
   setReconnecting(null);
   void opened.connection.closed().then((info) => {
     if (gen + 1 !== generation || active !== opened.client) return;
-    active = null;
-    stopPolling();
     if (info.code === 4003) {
+      stopPolling();
+      stopHeartbeat();
+      active = null;
       showHome();
       return;
     }
-    setReconnecting(tr("连接已断开，正在重连…"));
-    scheduleRetry(device, 1);
+    connectionLost(tr("连接已断开，正在重连…"));
   });
 }
 
@@ -1582,6 +1811,8 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
       ]),
     );
   }
+  // 旧的定时器必须清掉：不清的话两条重试链会同时存在，各自建一条 socket。
+  if (retryTimer !== null) clearTimeout(retryTimer);
   retryTimer = window.setTimeout(() => {
     retryTimer = null;
     if (gen !== generation) return;
@@ -1593,9 +1824,20 @@ function scheduleRetry(device: DeviceMeta, attempt: number, message?: string): v
 }
 
 async function call<T>(method: Method, params?: unknown, timeoutMs = 20_000): Promise<T> {
-  if (!active) throw new Error(tr("连接已断开"));
-  const response = await active.request(method, params, timeoutMs);
-  if (!response.ok) throw new Error(response.error?.message ?? tr(`{0} 失败`, method));
+  const client = active;
+  if (!client || client.isDead) throw new PeerError("closed", tr("连接已断开"));
+  let response: Awaited<ReturnType<PeerClient["request"]>>;
+  try {
+    response = await client.request(method, params, timeoutMs);
+  } catch (error) {
+    // 超时后先短探活判死：连接真死了就要停下来重连，
+    // 否则「重试」会继续往死通道发帧，Bridge 那边还会真的重复执行一次。
+    if (error instanceof PeerError && error.code === "timeout") void probeAfterTimeout();
+    throw error;
+  }
+  if (!response.ok) {
+    throw new RpcCallError(response.error?.code, response.error?.message ?? tr(`{0} 失败`, method));
+  }
   return response.result as T;
 }
 
@@ -1755,15 +1997,20 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
     renderTopbar(crumbs),
     el("div", { className: "shell" }, [
       dockSidebar(parseRoute()),
+      ...(dockOpen ? [dockScrim()] : []),
       el("div", { className: "shell-main" }, [content]),
     ]),
   );
+  document.body.classList.toggle("dock-open", dockOpen);
   restoreDockFocus(focus);
 }
 
-/** dock 里正在编辑的输入框（新增待办 / 就地编辑）：整页重建后要还原焦点，否则打字被打断。 */
+/**
+ * dock 里正在编辑的输入框（新增待办 / 就地编辑 / 历史搜索）：整页重建后要还原焦点，
+ * 否则打字被打断。列表页每 5 秒就可能因为某个会话换了状态整页重绘，搜索框是最容易撞上的。
+ */
 interface DockFocus {
-  target: "new" | "edit";
+  target: "new" | "edit" | "search";
   value: string;
   start: number | null;
   end: number | null;
@@ -1776,19 +2023,27 @@ function captureDockFocus(): DockFocus | null {
     ? "new"
     : active.classList.contains("todo-edit-input")
       ? "edit"
-      : null;
+      : active.classList.contains("dock-search-input")
+        ? "search"
+        : null;
   if (!target) return null;
   return { target, value: active.value, start: active.selectionStart, end: active.selectionEnd };
 }
 
 function restoreDockFocus(saved: DockFocus | null): void {
   if (!saved) return;
-  const selector = saved.target === "new" ? ".dock-todos .todo-input" : ".dock-todos .todo-edit-input";
+  const selector =
+    saved.target === "new"
+      ? ".dock-todos .todo-input"
+      : saved.target === "edit"
+        ? ".dock-todos .todo-edit-input"
+        : ".dock-search-input";
   const input = document.querySelector<HTMLInputElement>(selector);
   if (!input || input.disabled) return;
   input.value = saved.value;
   if (saved.target === "new") todoDraft.title = saved.value;
-  else todoEditDraft.title = saved.value;
+  else if (saved.target === "edit") todoEditDraft.title = saved.value;
+  // 搜索框的值由 dockSearchQuery 保存，重画时会回填；这里只负责把焦点和光标放回去。
   // preventScroll：重绘发生在输入框上方时别把页面拉过去。
   input.focus({ preventScroll: true });
   if (saved.start !== null && saved.end !== null) input.setSelectionRange(saved.start, saved.end);
@@ -1816,12 +2071,17 @@ function writeDockTab(tab: DockTab): void {
   }
 }
 
-function agentLabel(kind: string): string {
+function agentLabel(kind: string, hostedAgent?: HostedAgent): string {
   if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "ChatGPT";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "Antigravity";
   if (kind === "dsh") return "DeepSeek";
   if (kind === "pi") return "pi";
-  if (kind === "hosted") return tr("托管");
+  if (kind === "hosted") {
+    // 托管会话的 kind 只说明「由 Bridge 托管」，具体引擎藏在 hostedAgent 里。
+    if (hostedAgent === "pi") return tr("pi 托管");
+    if (hostedAgent === "claude") return tr("Claude 托管");
+    return tr("托管");
+  }
   return "Claude";
 }
 
@@ -1854,17 +2114,67 @@ function dockStatePills(session: SessionSummary): HTMLElement[] {
   return pills;
 }
 
+/** 侧栏条目上会随快照变化的那几位：运行中 / 有进程 / 未读 / 待回答。 */
+function dockStateKey(session: SessionSummary): string {
+  return [
+    session.busy ? 1 : 0,
+    session.live ? 1 : 0,
+    unreadAt(session.sessionId) !== undefined ? 1 : 0,
+    session.needsDecision ? 1 : 0,
+    // 历史行右侧写着「· 3 分钟前」：只看状态会让这串时间停在上次整页重绘那一刻。
+    Math.floor(session.updatedAt / 60_000),
+  ].join(":");
+}
+
+/**
+ * 聊天页不重建整页，但侧栏那份会话状态不能一直停在上次进来时的样子：只把状态变了的
+ * 条目换成新按钮，历史搜索的输入框、列表滚动位置都不动。
+ */
+function syncDockSessions(): void {
+  if (!snapshot) return;
+  const byId = new Map(snapshot.sessions.map((item) => [item.sessionId, item]));
+  const current = dockActive(parseRoute()).sessionId;
+  for (const node of [...document.querySelectorAll<HTMLElement>(".dock-session, .dock-history-row")]) {
+    const sessionId = node.dataset.sessionId;
+    const session = sessionId ? byId.get(sessionId) : undefined;
+    if (!session) continue;
+    const state = dockStateKey(session);
+    if (node.dataset.state === state) continue;
+    if (node.classList.contains("dock-history-row")) {
+      // 历史行的标题与滚动位置要留着（可能正在搜索），只换右边那组状态。
+      const facts = node.querySelector(".dock-history-facts");
+      if (!facts) continue;
+      facts.replaceChildren(
+        el("span", {
+          className: "dock-history-meta",
+          text: `${agentLabel(session.kind, session.hostedAgent)} · ${recentTime(session.updatedAt)}`,
+        }),
+        ...dockStatePills(session),
+      );
+      node.dataset.state = state;
+      node.classList.toggle("is-active", current === session.sessionId);
+      continue;
+    }
+    const focused = document.activeElement === node;
+    const next = dockSessionButton(session, node.classList.contains("is-active"));
+    node.replaceWith(next);
+    if (focused) next.focus();
+  }
+}
+
 function dockSessionButton(session: SessionSummary, active: boolean): HTMLButtonElement {
   const pills = dockStatePills(session);
   const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
     el("span", {
       className: `mark ${session.busy ? "busy" : session.live ? "live" : ""}`,
-      text: agentMark(session.kind),
+      text: agentMark(session.kind, session.hostedAgent),
     }),
     el("span", { className: "dock-session-title", text: session.title }),
     ...(pills.length > 0 ? [el("span", { className: "dock-session-pills" }, pills)] : []),
   ]);
   node.title = session.title;
+  node.dataset.sessionId = session.sessionId;
+  node.dataset.state = dockStateKey(session);
   if (active) node.setAttribute("aria-current", "page");
   node.addEventListener("click", () => {
     navigate({
@@ -1934,18 +2244,73 @@ function dockTree(route: Route): HTMLElement {
 }
 
 /** 第二个 tab：所有会话按最近更新排序。 */
-function dockHistory(): HTMLElement {
-  const wrap = el("div", { className: "dock-list" });
+/**
+ * 历史面板：搜索框常驻（重建列表时不能把它一起换掉，否则每敲一个字都丢焦点），
+ * 默认按标题过滤；勾了「搜内容」才去问 Bridge 要全文命中。
+ */
+const DOCK_SEARCH_DEBOUNCE_MS = 350;
+const DOCK_SEARCH_MAX_IDS = 80;
+/** 搜索时最多看多少条会话（内容搜索另有 80 条的预算，多传的会被 Bridge 截掉）。 */
+const DOCK_SEARCH_LIMIT = 200;
+
+let dockSearchQuery = "";
+let dockSearchDeep = false;
+let dockSearchMatches: Set<string> | null = null;
+let dockSearchBusy = false;
+let dockSearchPartial = false;
+/** Mac 上的 Bridge 不认识 session.search（旧版本）：别再反复请求，直接把原因写出来。 */
+let dockSearchStale = false;
+/** 这次搜索失败的原因；有内容时状态行显示它，而不是「没搜到」。 */
+let dockSearchNote = "";
+let dockSearchErrors = 0;
+let dockSearchTimer: number | null = null;
+let dockSearchToken = 0;
+let dockHistoryView: {
+  wrap: HTMLElement;
+  list: HTMLElement;
+  input: HTMLInputElement;
+  check: HTMLInputElement;
+  status: HTMLElement;
+} | null = null;
+
+function dockHistorySessions(): SessionSummary[] {
   const data = snapshot;
-  if (!data) {
-    wrap.append(el("p", { className: "hint", text: tr("正在读取会话…") }));
-    return wrap;
-  }
+  if (!data) return [];
+  const all = visibleSessions(data.sessions);
+  // 不搜索时列表只画最近 30 条；一开始搜就放开到全部（最多 DOCK_SEARCH_LIMIT 条），
+  // 否则排在 30 名之外的会话连标题都搜不到，用户会以为「明明有却搜不出来」。
+  const limit = dockSearchQuery.trim() ? DOCK_SEARCH_LIMIT : DOCK_HISTORY_LIMIT;
+  return all.slice(0, limit);
+}
+
+function dockHistoryMatch(session: SessionSummary): boolean {
+  const query = dockSearchQuery.trim().toLowerCase();
+  if (!query) return true;
+  // 标题永远在本地过滤：改写过的标题和原名都算。
+  const title = `${session.title} ${session.originalTitle ?? ""}`.toLowerCase();
+  if (title.includes(query)) return true;
+  return dockSearchDeep && dockSearchMatches?.has(session.sessionId) === true;
+}
+
+function renderDockHistoryList(): void {
+  const view = dockHistoryView;
+  if (!view) return;
   const active = dockActive(parseRoute());
-  const sessions = visibleSessions(data.sessions).slice(0, DOCK_HISTORY_LIMIT);
+  const all = dockHistorySessions();
+  const sessions = all.filter(dockHistoryMatch);
+  const nodes: HTMLElement[] = [];
   if (sessions.length === 0) {
-    wrap.append(el("p", { className: "hint", text: tr("还没有会话。") }));
-    return wrap;
+    nodes.push(
+      el("p", {
+        className: "hint",
+        text:
+          dockSearchQuery.trim() === ""
+            ? tr("还没有会话。")
+            : dockSearchBusy
+              ? tr("正在搜索…")
+              : tr("没有匹配的会话。"),
+      }),
+    );
   }
   for (const session of sessions) {
     const current = active.sessionId === session.sessionId;
@@ -1957,12 +2322,14 @@ function dockHistory(): HTMLElement {
       el("span", { className: "dock-history-facts" }, [
         el("span", {
           className: "dock-history-meta",
-          text: `${agentLabel(session.kind)} · ${recentTime(session.updatedAt)}`,
+          text: `${agentLabel(session.kind, session.hostedAgent)} · ${recentTime(session.updatedAt)}`,
         }),
         ...dockStatePills(session),
       ]),
     ]);
     node.title = `${session.title}\n${session.projectId}`;
+    node.dataset.sessionId = session.sessionId;
+    node.dataset.state = dockStateKey(session);
     if (current) node.setAttribute("aria-current", "page");
     node.addEventListener("click", () => {
       navigate({
@@ -1972,15 +2339,191 @@ function dockHistory(): HTMLElement {
         sessionId: session.sessionId,
       });
     });
-    wrap.append(node);
+    nodes.push(node);
   }
-  return wrap;
+  view.list.replaceChildren(...nodes);
+
+  const query = dockSearchQuery.trim();
+  if (!dockSearchDeep || query === "") {
+    view.status.hidden = true;
+    view.status.textContent = "";
+    return;
+  }
+  view.status.hidden = false;
+  const unread = dockSearchErrors > 0 ? tr(`，{0} 个会话读不到`, dockSearchErrors) : "";
+  if (dockSearchStale) {
+    view.status.textContent = tr("Mac 上的 Bridge 还是旧版本，升级后才能搜对话内容");
+  } else if (dockSearchBusy) {
+    view.status.textContent = tr("正在搜索对话内容…");
+  } else if (dockSearchNote) {
+    view.status.textContent = tr(`搜索失败：{0}`, dockSearchNote);
+  } else if (dockSearchMatches === null) {
+    view.status.textContent = tr("勾选后按对话内容搜索");
+  } else {
+    const count = dockSearchMatches.size;
+    view.status.textContent =
+      count === 0
+        ? dockSearchPartial
+          ? tr(`内容没搜到（超时，可能没搜完）{0}`, unread)
+          : tr(`内容没搜到{0}`, unread)
+        : dockSearchPartial
+          ? tr(`内容命中 {0} 个会话（超时，可能没搜完）{1}`, count, unread)
+          : tr(`内容命中 {0} 个会话{1}`, count, unread);
+  }
+}
+
+function scheduleDeepSearch(): void {
+  if (dockSearchTimer !== null) {
+    window.clearTimeout(dockSearchTimer);
+    dockSearchTimer = null;
+  }
+  const query = dockSearchQuery.trim();
+  if (!dockSearchDeep || query === "") {
+    dockSearchToken += 1;
+    dockSearchBusy = false;
+    dockSearchMatches = null;
+    dockSearchPartial = false;
+    dockSearchNote = "";
+    dockSearchErrors = 0;
+    renderDockHistoryList();
+    return;
+  }
+  if (dockSearchStale) {
+    dockSearchBusy = false;
+    renderDockHistoryList();
+    return;
+  }
+  dockSearchBusy = true;
+  renderDockHistoryList();
+  dockSearchTimer = window.setTimeout(() => {
+    dockSearchTimer = null;
+    void runDeepSearch(query);
+  }, DOCK_SEARCH_DEBOUNCE_MS);
+}
+
+async function runDeepSearch(query: string): Promise<void> {
+  dockSearchToken += 1;
+  const token = dockSearchToken;
+  const sessionIds = dockHistorySessions()
+    .slice(0, DOCK_SEARCH_MAX_IDS)
+    .map((session) => session.sessionId);
+  const peer = active;
+  if (!peer) {
+    dockSearchBusy = false;
+    dockSearchMatches = new Set();
+    dockSearchNote = tr("没连上 Mac，只按标题搜");
+    renderDockHistoryList();
+    return;
+  }
+
+  // 比网页还旧的 Bridge 连 METHOD 都不认识：帧在协议层就被丢掉，不会回错误，
+  // 等下去只会白等到超时。直接按版本判定，省掉这一次干等。
+  const hostVersion = connected?.info.version;
+  if (hostVersion !== undefined && !atLeastVersion(hostVersion, [0, 11, 4])) {
+    dockSearchStale = true;
+    dockSearchBusy = false;
+    dockSearchMatches = new Set();
+    dockSearchNote = "";
+    renderDockHistoryList();
+    return;
+  }
+
+  // 直接用 request 而不是 call()：要拿到错误码，才能把「Bridge 太旧」和「网络断了」分开说。
+  let response;
+  try {
+    // 桥端预算 8 秒，超时给到 10 秒就够；再长只会让人干等。
+    response = await peer.request("session.search", { query, sessionIds }, 10_000);
+  } catch (error) {
+    if (token !== dockSearchToken) return;
+    dockSearchBusy = false;
+    dockSearchMatches = new Set();
+    dockSearchNote = error instanceof Error ? error.message : tr("搜索失败");
+    // 连不上 / 没回音时也按「Bridge 太旧或不在线」降级，别再每敲一个字等 10 秒。
+    const code =
+      error instanceof PeerError || error instanceof RpcCallError ? error.code : undefined;
+    if (code === "timeout" || code === "unsupported") dockSearchStale = true;
+    renderDockHistoryList();
+    return;
+  }
+  if (token !== dockSearchToken) return;
+  dockSearchBusy = false;
+
+  if (!response.ok) {
+    // 老版本 Bridge 抛的是普通 Error，包成 internal 后只留下这句话；两种都算「太旧」。
+    const stale =
+      response.error?.code === "unsupported" ||
+      /unsupported method/i.test(response.error?.message ?? "");
+    if (stale) {
+      // 老版本 Bridge 没有这个 RPC：记住别再问，正文搜索整体降级。
+      dockSearchStale = true;
+      dockSearchNote = "";
+    } else {
+      dockSearchNote = response.error?.message ?? tr("搜索失败");
+    }
+    dockSearchMatches = new Set();
+    dockSearchPartial = false;
+    renderDockHistoryList();
+    return;
+  }
+
+  const result = response.result as SessionSearchResult;
+  dockSearchMatches = new Set(result.matches);
+  dockSearchPartial = result.partial === true;
+  dockSearchErrors = result.errors ?? 0;
+  dockSearchNote = "";
+  renderDockHistoryList();
+}
+
+function dockHistory(): HTMLElement {
+  if (!dockHistoryView) {
+    const wrap = el("div", { className: "dock-history" });
+    const search = el("div", { className: "dock-search" });
+    const input = el("input", {
+      className: "dock-search-input",
+      attrs: {
+        type: "search",
+        placeholder: tr("搜索历史对话…"),
+        "aria-label": tr("搜索历史对话"),
+        autocomplete: "off",
+      },
+    });
+    input.value = dockSearchQuery;
+    input.addEventListener("input", () => {
+      dockSearchQuery = input.value;
+      if (dockSearchDeep) {
+        // 内容搜索要防抖，先把标题命中的结果画出来
+        scheduleDeepSearch();
+      } else {
+        renderDockHistoryList();
+      }
+    });
+    const label = el("label", { className: "dock-search-check" });
+    const check = el("input", { attrs: { type: "checkbox", "aria-label": tr("同时搜索对话内容") } });
+    check.checked = dockSearchDeep;
+    check.addEventListener("change", () => {
+      dockSearchDeep = check.checked;
+      scheduleDeepSearch();
+    });
+    label.append(check, document.createTextNode(tr("搜内容")));
+    search.append(input, label);
+    const status = el("p", { className: "dock-search-status" });
+    status.hidden = true;
+    const list = el("div", { className: "dock-list dock-history-list" });
+    wrap.append(search, status, list);
+    dockHistoryView = { wrap, list, input, check, status };
+  }
+  renderDockHistoryList();
+  return dockHistoryView.wrap;
 }
 
 /** 待办面板的本地状态：切换 tab 会重绘，草稿与上次数据留着。 */
 let todoDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
+/** 点开的待办：列表里标题是单行截断的，展开后才看得到整段。桌面和手机同一套。 */
+let expandedTodoId: string | null = null;
 let todoCache: TodoListResult | null = null;
 let todoError = "";
+/** 待办读取失败时点「重试」要怎么重来；不懂重试的错误留 null。 */
+let todoRetry: (() => void) | null = null;
 /** 正在就地编辑的待办；重绘后靠它回到编辑态。 */
 let editingTodoId: string | null = null;
 let todoEditDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
@@ -2053,8 +2596,10 @@ function dockTodos(): HTMLElement {
       }
       todoCache = result;
       todoError = "";
+      todoRetry = null;
     } catch (error) {
       todoError = messageOf(error);
+      todoRetry = isRetryableError(error) ? () => void refresh() : null;
     }
     paintList();
   };
@@ -2117,12 +2662,25 @@ function dockTodos(): HTMLElement {
   const row = (item: TodoItem): HTMLElement => {
     const done = item.checkedAt !== null;
     if (item.todoId === editingTodoId) return editRow(item, done);
-    const main = el("button", { className: "todo-main", attrs: { type: "button", title: tr("填到输入框") } }, [
-      el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
-      el("span", { className: "todo-title", text: item.title }),
-    ]);
-    main.addEventListener("click", () => void use(item));
-    const action = (name: "refresh" | "pencil" | "trash", label: string, run: () => void): HTMLElement => {
+    const expanded = expandedTodoId === item.todoId;
+    const main = el(
+      "button",
+      {
+        className: "todo-main",
+        attrs: { type: "button", title: expanded ? tr("收起") : tr("展开查看全文") },
+      },
+      [
+        el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
+        el("span", { className: "todo-title", text: item.title }),
+      ],
+    );
+    // 点条目只做一件事：展开/收起全文。填到输入框挪到右侧按钮，
+    // 否则长待办永远看不全，点一下又会被勾成完成。
+    main.addEventListener("click", () => {
+      expandedTodoId = expanded ? null : item.todoId;
+      paintList();
+    });
+    const action = (name: keyof typeof ICONS, label: string, run: () => void): HTMLElement => {
       const node = el(
         "button",
         { className: "todo-action", attrs: { type: "button", "aria-label": label, title: label } },
@@ -2132,11 +2690,18 @@ function dockTodos(): HTMLElement {
       return node;
     };
     const actions = el("div", { className: "todo-actions" }, [
+      action("swap", tr("填到输入框"), () => void use(item)),
       ...(done ? [action("refresh", tr("标记未完成"), () => void setChecked(item, false))] : []),
       action("pencil", tr("编辑"), () => startEdit(item)),
       action("trash", tr("删除待办"), () => void remove(item)),
     ]);
-    return el("div", { className: `todo-item${done ? " is-done" : ""}` }, [main, actions]);
+    return el(
+      "div",
+      {
+        className: `todo-item${done ? " is-done" : ""}${expanded ? " is-expanded" : ""}`,
+      },
+      [main, actions],
+    );
   };
 
   /** 就地编辑：标题、分类都能改，改完才发 RPC。 */
@@ -2225,7 +2790,14 @@ function dockTodos(): HTMLElement {
 
   const paintList = (): void => {
     const parts: HTMLElement[] = [];
-    if (todoError) parts.push(el("p", { className: "hint warn", text: todoError }));
+    if (todoError) {
+      parts.push(
+        el("p", { className: "hint warn" }, [
+          el("span", { text: todoError }),
+          ...(todoRetry ? [button(tr("重试"), todoRetry, "btn small")] : []),
+        ]),
+      );
+    }
     const data = todoCache;
     if (!data) {
       if (!todoError) parts.push(el("p", { className: "hint", text: tr("正在读取待办…") }));
@@ -2265,10 +2837,84 @@ function dockTodos(): HTMLElement {
   return wrap;
 }
 
+/**
+ * 窄屏没有常驻 dock，导航折进左侧抽屉：同一个 dock 加 `is-open` 就是抽屉，
+ * 宽屏的 CSS 不认这个类，桌面布局不受影响。
+ */
+let dockOpen = false;
+let dockKeyHandler: ((event: KeyboardEvent) => void) | null = null;
+/**
+ * 重画 dock 内容。dock 是进入这条路由时画好的，停在聊天页时别的会话完成了、
+ * 未读变了它也还是一份旧 DOM；窄屏抽屉每次打开时得用它刷一次。
+ */
+let dockRepaint: (() => void) | null = null;
+
+function setDockOpen(open: boolean): void {
+  if (dockOpen === open) return;
+  dockOpen = open;
+  const dock = document.querySelector<HTMLElement>(".dock");
+  dock?.classList.toggle("is-open", open);
+  if (open) {
+    // 先重画再显示：否则抽屉里永远是进入当前会话时那份旧数据（未读、运行中都是旧的）。
+    dockRepaint?.();
+  }
+  if (open && dock) {
+    if (!document.querySelector(".dock-scrim")) dock.after(dockScrim());
+  } else {
+    document.querySelector(".dock-scrim")?.remove();
+  }
+  document.querySelector(".dock-toggle")?.setAttribute("aria-expanded", String(open));
+  document.body.classList.toggle("dock-open", open);
+  if (dockKeyHandler) {
+    document.removeEventListener("keydown", dockKeyHandler);
+    dockKeyHandler = null;
+  }
+  if (open) {
+    // 手机上没键盘也用不上，桌面窄窗口时按 Esc 能收起。
+    dockKeyHandler = (event) => {
+      if (event.key === "Escape") setDockOpen(false);
+    };
+    document.addEventListener("keydown", dockKeyHandler);
+  }
+}
+
+/** 抽屉背后的遮罩：点一下就收起。 */
+function dockScrim(): HTMLElement {
+  const node = el("div", { className: "dock-scrim", attrs: { "aria-hidden": "true" } });
+  node.addEventListener("click", () => setDockOpen(false));
+  return node;
+}
+
+/** 顶栏左侧的抽屉开关，只在窄屏出现（宽屏已有常驻 dock）。 */
+function dockToggleButton(): HTMLButtonElement {
+  const node = button("", () => setDockOpen(!dockOpen), "btn ghost small dock-toggle");
+  node.append(icon("menu"));
+  node.setAttribute("aria-label", tr("打开会话导航"));
+  node.setAttribute("aria-haspopup", "dialog");
+  node.setAttribute("aria-controls", "dock-nav");
+  node.setAttribute("aria-expanded", String(dockOpen));
+  return node;
+}
+
 /** 桌面宽屏左侧的 dock：结构树、历史与待办三个 tab，选中的 tab 记在 localStorage。 */
 function dockSidebar(route: Route): HTMLElement {
+  // 换一页就重建侧栏：历史面板里的 DOM（搜索框）跟着换新，搜索词本身留着。
+  dockHistoryView = null;
   let tab = readDockTab();
-  const nav = el("nav", { className: "dock", attrs: { "aria-label": tr("会话导航") } });
+  const nav = el("nav", {
+    className: `dock${dockOpen ? " is-open" : ""}`,
+    attrs: { "aria-label": tr("会话导航"), id: "dock-nav" },
+  });
+  // 抽屉头部只在窄屏出现：宽屏 dock 是常驻侧栏，不需要标题和关闭按钮。
+  const closeButton: HTMLButtonElement = button("", () => setDockOpen(false), "btn ghost small dock-close");
+  closeButton.append(icon("close"));
+  closeButton.setAttribute("aria-label", tr("关闭会话导航"));
+  nav.append(
+    el("div", { className: "dock-head" }, [
+      el("span", { className: "dock-head-title", text: tr("会话导航") }),
+      closeButton,
+    ]),
+  );
   const tabs = el("div", { className: "dock-tabs", attrs: { role: "tablist" } });
   const body = el("div", { className: "dock-body" });
   const makeTab = (id: DockTab, label: string): HTMLButtonElement => {
@@ -2300,6 +2946,11 @@ function dockSidebar(route: Route): HTMLElement {
   };
   paint();
   nav.append(tabs, body);
+  dockRepaint = () => {
+    // 页面切走后这份 nav 已经脱离文档，别再去改它。
+    if (!nav.isConnected) return;
+    paint();
+  };
   return nav;
 }
 
@@ -2314,11 +2965,17 @@ function shortAgentName(app: AppInfo): string {
   return app.name.split(/[·\s]/)[0] ?? app.name;
 }
 
-function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"]): string {
+function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"], hostedAgent?: HostedAgent): string {
   if (kind === "codex" || kind === "codex-cli" || kind === "codex-thread") return "CX";
   if (kind === "antigravity" || kind === "antigravity-desktop") return "AG";
   if (kind === "dsh") return "DS";
   if (kind === "pi") return "PI";
+  // 托管会话按实际引擎显示，别再一律当成 Claude Code。
+  if (kind === "hosted") {
+    if (hostedAgent === "pi") return "PI";
+    if (hostedAgent === "claude") return "CC";
+    return "BH";
+  }
   return "CC";
 }
 
@@ -2679,6 +3336,7 @@ function renderTopbar(crumbs: Crumb[]): HTMLElement {
       el("span", { className: "brand-mark", text: "AB" }),
       el("span", { className: "brand-name", text: "Agent Bridge" }),
     ]),
+    dockToggleButton(),
     el(
       "a",
       {
@@ -2869,6 +3527,22 @@ function startSnapshotPolling(token: number): void {
   }, 5_000);
 }
 
+/**
+ * 聊天页只轮询当前会话，侧栏那批会话走的是 session.list 快照（10 秒一次）。
+ * 发送或回合状态一变就先按已知状态改掉快照里的这一条，侧栏「运行中」才不会滞后。
+ */
+function markSessionState(sessionId: string, busy: boolean): void {
+  if (!snapshot) return;
+  const index = snapshot.sessions.findIndex((item) => item.sessionId === sessionId);
+  const session = snapshot.sessions[index];
+  if (!session) return;
+  if (session.busy === busy && (!busy || session.live)) return;
+  const sessions = [...snapshot.sessions];
+  sessions[index] = busy ? { ...session, busy: true, live: true } : { ...session, busy: false };
+  snapshot = { ...snapshot, sessions };
+  syncDockSessions();
+}
+
 function snapshotSignature(): string {
   if (!snapshot) return "";
   return [
@@ -3036,12 +3710,6 @@ function renderProjects(route: Route & { level: "projects" }): void {
   }
 
   const isHosted = route.appId === "hosted";
-  const addForm = isHosted
-    ? hostedAddDirForm(() => {
-        snapshot = null;
-        void renderRoute();
-      })
-    : null;
   renderShell(
     el("main", { className: "main" }, [
       el("section", { className: "view-head" }, [
@@ -3051,21 +3719,10 @@ function renderProjects(route: Route & { level: "projects" }): void {
           el("h1", { className: "display", text: tr("工程") }),
           el("p", {
             className: "meta",
-            text: tr(`{0} 个工程，按会话数量排列{1}`, projects.length, isHosted ? tr("；托管目录可在本页添加") : ""),
+            // 白名单只在这台 Mac 上改：远程设备连读到的列表都不该能自己扩。
+            text: tr(`{0} 个工程，按会话数量排列{1}`, projects.length, isHosted ? tr("；托管目录只能在 Mac 菜单栏的「设定」里修改") : ""),
           }),
         ]),
-        ...(addForm
-          ? [
-              button(
-                tr("添加目录"),
-                () => {
-                  addForm.hidden = !addForm.hidden;
-                  if (!addForm.hidden) addForm.querySelector("input")?.focus();
-                },
-                "btn ghost small",
-              ),
-            ]
-          : []),
         button(
           tr("刷新"),
           () => {
@@ -3075,46 +3732,10 @@ function renderProjects(route: Route & { level: "projects" }): void {
           "btn ghost small",
         ),
       ]),
-      ...(addForm ? [addForm] : []),
       list,
     ]),
     crumbsFor(route),
   );
-}
-
-/** 把本机目录加入托管白名单：必须是已存在的绝对路径，添加后立刻出现在工程列表里。 */
-function hostedAddDirForm(onAdded: () => void): HTMLElement {
-  const input = el("input", {
-    className: "input mono",
-    attrs: { type: "text", placeholder: "/Users/you/code/project", spellcheck: "false", autocomplete: "off" },
-  });
-  const status = el("p", { className: "hint", text: tr("填这台 Mac 上已存在的绝对路径，添加后即可从这里新建托管会话。") });
-  const form = el("div", { className: "add-dir" }, [input, button(tr("添加"), () => void submitPath(), "btn primary small"), status]);
-  form.hidden = true;
-  const submitPath = async (): Promise<void> => {
-    const path = input.value.trim();
-    if (!path) {
-      status.classList.add("error");
-      status.textContent = tr("先填目录路径。");
-      return;
-    }
-    status.classList.remove("error");
-    status.textContent = tr("正在添加…");
-    try {
-      await call<HostedDirsResult>("hosted.addDir", { path });
-      onAdded();
-    } catch (error) {
-      status.classList.add("error");
-      status.textContent = messageOf(error);
-    }
-  };
-  trackIme(input);
-  input.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || isImeEnter(event)) return;
-    event.preventDefault();
-    void submitPath();
-  });
-  return form;
 }
 
 function renderSessions(route: Route & { level: "sessions" }): void {
@@ -3137,23 +3758,26 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   if (panelHost && project && appInfo && desktopPanelDraft) {
     panelHost.append(desktopCreatePanel(project, appInfo, desktopPanelDraft));
   }
-  const openCreate = (): void => {
+  const openCreate = async (): Promise<void> => {
     if (!panelHost || !project || !appInfo) return;
     if (canCreateDesktop) {
       desktopDraft = { projectId: project.projectId, text: "" };
       panelHost.replaceChildren(desktopCreatePanel(project, appInfo, desktopDraft));
     } else {
+      // 默认沿用上一次创建时的选项；Bridge 没记过（第一次用）就退回手动 / Claude Code。
+      // 现取一次而不是用页面里缓存的：别的标签页建过会话后缓存就是旧的。
+      const last = await fetchHostedCreateDefaults();
       hostedDraft = {
         projectId: project.projectId,
         title: "",
-        model: "",
-        piModel: "",
-        effort: "",
-        mode: "manual",
-        agent: "claude",
-        subagentModel: "",
-        piThinking: "",
-        subagentThinking: "",
+        model: last?.model ?? "",
+        piModel: last?.piModel ?? "",
+        effort: last?.effort ?? "",
+        mode: last?.permissionMode ?? "manual",
+        agent: last?.agent ?? "claude",
+        subagentModel: last?.subagentModel ?? "",
+        piThinking: last?.piThinking ?? "",
+        subagentThinking: last?.subagentThinking ?? "",
       };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
@@ -3198,7 +3822,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         { className: `mark ${busy ? "busy" : session.live ? "live" : ""}` },
         busy
           ? [el("span", { className: "spinner mark-spinner" })]
-          : [document.createTextNode(agentMark(session.kind))],
+          : [document.createTextNode(agentMark(session.kind, session.hostedAgent))],
       ),
       el("span", { className: "row-main" }, [
         el("strong", { className: "row-title" }, [
@@ -3247,7 +3871,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     list.append(el("li", { className: session.archived ? "row-item is-archived" : "row-item" }, [row, actions]));
   }
 
-  const createHosted = canCreateHosted || canCreateDesktop ? button("", openCreate, "btn small create-btn") : null;
+  const createHosted = canCreateHosted || canCreateDesktop ? button("", () => void openCreate(), "btn small create-btn") : null;
   if (createHosted) {
     createHosted.append(
       el("span", {
@@ -4094,6 +4718,8 @@ interface ChatState {
   slashCommands?: string[];
   /** 「停止」按钮：只在 Bridge 托管的会话且回合还在跑时出现。 */
   stopButton?: HTMLButtonElement;
+  /** 拿到 slashCommands 之后才知道客户端支不支持 /clear：重新决定「清空历史」显不显示。 */
+  paintReset?: () => void;
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
   /** 点击压缩的时间；早于它发出的轮询不能用来判断压缩是否完成。 */
@@ -4104,6 +4730,10 @@ interface ChatState {
   answers?: Map<string, string[]>;
   /** 点击了状态行的「重试」：成功后要把「正在重试…」收回去。 */
   retrying?: boolean;
+  /** 已经翻到最早一条：轮询拿到的 nextBefore 不能再把「加载更早」解禁。 */
+  historyEnd?: boolean;
+  /** 手动折叠起来的消息（按回合首条 messageId）；5 秒轮询重绘后仍保持折叠。 */
+  folded?: Set<string>;
   contextButton: HTMLButtonElement;
   contextPop: HTMLElement;
   rail?: RailState;
@@ -4132,6 +4762,8 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const note = el("p", { className: "hint" });
   const list = el("div", { className: "transcript-body" });
   const status = el("p", { className: "hint" });
+  // 翻历史与 5 秒轮询是两条独立请求：共用一个 loading 会让点击被轮询默默吞掉。
+  let loadingOlder = false;
   const loadOlder = button("", () => {
     void loadOlderPage(state);
   }, "icon-btn composer-tool");
@@ -4279,10 +4911,48 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     sendButton.disabled = uploading || (input.value.trim().length === 0 && ready === 0);
   }
 
+  /**
+   * 「清空历史开始对话」：只在客户端明确支持 /clear 时才出现（托管 Claude 会把
+   * slash_commands 报上来），否则勾了也发不出去。勾选只对这一次发送生效，
+   * 发完自动收回，免得下次误清。
+   */
+  const resetToggle = el("input", { attrs: { type: "checkbox", "aria-label": tr("清空历史开始对话") } });
+  const resetLabel = el("label", { className: "composer-reset", attrs: { title: tr("先发送 /clear，再发这条") } }, [
+    resetToggle,
+    el("span", { className: "composer-reset-text", text: tr("清空历史开始对话") }),
+  ]);
+  resetLabel.hidden = true;
+
+  function paintResetToggle(): void {
+    const supported = (state.slashCommands ?? []).includes("clear") && canSend;
+    resetLabel.hidden = !supported;
+    if (!supported) resetToggle.checked = false;
+  }
+  state.paintReset = paintResetToggle;
+
   const submit = (): void => {
     if (sendButton.disabled) return;
-    void sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
+    void submitWithOptionalReset();
   };
+
+  async function submitWithOptionalReset(): Promise<void> {
+    if (!resetLabel.hidden && resetToggle.checked) {
+      sendButton.disabled = true;
+      status.classList.remove("error");
+      status.textContent = tr("正在清空会话历史…");
+      try {
+        await call<MessageSendResult>("message.send", { sessionId: state.session.sessionId, text: "/clear" }, 60_000);
+      } catch (error) {
+        status.classList.add("error");
+        status.textContent = messageOf(error);
+        updateSendState();
+        return;
+      }
+      resetToggle.checked = false;
+    }
+    await sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
+  }
+
   const sendButton = button(tr("发送"), submit, "btn primary");
   sendButton.disabled = !canSend;
 
@@ -4382,6 +5052,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       refreshButton,
       contextButton,
       stopButton,
+      resetLabel,
       sendButton,
       collapseButton,
     ]),
@@ -4595,6 +5266,32 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const subagentRow = (item: ModelOption, current: boolean, pick: (id: string) => void): HTMLElement =>
     modelRow(item, current, true, pick, tr("子代理用"));
 
+  /** 思考等级：一排小 chip，比模型那种长列表省地方；null 表示跟随 pi 设置。 */
+  const thinkingChips = (
+    levels: string[],
+    current: string | undefined,
+    pick: (level: string | null) => void,
+    action: string,
+  ): HTMLElement => {
+    const chip = (value: string | null, label: string, isCurrent: boolean): HTMLElement => {
+      const node = el("button", {
+        className: `thinking-chip${isCurrent ? " is-current" : ""}`,
+        text: label,
+        attrs: {
+          type: "button",
+          title: `${action}：${label}`,
+          "aria-pressed": isCurrent ? "true" : "false",
+        },
+      });
+      if (!isCurrent) node.addEventListener("click", () => pick(value));
+      return node;
+    };
+    return el("div", { className: "model-chips" }, [
+      chip(null, tr("跟随 pi 设置"), !current),
+      ...levels.map((level) => chip(level, level, current === level)),
+    ]);
+  };
+
   const paintModels = (info: SessionModelsResult): void => {
     const label = info.currentName ?? info.current;
     if (!label && info.models.length === 0) {
@@ -4608,7 +5305,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       el("span", { className: "model-chip-value", text: label ?? tr("未知") }),
       icon("chevron", "icon model-chev"),
     );
-    modelButton.title = tr(`当前模型：{0}{1}`, label ?? tr("未知"), info.canSwitchSubagent ? tr(` · 子代理：{0}`, info.subagentModel ?? tr("跟随 pi 设置")) : "");
+    modelButton.title = tr(
+      `当前模型：{0}{1}{2}`,
+      label ?? tr("未知"),
+      info.canSwitchThinking ? tr(` · 思考：{0}`, info.thinking ?? tr("跟随 pi 设置")) : "",
+      info.canSwitchSubagent ? tr(` · 子代理：{0}`, info.subagentModel ?? tr("跟随 pi 设置")) : "",
+    );
     const rows: HTMLElement[] = [];
     for (const section of ["main", "custom", "overflow"] as const) {
       const items = info.models.filter((item) => (item.section ?? "main") === section);
@@ -4636,6 +5338,22 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       for (const item of info.models) {
         rows.push(subagentRow(item, item.id === info.subagentModel, applySubagentModel));
       }
+    }
+    // pi 的思考等级：主会话走 --thinking（进程在跑可直接改），子代理写进 settings.json。
+    if (info.canSwitchThinking) {
+      rows.push(el("p", { className: "model-pop-group", text: tr("思考等级") }));
+      rows.push(thinkingChips(info.thinkingLevels ?? [], info.thinking, applyThinking, tr("切换思考等级")));
+    }
+    if (info.canSwitchSubagentThinking) {
+      rows.push(el("p", { className: "model-pop-group", text: tr("子代理思考等级") }));
+      rows.push(
+        thinkingChips(
+          info.thinkingLevels ?? [],
+          info.subagentThinking,
+          applySubagentThinking,
+          tr("切换子代理思考等级"),
+        ),
+      );
     }
     if (info.note) rows.push(el("p", { className: "model-pop-note", text: info.note }));
     modelPop.replaceChildren(...rows);
@@ -4678,6 +5396,36 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       flashNotice(model ? tr(`子代理模型已换成 {0}，新派生的子代理按它运行`, model) : tr("子代理模型改回跟随 pi 设置"));
     } catch (error) {
       flashNotice(tr(`换子代理模型失败：{0}`, messageOf(error)));
+    }
+  }
+
+  /** 换主会话的思考等级；null 表示改回跟随 pi 设置。 */
+  async function applyThinking(level: string | null): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setThinking", { sessionId: route.sessionId, level });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(level ? tr(`思考等级已换成 {0}`, level) : tr("思考等级改回跟随 pi 设置"));
+    } catch (error) {
+      flashNotice(tr(`换思考等级失败：{0}`, messageOf(error)));
+    }
+  }
+
+  /** 只换子代理的思考等级：主会话不动，之后新派生的子代理按它跑。 */
+  async function applySubagentThinking(level: string | null): Promise<void> {
+    closeModels();
+    try {
+      await call("hosted.setSubagentThinking", { sessionId: route.sessionId, level });
+      modelsKey = "";
+      await loadModels();
+      flashNotice(
+        level
+          ? tr(`子代理思考等级已换成 {0}，新派生的子代理按它运行`, level)
+          : tr("子代理思考等级改回跟随 pi 设置"),
+      );
+    } catch (error) {
+      flashNotice(tr(`换子代理思考等级失败：{0}`, messageOf(error)));
     }
   }
 
@@ -4830,7 +5578,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const page = await refreshTail(state);
   if (token !== renderToken) return;
-  if (page?.nextBefore) loadOlder.disabled = false;
+  if (page?.nextBefore && !state.historyEnd) loadOlder.disabled = false;
   startPolling();
   chatResumeKey = hashFor(route);
   chatResume = () => {
@@ -4841,8 +5589,9 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   async function loadOlderPage(current: ChatState): Promise<void> {
     const oldest = current.messages[0]?.messageId;
-    if (!oldest || current.loading) return;
-    current.loading = true;
+    if (!oldest || loadingOlder) return;
+    loadingOlder = true;
+    loadOlder.disabled = true;
     try {
       const result = await call<MessageListResult>("message.list", {
         sessionId: current.session.sessionId,
@@ -4851,13 +5600,20 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       });
       const fresh = result.messages.filter((message) => !current.known.has(message.messageId));
       for (const message of fresh) current.known.add(message.messageId);
-      current.messages = [...fresh, ...current.messages];
-      renderMessages(current);
-      if (!result.nextBefore) loadOlder.disabled = true;
+      if (fresh.length > 0) {
+        current.messages = [...fresh, ...current.messages];
+        renderMessages(current);
+        // 停在原地等于什么也没发生：视口要挪到刚读出来的最早一条，
+        // 否则用户在底部点一下，新内容全在视口上方，看着像没反应。
+        current.list.scrollTop = 0;
+      }
+      // 没有新消息（游标重复）或后端说没有更早的了，都当成翻到头，别再让人白点。
+      if (fresh.length === 0 || !result.nextBefore) current.historyEnd = true;
     } catch (error) {
-      current.status.textContent = messageOf(error);
+      statusError(current, error, () => void loadOlderPage(current));
     } finally {
-      current.loading = false;
+      loadingOlder = false;
+      loadOlder.disabled = current.historyEnd === true;
     }
   }
 }
@@ -5032,6 +5788,8 @@ interface FileBrowserState {
   entries: FsEntry[];
   preview: FsReadResult | null;
   error: string | null;
+  /** 出错时点「重试」要重做的那一步（读根目录 / 列目录 / 读文件）。 */
+  retry: (() => void) | null;
   loading: boolean;
 }
 
@@ -5245,7 +6003,12 @@ async function refreshRail(state: RailState): Promise<void> {
     paintRail(state, result);
   } catch (error) {
     state.signature = "";
-    state.body.replaceChildren(el("p", { className: "rail-empty", text: messageOf(error) }));
+    state.body.replaceChildren(
+      el("div", { className: "rail-empty" }, [
+        el("p", { text: messageOf(error) }),
+        ...(isRetryableError(error) ? [button(tr("重试"), () => void refreshRail(state), "btn small")] : []),
+      ]),
+    );
   } finally {
     state.loading = false;
   }
@@ -5302,6 +6065,7 @@ async function openFilesPane(state: RailState): Promise<void> {
     entries: [],
     preview: null,
     error: null,
+    retry: null,
     loading: false,
   };
   paintFiles(state, tr("正在读取项目目录…"));
@@ -5321,8 +6085,10 @@ async function loadFileRoots(state: RailState): Promise<void> {
     });
     files.roots = result.roots;
     files.error = result.roots.length === 0 ? tr("没有可浏览的项目目录") : null;
+    files.retry = null;
   } catch (error) {
     files.error = messageOf(error);
+    files.retry = isRetryableError(error) ? () => void loadFileRoots(state) : null;
   }
   files.loading = false;
   const first = files.roots[0];
@@ -5351,8 +6117,10 @@ async function listFiles(state: RailState, path: string): Promise<void> {
     files.parent = result.parent;
     files.entries = result.entries;
     files.error = null;
+    files.retry = null;
   } catch (error) {
     files.error = messageOf(error);
+    files.retry = isRetryableError(error) ? () => void listFiles(state, path) : null;
   }
   files.loading = false;
   paintFiles(state);
@@ -5371,8 +6139,10 @@ async function openFile(state: RailState, path: string): Promise<void> {
       path,
     });
     files.error = null;
+    files.retry = null;
   } catch (error) {
     files.error = messageOf(error);
+    files.retry = isRetryableError(error) ? () => void openFile(state, path) : null;
   }
   files.loading = false;
   paintFiles(state);
@@ -5479,7 +6249,14 @@ function paintFiles(state: RailState, placeholder?: string): void {
     return;
   }
   if (files.error) {
-    pane.append(el("p", { className: "rail-empty rail-error", text: files.error }));
+    // 断线、超时、Bridge 刚起来这类错误，用户不该只能反复点标签页来重来。
+    const retry = files.retry;
+    pane.append(
+      el("div", { className: "rail-empty rail-error" }, [
+        el("p", { text: files.error }),
+        ...(retry ? [button(tr("重试"), retry, "btn small")] : []),
+      ]),
+    );
     return;
   }
   if (files.entries.length === 0) {
@@ -5934,8 +6711,10 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
       paintContext(state);
     }
     if (result.slashCommands) state.slashCommands = result.slashCommands;
+    state.paintReset?.();
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
+    markSessionState(state.session.sessionId, state.busy);
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
     state.interrupted = result.interrupted === true;
     if (busyChanged) paintStopButton(state);
@@ -5958,12 +6737,7 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
   }
 }
 
-function stepTitle(text: string): string {
-  const line = (text.split("\n")[0] ?? "").trim();
-  return line.length > 76 ? `${line.slice(0, 76)}…` : line || tr("过程");
-}
-
-function processFold(steps: string[]): HTMLDetailsElement {
+function processFold(steps: MessageBlock[]): HTMLDetailsElement {
   const fold = el("details", { className: "turn-steps" });
   fold.append(
     el("summary", { className: "turn-steps-summary" }, [
@@ -5973,15 +6747,19 @@ function processFold(steps: string[]): HTMLDetailsElement {
     el(
       "div",
       { className: "turn-steps-body" },
-      steps.map((text) => {
+      steps.map((block) => {
+        const view = stepView(block);
         const step = el("details", { className: "turn-step" });
-        step.append(
-          el("summary", { className: "turn-step-summary" }, [
-            icon("chevron", "icon turn-step-chev"),
-            el("span", { className: "turn-step-title", text: stepTitle(text) }),
-          ]),
-          el("div", { className: "turn-step-body", text }),
-        );
+        const summary = el("summary", { className: "turn-step-summary" }, [
+          icon("chevron", "icon turn-step-chev"),
+        ]);
+        if (view.label && !view.described) {
+          summary.append(el("span", { className: "turn-step-tag", text: tr(view.label) }));
+        }
+        summary.append(el("span", { className: "turn-step-title", text: view.detail || tr("过程") }));
+        const body = el("div", { className: "turn-step-body", text: view.body });
+        if (block.truncated) body.append(el("span", { className: "turn-step-note", text: tr("…（已截断）") }));
+        step.append(summary, body);
         return step;
       }),
     ),
@@ -6296,9 +7074,17 @@ function queuedBubble(item: QueuedMessage): HTMLElement {
   return bubble;
 }
 
-function messageBubble(session: SessionSummary | null, message: MessageRecord): HTMLElement {
+function messageBubble(
+  session: SessionSummary | null,
+  message: MessageRecord,
+  folded?: Set<string> | null,
+): HTMLElement {
   const bubble = el("article", { className: `message ${message.role}` });
-  const hasText = message.blocks.some((block) => block.type === "text");
+  const text = message.blocks
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n\n");
+  const hasText = text !== "";
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: `role ${message.role}`, text: message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统") }),
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
@@ -6314,6 +7100,11 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
     );
   }
   bubble.append(meta);
+  // 预览插在 meta 之后、正文之前，折叠时就地替换掉正文的位置。
+  if (hasText && folded) {
+    const toggle = foldButton(bubble, folded, message.messageId, text);
+    if (toggle) meta.append(toggle);
+  }
   for (const block of message.blocks) {
     bubble.append(
       block.type === "tool"
@@ -6328,6 +7119,14 @@ function messageBubble(session: SessionSummary | null, message: MessageRecord): 
                 session ? () => void openMessageFullText(session.sessionId, message) : null,
               ),
     );
+  }
+  if (hasText && session) {
+    // 长消息读到底也能复制/分享，不用再滚回消息头。
+    const foot = messageFoot([
+      copyButton(copySource(session.sessionId, [message])),
+      shareButton(session, message),
+    ]);
+    if (foot) bubble.append(foot);
   }
   return bubble;
 }
@@ -6839,7 +7638,12 @@ async function openFilePreview(path: string): Promise<void> {
     }
   } catch (error) {
     if (request !== previewRequest) return;
-    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+    filePreviewBody?.replaceChildren(
+      el("div", { className: "file-preview-note is-error" }, [
+        el("p", { text: messageOf(error) }),
+        ...(isRetryableError(error) ? [button(tr("重试"), () => void openFilePreview(path), "btn small")] : []),
+      ]),
+    );
   }
 }
 
@@ -6876,7 +7680,14 @@ async function openMessageFullText(sessionId: string, message: MessageRecord): P
     }
   } catch (error) {
     if (request !== previewRequest) return;
-    filePreviewBody?.replaceChildren(el("p", { className: "file-preview-note is-error", text: messageOf(error) }));
+    filePreviewBody?.replaceChildren(
+      el("div", { className: "file-preview-note is-error" }, [
+        el("p", { text: messageOf(error) }),
+        ...(isRetryableError(error)
+          ? [button(tr("重试"), () => void openMessageFullText(sessionId, message), "btn small")]
+          : []),
+      ]),
+    );
   }
 }
 
@@ -6956,6 +7767,69 @@ function copyButton(text: string | (() => Promise<string>), title = tr("复制�
 /** 消息头右侧的操作区：分享、复制。 */
 function messageActions(buttons: (HTMLElement | null)[]): HTMLElement {
   return el("span", { className: "message-actions" }, buttons.filter((item): item is HTMLElement => item !== null));
+}
+
+/** 正文短到这个程度就没有折叠的必要，折起来只是多一步操作。 */
+const FOLD_MIN_CHARS = 240;
+const FOLD_MIN_LINES = 4;
+
+/**
+ * 消息头右侧的折叠按钮，折叠后只留「头一行 + 末一行」两行预览。
+ * 状态记在 `folded` 里（按回合首条 messageId），否则 5 秒轮询重绘会把它翻开。
+ */
+function foldButton(
+  bubble: HTMLElement,
+  folded: Set<string>,
+  key: string,
+  text: string,
+): HTMLElement | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const lines = trimmed
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line !== "");
+  if (trimmed.length < FOLD_MIN_CHARS && lines.length < FOLD_MIN_LINES) return null;
+  // 两行正好放「头」和「尾」：首行太长就截断，末行同理，中间省略不占行。
+  const clip = (line: string): string => (line.length > 64 ? `${line.slice(0, 64)}…` : line);
+  const head = clip(lines[0] ?? "");
+  const last = lines.length > 1 ? clip(lines[lines.length - 1] ?? "") : "";
+  const preview = el("div", {
+    className: "message-fold-preview",
+    text: last !== "" && last !== head ? `${head}\n${last}` : head,
+  });
+  bubble.append(preview);
+
+  const describe = (): string => (folded.has(key) ? tr("展开这条消息") : tr("折叠这条消息"));
+  const toggle = el(
+    "button",
+    { className: "share-btn fold-btn", attrs: { type: "button", "aria-expanded": String(!folded.has(key)) } },
+    [icon("chevron", "icon fold-chev")],
+  );
+  const sync = (): void => {
+    const isFolded = folded.has(key);
+    bubble.classList.toggle("is-folded", isFolded);
+    toggle.setAttribute("aria-expanded", String(!isFolded));
+    toggle.title = describe();
+    toggle.setAttribute("aria-label", describe());
+  };
+  toggle.addEventListener("click", () => {
+    if (folded.has(key)) folded.delete(key);
+    else folded.add(key);
+    sync();
+  });
+  sync();
+  return toggle;
+}
+
+/**
+ * 消息卡片底部的操作区：长消息读到底就能复制/分享，不用再滚回消息头。
+ * 顶部那排保留，两处按钮是同一套。
+ */
+function messageFoot(buttons: (HTMLElement | null)[]): HTMLElement | null {
+  const items = buttons.filter((item): item is HTMLElement => item !== null);
+  if (items.length === 0) return null;
+  return el("div", { className: "message-foot" }, items);
 }
 
 /** 消息里所有正文块，按顺序拼回纯文本。 */
@@ -7078,9 +7952,11 @@ function assistantTurn(
   state: ChatState | null = null,
   /** 最新一回合才有；提问在等答案时回合是忙的，不能和下一步按钮共用同一个门槛。 */
   askState: ChatState | null = null,
+  /** 折叠状态（按回合首条 messageId）；任务页不传，就没有折叠按钮。 */
+  folded?: Set<string> | null,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
-  const steps: string[] = [];
+  const steps: MessageBlock[] = [];
   const nextSteps: MessageBlock[] = [];
   let peer = false;
   let lastText: MessageRecord | undefined;
@@ -7095,7 +7971,7 @@ function assistantTurn(
       } else if (block.type === "ask") {
         continue;
       } else {
-        steps.push(block.truncated ? tr(`{0}\n…（已截断）`, block.text) : block.text);
+        steps.push(block);
       }
     }
     if (hasText) lastText = message;
@@ -7118,7 +7994,12 @@ function assistantTurn(
     );
   }
   bubble.append(meta);
-  let folded = steps.length === 0;
+  const foldKey = messages[0]?.messageId ?? "";
+  if (folded && foldKey) {
+    const toggle = foldButton(bubble, folded, foldKey, textBlocks(messages));
+    if (toggle) meta.append(toggle);
+  }
+  let foldedSteps = steps.length === 0;
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
@@ -7133,16 +8014,28 @@ function assistantTurn(
         continue;
       } else if (block.type === "ask") {
         bubble.append(askBox(block, askState));
-      } else if (!folded) {
+      } else if (!foldedSteps) {
         bubble.append(processFold(steps));
-        folded = true;
+        foldedSteps = true;
       }
     }
   }
-  if (!folded) bubble.append(processFold(steps));
+  if (!foldedSteps) bubble.append(processFold(steps));
   // 只有最新一回合的盒子可以点；历史回合保留文字说明。
   const latest = nextSteps[nextSteps.length - 1];
   if (latest) bubble.append(nextStepBox(latest, latest.pending ? (askState ?? state) : state));
+  if (session) {
+    // 整回合的复制放在底部：读完长回复就能直接点，和消息头那排是同一套动作。
+    const footText = textBlocks(messages);
+    const lastText = [...messages]
+      .reverse()
+      .find((message) => message.blocks.some((block) => block.type === "text"));
+    const foot = messageFoot([
+      footText ? copyButton(copySource(session.sessionId, messages)) : null,
+      lastText ? shareButton(session, lastText) : null,
+    ]);
+    if (foot) bubble.append(foot);
+  }
   return bubble;
 }
 
@@ -7205,6 +8098,7 @@ function renderMessages(state: ChatState): void {
     if (state.busy || state.interrupted) markTurnState(list, state);
     return;
   }
+  const folded = state.folded ?? (state.folded = new Set<string>());
   let turn: MessageRecord[] = [];
   const lastMessage = state.messages[state.messages.length - 1];
   const canAct = state.session.canSend && !state.busy && !state.interrupted && state.queued.length === 0;
@@ -7217,6 +8111,7 @@ function renderMessages(state: ChatState): void {
         turn,
         isLastTurn && canAct ? state : null,
         isLastTurn ? state : null,
+        folded,
       ),
     );
     turn = [];
@@ -7227,7 +8122,7 @@ function renderMessages(state: ChatState): void {
       continue;
     }
     flush();
-    list.append(messageBubble(state.session, message));
+    list.append(messageBubble(state.session, message, folded));
   }
   flush();
   appendQueued();
@@ -7287,6 +8182,7 @@ async function sendMessage(
       state.busy = true;
       state.interrupted = false;
       paintStopButton(state);
+      markSessionState(state.session.sessionId, true);
       renderMessages(state);
     }
     status.textContent = state.session.hosted
@@ -7302,7 +8198,7 @@ async function sendMessage(
     if (result.accepted) onSent();
     window.setTimeout(() => {
       void refreshTail(state).then((page) => {
-        if (page?.nextBefore) loadOlder.disabled = false;
+        if (page?.nextBefore && !state.historyEnd) loadOlder.disabled = false;
       });
     }, 800);
   } catch (error) {

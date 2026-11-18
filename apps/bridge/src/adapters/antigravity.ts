@@ -16,6 +16,7 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { toolSummaryOf } from "../tool-summary.js";
 
 const ANTIGRAVITY_DIR = join(homedir(), ".gemini", "antigravity-cli");
 const SUMMARIES_DB = join(ANTIGRAVITY_DIR, "conversation_summaries.db");
@@ -144,7 +145,13 @@ function stepTime(fields: { num: Map<string, number> }): number {
 }
 
 function toolBlock(name: string, args: string): MessageBlock {
-  return { type: "tool", ...truncate(`调用 ${name} ${args}`.trim(), 300) };
+  // args 是 JSON 原文，工具自己写的说明优先当作这一步的标题。
+  const summary = toolSummaryOf(args);
+  return {
+    type: "tool",
+    ...truncate(`调用 ${name} ${args}`.trim(), 300),
+    ...(summary ? { summary } : {}),
+  };
 }
 
 /** Prompt written by `agy` for an interrupted turn; the UI shows it as an interruption. */

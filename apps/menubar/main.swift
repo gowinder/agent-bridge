@@ -73,6 +73,7 @@ struct Snapshot: Decodable {
     let devices: [DeviceInfo]
     let connections: [ConnectionInfo]
     let devtools: DevtoolsInfo?
+    let hostLog: [String]?
     let pairings: [PairingInfo]?
     let error: String?
 }
@@ -106,8 +107,12 @@ final class AdminClient {
         if let home = ProcessInfo.processInfo.environment["AGENT_BRIDGE_HOME"], !home.isEmpty {
             return URL(fileURLWithPath: home, isDirectory: true)
         }
+        // 预览版与正式版各用一份状态目录，名字由 build.sh 写进 Info.plist：
+        // 桥的数据库、白名单、托管会话都不会互相覆盖，也能同时跑两份。
+        let name = (Bundle.main.object(forInfoDictionaryKey: "AgentBridgeStateDir") as? String)
+            .flatMap { $0.isEmpty ? nil : $0 } ?? "AgentBridge"
         return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/AgentBridge", isDirectory: true)
+            .appendingPathComponent("Library/Application Support/\(name)", isDirectory: true)
     }()
 
     static let portFileName = "admin-port"
@@ -276,6 +281,24 @@ final class AdminClient {
 
     func setHostedAllowBypass(_ enabled: Bool) async throws -> HostedConfig {
         let data = try await request("POST", "/hosted", body: ["allowBypassPermissions": enabled])
+        return try JSONDecoder().decode(HostedConfig.self, from: data)
+    }
+
+    /// 菜单栏自己的动作也记进本机操作日志；改设置那些 Bridge 自己会记。
+    func log(_ line: String) {
+        Task { _ = try? await request("POST", "/log", body: ["line": line]) }
+    }
+
+    /// 这台机器上已有工程的目录，用于把白名单一次配好。
+    func projectDirs() async throws -> [String] {
+        let data = try await request("GET", "/projects")
+        struct Payload: Decodable { let dirs: [String] }
+        return try JSONDecoder().decode(Payload.self, from: data).dirs
+    }
+
+    /// 整份替换托管白名单：远程设备没有这条通路，只有本机 admin 接口能改。
+    func setHostedDirs(_ dirs: [String]) async throws -> HostedConfig {
+        let data = try await request("POST", "/hosted", body: ["dirs": dirs])
         return try JSONDecoder().decode(HostedConfig.self, from: data)
     }
 }
@@ -457,12 +480,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsPortLabel: NSTextField?
     private var settingsBypassSwitch: NSSwitch?
     private var settingsDirsLabel: NSTextField?
+    private var settingsAddDirButton: NSButton?
+    private var settingsImportDirsButton: NSButton?
     private var settingsIdleLabel: NSTextField?
     private var settingsFilesSwitch: NSSwitch?
     private var settingsTerminalSwitch: NSSwitch?
     private var settingsExpiryReminderSwitch: NSSwitch?
+    private var settingsMessageBubbleSwitch: NSSwitch?
     private var settingsAutoUpdateSwitch: NSSwitch?
-    private var settingsPrereleaseChannelSwitch: NSSwitch?
+    private var settingsReleaseUpgradeSwitch: NSSwitch?
     private var autoUpdateTimer: Timer?
     /// 自动更新失败（网络、没有写权限）后先退避一小时，别每 10 分钟重试一遍。
     private var autoUpdateBackoffUntil: Date?
@@ -481,6 +507,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         get { UserDefaults.standard.object(forKey: "devtoolsExpiryReminder") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "devtoolsExpiryReminder") }
     }
+
+    /// 网页发来消息时在状态图标下方弹的那个气泡。默认开，关掉后消息只进「日志」页。
+    private var messageBubbleEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: "messageBubbleEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "messageBubbleEnabled") }
+    }
     private var settingsTable: NSTableView?
     private var settingsCountLabel: NSTextField?
     private var settingsEmptyLabel: NSTextField?
@@ -493,14 +525,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var bubbleWindow: NSWindow?
     private var bubbleToken = 0
 
+    /// 预览版以前和正式版共用一个 bundle id，分开之后偏好会留空（自动更新、到期提醒、
+    /// 输入校正都得重新勾一遍）。第一次启动时从旧 domain 搬一次，中继地址不搬：
+    /// 预览版连的是 preview 中继，搬过来会指错环境。
+    private func migratePreviewDefaults() {
+        guard let id = Bundle.main.bundleIdentifier, id.hasSuffix(".preview") else { return }
+        let defaults = UserDefaults.standard
+        guard defaults.object(forKey: "previewDefaultsMigrated") == nil else { return }
+        let legacy = defaults.persistentDomain(forName: "dev.agent-bridge.menubar") ?? [:]
+        for (key, value) in legacy where key != "relayUrl" && defaults.object(forKey: key) == nil {
+            defaults.set(value, forKey: key)
+        }
+        defaults.set(true, forKey: "previewDefaultsMigrated")
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        migratePreviewDefaults()
         NSApp.setActivationPolicy(.accessory)
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.image = NSImage(
-            systemSymbolName: "antenna.radiowaves.left.and.right",
-            accessibilityDescription: "Agent Bridge"
-        )
-        statusItem.button?.image?.isTemplate = true
+        statusItem.button?.image = statusIcon()
         statusItem.button?.imagePosition = .imageLeading
         let menu = NSMenu()
         menu.delegate = self
@@ -531,6 +574,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Task { await self?.pollMessages() }
         }
         scheduleAutoUpdate()
+    }
+
+    /// 预览版和正式版在菜单栏上换个图标，扫一眼就知道装的是哪一个。
+    private func statusIcon() -> NSImage? {
+        let name = Updater.currentVersionIsPrerelease ? "testtube.2" : "antenna.radiowaves.left.and.right"
+        let image = NSImage(systemSymbolName: name, accessibilityDescription: "Agent Bridge")
+            ?? NSImage(systemSymbolName: "antenna.radiowaves.left.and.right", accessibilityDescription: "Agent Bridge")
+        image?.isTemplate = true
+        return image
+    }
+
+    /// 版本号后面跟的通道名：菜单版本行用。
+    private func channelLabel() -> String {
+        Updater.currentVersionIsPrerelease ? T("预览版") : T("正式版")
     }
 
     // MARK: - 自动更新
@@ -568,8 +625,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         scheduleAutoUpdate()
     }
 
-    @objc private func togglePrereleaseChannel(_ sender: NSSwitch) {
-        Updater.staysOnPrereleaseChannel = sender.state == .on
+    @objc private func toggleAllowReleaseUpgrade(_ sender: NSSwitch) {
+        Updater.allowsReleaseUpgrade = sender.state == .on
         // 旧的更新目标已经不属于这个通道，先清掉再重查（不弹窗）。
         updater.clearAvailable()
         Task { await updater.check() }
@@ -737,6 +794,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if bridgeProcess?.isRunning == true {
             menu.addItem(item(T("停止 Bridge"), #selector(stopBridge), ""))
         }
+        if let hostLog = snapshot.hostLog, !hostLog.isEmpty {
+            menu.addItem(hostLogMenuItem(hostLog))
+        }
         menu.addItem(item(T("打开日志"), #selector(openLog), ""))
         menu.addItem(item(T("退出"), #selector(quit), "q"))
     }
@@ -784,10 +844,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else if updater.isBusy {
             menu.addItem(disabled(updater.summary))
         } else {
-            menu.addItem(disabled(TF(T("菜单栏 app v%@"), Updater.currentVersion)))
-            // 锁在测试版通道时不升级正式版，得让人知道这是有意的、去哪改。
-            if Updater.currentVersionIsPrerelease && Updater.staysOnPrereleaseChannel {
-                menu.addItem(disabled(T("停留在测试版通道，正式版不提示（设定里可关）")))
+            menu.addItem(disabled(TF(T("菜单栏 app v%@ · %@"), Updater.currentVersion, channelLabel())))
+            // 锁在预览版通道时不升级正式版，得让人知道这是有意的、去哪改。
+            if Updater.isPreviewInstall {
+                menu.addItem(disabled(T("预览版与正式版是两份独立安装，各自更新")))
+            } else if Updater.currentVersionIsPrerelease && !Updater.allowsReleaseUpgrade {
+                menu.addItem(disabled(T("只更新预览版，正式版不提示（设定里可勾选升级到正式版）")))
             }
             if let failure = updater.lastFailure {
                 menu.addItem(disabled(TF(T("检查更新失败：%@"), failure)))
@@ -809,6 +871,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.submenu = sub
             return entry
         }
+        for line in lines.prefix(3) { sub.addItem(logLineItem(line)) }
+        if lines.count > 3 {
+            sub.addItem(.separator())
+            let more = NSMenuItem(title: TF(T("更多…（共 %d 条）"), lines.count), action: nil, keyEquivalent: "")
+            more.isEnabled = true
+            let moreSub = NSMenu()
+            for line in lines { moreSub.addItem(logLineItem(line)) }
+            more.submenu = moreSub
+            sub.addItem(more)
+        }
+        entry.submenu = sub
+        return entry
+    }
+
+    /// 菜单里的「本机操作日志」：最近三条，后面挂「更多」看全部。
+    private func hostLogMenuItem(_ lines: [String]) -> NSMenuItem {
+        let entry = NSMenuItem(title: T("本机操作日志"), action: nil, keyEquivalent: "")
+        entry.isEnabled = true
+        let sub = NSMenu()
         for line in lines.prefix(3) { sub.addItem(logLineItem(line)) }
         if lines.count > 3 {
             sub.addItem(.separator())
@@ -995,7 +1076,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setDevtools(capability: "terminal", enabled: false, ttlSeconds: nil)
     }
 
-    private func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?) {
+    /// 命令执行不受目录限制，唯一一道防线是使用者知道自己在开什么：连过三次确认才真开。
+    private func setDevtools(capability: String, enabled: Bool, ttlSeconds: Double?, confirmed: Bool = false) {
+        if capability == "terminal", enabled, !confirmed {
+            confirmTerminal(ttlSeconds: ttlSeconds)
+            return
+        }
         Task {
             do {
                 try await client.setDevtools(capability: capability, enabled: enabled, ttlSeconds: ttlSeconds)
@@ -1004,6 +1090,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 alert(T("设置远程工具失败"), error.localizedDescription)
             }
         }
+    }
+
+    /// 三步警告；任一步点取消就什么都不改（设置页的开关会被 refresh 恢复到实际状态）。
+    private func confirmTerminal(ttlSeconds: Double?, step: Int = 1) {
+        let warnings: [(String, String)] = [
+            (
+                T("开启远程命令执行（1/3）"),
+                T("打开后，所有已配对的设备都能在这台 Mac 上执行命令：读写整台机器的文件、访问网络、安装软件。")
+            ),
+            (
+                T("开启远程命令执行（2/3）"),
+                T("目录限制管不住命令内容：一条 cd ~ 就离开工程目录了，Bridge 拦不住。只在设备都可信时打开。")
+            ),
+            (
+                T("开启远程命令执行（3/3）"),
+                T("最后确认。用完请回菜单关掉，或改用「开启 1 小时」这类会自动关闭的方式。")
+            ),
+        ]
+        let index = min(max(step, 1), warnings.count) - 1
+        let confirm = NSAlert()
+        confirm.alertStyle = .critical
+        confirm.messageText = warnings[index].0
+        confirm.informativeText = warnings[index].1
+        confirm.addButton(withTitle: step >= warnings.count ? T("确认开启") : T("继续"))
+        confirm.addButton(withTitle: T("取消"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertFirstButtonReturn else {
+            Task { await refresh() }
+            return
+        }
+        if step >= warnings.count {
+            // 一定要把 ttl 带过去：菜单里的「开启 1 / 8 / 24 小时」就是靠它自动关闭，
+            // 这里丢掉就成了「点了 1 小时，实际永久开启」。
+            setDevtools(capability: "terminal", enabled: true, ttlSeconds: ttlSeconds, confirmed: true)
+            return
+        }
+        confirmTerminal(ttlSeconds: ttlSeconds, step: step + 1)
     }
 
     @objc private func copyPairLink() {
@@ -1195,6 +1318,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func openWeb() {
         guard let raw = snapshot?.webUrl, let url = URL(string: raw) else { return }
         NSWorkspace.shared.open(url)
+        client.log(T("从菜单栏打开了远程页面"))
     }
 
     @objc private func openLog() {
@@ -1250,8 +1374,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         let width: CGFloat = 620
-        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉，统一给到 774。
-        let height: CGFloat = 774
+        // 更新区有三行开关 + 三条说明，700 时最后一条会被裁掉；托管目录下面又多了一行
+        // 按钮；再加「提示」区的标题与一行开关（约 70），806 已经放不下，统一给到 880。
+        let height: CGFloat = 880
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
             styleMask: [.titled, .closable],
@@ -1395,8 +1520,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         section(T("托管会话"))
         settingsBypassSwitch = toggle(T("允许 bypassPermissions（跳过权限确认）"), #selector(toggleBypass(_:)))
         hint(T("打开后网页可以给托管会话选 bypassPermissions，不再逐条询问权限。只在你信任远端操作时打开。"))
-        settingsDirsLabel = valueLabel("…")
+        settingsDirsLabel = valueLabel("…", mono: true)
         row(T("托管目录"), settingsDirsLabel!)
+        // 白名单只能在这台机器上改：远程设备连「加目录」的入口都没有。
+        let dirButtonsY = take(22, gap: 6)
+        let addDir = NSButton(title: T("添加目录…"), target: self, action: #selector(addHostedDir))
+        addDir.bezelStyle = .rounded
+        addDir.controlSize = .small
+        addDir.font = .systemFont(ofSize: 11)
+        addDir.frame = NSRect(x: valueX, y: dirButtonsY, width: 92, height: 20)
+        view.addSubview(addDir)
+        settingsAddDirButton = addDir
+        let importDirs = NSButton(title: T("导入现有工程目录"), target: self, action: #selector(importHostedDirs))
+        importDirs.bezelStyle = .rounded
+        importDirs.controlSize = .small
+        importDirs.font = .systemFont(ofSize: 11)
+        importDirs.frame = NSRect(x: valueX + 100, y: dirButtonsY, width: 132, height: 20)
+        view.addSubview(importDirs)
+        settingsImportDirsButton = importDirs
         settingsIdleLabel = valueLabel("…")
         row(T("空闲超时"), settingsIdleLabel!)
 
@@ -1406,12 +1547,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsExpiryReminderSwitch = toggle(T("到期前 30 分钟提醒"), #selector(toggleExpiryReminder(_:)))
         hint(T("开关立即生效；菜单里的「开启 1 / 8 / 24 小时」只是加个自动关闭的时限。勾选提醒后，自动关闭前 30 分钟会发一条系统通知。"))
 
+        section(T("提示"))
+        settingsMessageBubbleSwitch = toggle(T("新消息气泡（网页发来消息时在状态图标下弹一下）"), #selector(toggleMessageBubble(_:)))
+
         section(T("更新"))
         settingsAutoUpdateSwitch = toggle(T("自动更新（每 10 分钟检查，有新版本直接装）"), #selector(toggleAutoUpdate(_:)))
         hint(T("有新版本直接下载替换并重启，正在配对时跳过；关掉后只在菜单手动检查。"), height: 16)
-        if Updater.currentVersionIsPrerelease {
-            settingsPrereleaseChannelSwitch = toggle(T("停留在测试版通道（只升 rc，不升正式版）"), #selector(togglePrereleaseChannel(_:)))
-            hint(TF(T("装在测试版 v%@：打开只升 rc，正式版不提示；关掉就照常，有正式版会提示。"), Updater.currentVersion), height: 16)
+        if Updater.currentVersionIsPrerelease && !Updater.isPreviewInstall {
+            settingsReleaseUpgradeSwitch = toggle(T("允许升级到正式版（默认关，只升 rc）"), #selector(toggleAllowReleaseUpgrade(_:)))
+            hint(TF(T("装在预览版 v%@：关着只升 rc；勾选后正式版也会提示并安装。"), Updater.currentVersion), height: 16)
         }
 
         return view
@@ -1529,8 +1673,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsFilesSwitch?.isEnabled = reachable
         settingsTerminalSwitch?.isEnabled = reachable
         settingsExpiryReminderSwitch?.state = expiryReminderEnabled ? .on : .off
+        settingsMessageBubbleSwitch?.state = messageBubbleEnabled ? .on : .off
         settingsAutoUpdateSwitch?.state = autoUpdateEnabled ? .on : .off
-        settingsPrereleaseChannelSwitch?.state = Updater.staysOnPrereleaseChannel ? .on : .off
+        settingsReleaseUpgradeSwitch?.state = Updater.allowsReleaseUpgrade ? .on : .off
 
         settingsPortLabel?.stringValue =
             "127.0.0.1:\(AdminClient.port)" + (AdminClient.hasPortEnv ? T("（环境变量指定）") : "")
@@ -1549,6 +1694,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             settingsIdleLabel?.stringValue = ""
         }
         settingsBypassSwitch?.isEnabled = reachable && hostedConfig != nil
+        settingsAddDirButton?.isEnabled = reachable && hostedConfig != nil
+        settingsImportDirsButton?.isEnabled = reachable && hostedConfig != nil
     }
 
     /// 日志 tab 的行：先按搜索词过滤，再按时间倒序。
@@ -1592,6 +1739,67 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// 添加托管目录：只收这台机器上真实存在的目录，加进去后网页才能在那里建会话。
+    @objc private func addHostedDir() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.canCreateDirectories = false
+        panel.prompt = T("加入白名单")
+        panel.message = T("选中的目录会加入托管白名单：远程设备只能在这些目录里新建会话。")
+        // 从已有白名单里挑一个当起点：面板一开就列 home 的话，桌面/文档/下载/外置磁盘
+        // 会被逐个读一遍，系统就挨个弹授权。
+        if let first = hostedConfig?.dirs.first {
+            panel.directoryURL = URL(fileURLWithPath: first, isDirectory: true)
+        }
+        guard panel.runModal() == .OK else { return }
+        let picked = panel.urls.map { $0.resolvingSymlinksInPath().path }
+        guard !picked.isEmpty else { return }
+        applyHostedDirs(adding: picked)
+    }
+
+    /// 一键把桌面客户端已经索引到的工程目录加进白名单。
+    @objc private func importHostedDirs() {
+        settingsImportDirsButton?.isEnabled = false
+        Task {
+            defer { settingsImportDirsButton?.isEnabled = true }
+            do {
+                let found = try await client.projectDirs()
+                guard !found.isEmpty else {
+                    alert(T("没有找到工程目录"), T("桌面客户端里还没有索引到带目录的工程。"))
+                    return
+                }
+                applyHostedDirs(adding: found)
+            } catch {
+                alert(T("读取工程目录失败"), error.localizedDescription)
+            }
+        }
+    }
+
+    /// 合并进现有白名单再整份写回；已经有的不重复加，一个都没多就不打扰。
+    private func applyHostedDirs(adding more: [String]) {
+        let existing = hostedConfig?.dirs ?? []
+        var merged = existing
+        for path in more where !merged.contains(path) { merged.append(path) }
+        guard merged.count != existing.count else {
+            alert(T("目录已在白名单里"), TF(T("这 %d 个目录都已经在托管白名单中。"), more.count))
+            return
+        }
+        Task {
+            do {
+                hostedConfig = try await client.setHostedDirs(merged)
+                renderSettings()
+                // 白名单变了，网页的工程列表也得跟着刷新。
+                snapshot = nil
+                await refresh()
+            } catch {
+                alert(T("保存白名单失败"), error.localizedDescription)
+                renderSettings()
+            }
+        }
+    }
+
     @objc private func toggleFiles(_ sender: NSSwitch) {
         setDevtools(capability: "files", enabled: sender.state == .on, ttlSeconds: nil)
     }
@@ -1603,6 +1811,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func toggleExpiryReminder(_ sender: NSSwitch) {
         expiryReminderEnabled = sender.state == .on
         if sender.state == .on { requestNotificationPermission() }
+    }
+
+    @objc private func toggleMessageBubble(_ sender: NSSwitch) {
+        messageBubbleEnabled = sender.state == .on
+        // 正在显示的那一个也一起收掉，否则开关看着像没生效。
+        if sender.state == .off { dismissBubble() }
     }
 
     private func requestNotificationPermission() {
@@ -1651,7 +1865,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         messageLog.append(contentsOf: fresh)
         if messageLog.count > 200 { messageLog.removeFirst(messageLog.count - 200) }
         renderMessageLog()
-        if let latest = fresh.last { showMessageBubble(latest) }
+        // 消息总要进日志和 lastMessageAt；气泡只是提示，关掉不能把消息吞了。
+        if messageBubbleEnabled, let latest = fresh.last { showMessageBubble(latest) }
     }
 
     private func showMessageBubble(_ message: ReceivedMessage) {

@@ -101,7 +101,8 @@ export class SessionAdapters {
     const info = this.hostedManager.configForClient();
     return {
       allowBypassPermissions: info.allowBypassPermissions,
-      dirs: info.dirs.map((dir) => dir.path),
+      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
+      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
       idleTimeoutMs: info.idleTimeoutMs,
     };
   }
@@ -110,17 +111,21 @@ export class SessionAdapters {
     const info = this.hostedManager.setAllowBypassPermissions(enabled);
     return {
       allowBypassPermissions: info.allowBypassPermissions,
-      dirs: info.dirs.map((dir) => dir.path),
+      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
+      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
       idleTimeoutMs: info.idleTimeoutMs,
     };
   }
 
-  hostedAddDir(path: string): HostedDirsResult {
-    return this.hostedManager.addDir(path);
-  }
-
-  hostedRemoveDir(path: string): HostedDirsResult {
-    return this.hostedManager.removeDir(path);
+  /** 整份替换托管白名单，只给本机 admin 接口用。 */
+  setHostedDirs(dirs: string[]): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
+    const info = this.hostedManager.setDirs(dirs);
+    return {
+      allowBypassPermissions: info.allowBypassPermissions,
+      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
+      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
+      idleTimeoutMs: info.idleTimeoutMs,
+    };
   }
 
   hostedOptions(): HostedOptionsResult {
@@ -145,6 +150,14 @@ export class SessionAdapters {
 
   async hostedSetSubagentModel(sessionId: string, model: string | null): Promise<SessionGetResult> {
     return { session: await this.hostedManager.setSubagentModel(sessionId, model) };
+  }
+
+  async hostedSetThinking(sessionId: string, level: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setThinking(sessionId, level) };
+  }
+
+  async hostedSetSubagentThinking(sessionId: string, level: string | null): Promise<SessionGetResult> {
+    return { session: await this.hostedManager.setSubagentThinking(sessionId, level) };
   }
 
   async hostedSetCompaction(sessionId: string, percent: number | null): Promise<SessionGetResult> {

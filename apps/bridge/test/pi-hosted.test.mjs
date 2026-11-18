@@ -332,6 +332,53 @@ test("registry resumes only from a usable pi session path", async (t) => {
   assert.equal(newline.includes("--session"), false);
 });
 
+test("pi sessions report pi as the hosting CLI, legacy records fall back to claude", (t) => {
+  // 老记录没有 agent 字段，那是只有 Claude Code 的时代留下的。
+  const h = piHarness((repo) => [{ id: "legacy", cwd: repo, title: "旧会话", permissionMode: "manual", createdAt: 1, updatedAt: 1 }]);
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  assert.equal(h.manager.session(session.sessionId)?.hostedAgent, "pi");
+  assert.equal(h.manager.sessions().find((item) => item.sessionId === "hosted:legacy")?.hostedAgent, "claude");
+});
+
+test("a pi session remembers its own options next to claude's", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  h.manager.create({
+    path: h.repo,
+    agent: "pi",
+    model: "ncncapi/claude-opus-5-5",
+    thinking: "high",
+    subagentModel: "ncncapi/claude-haiku-4-5",
+    subagentThinking: "low",
+  });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "pi",
+    permissionMode: "manual",
+    piModel: "ncncapi/claude-opus-5-5",
+    piThinking: "high",
+    subagentModel: "ncncapi/claude-haiku-4-5",
+    subagentThinking: "low",
+  });
+});
+
+test("switching engines keeps the other engine's remembered options", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  // 先建一个 Claude Code 会话，记下权限模式与模型。
+  h.manager.create({ path: h.repo, permissionMode: "acceptEdits", model: "claude-opus-5-5" });
+  // 再建 pi 会话：它没有权限模式，不能把 claude 记下的值冲掉。
+  h.manager.create({ path: h.repo, agent: "pi", model: "ncncapi/claude-sonnet-4-5" });
+  const config = JSON.parse(readFileSync(join(h.stateDir, "hosted.json"), "utf8"));
+  assert.deepEqual(config.lastCreate, {
+    agent: "pi",
+    permissionMode: "acceptEdits",
+    model: "claude-opus-5-5",
+    piModel: "ncncapi/claude-sonnet-4-5",
+  });
+});
+
 test("pi sessions advertise the commands the bridge handles itself", (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());
@@ -694,6 +741,80 @@ test("pi refuses unknown thinking levels", (t) => {
   withAgentDir(t, fakeAgentDir(h.stateDir));
   assert.throws(() => h.manager.create({ path: h.repo, agent: "pi", thinking: "ultra" }), /思考等级/);
   assert.throws(() => h.manager.create({ path: h.repo, agent: "pi", subagentThinking: "ultra" }), /思考等级/);
+});
+
+test("the thinking level can be switched from the web without restarting pi", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  const child = h.spawns.at(-1).child;
+
+  const info = h.manager.models(session.sessionId);
+  assert.equal(info.canSwitchThinking, true);
+  assert.equal(info.canSwitchSubagentThinking, true);
+  assert.deepEqual(info.thinkingLevels, ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+  assert.equal(info.thinking, undefined);
+
+  const switching = h.manager.setThinking(session.sessionId, "high");
+  const sent = await waitForWrite(child, "set_thinking_level");
+  assert.equal(sent.level, "high");
+  child.reply("set_thinking_level", {});
+  await switching;
+  // 进程不用停：pi 的 RPC 直接改，网页上的当前值立刻跟着变。
+  assert.deepEqual(child.signals, []);
+  assert.equal(h.manager.models(session.sessionId).thinking, "high");
+  assert.equal(h.manager.rail(session.sessionId).environment.find((row) => row.label === "思考等级")?.value, "high");
+
+  await assert.rejects(h.manager.setThinking(session.sessionId, "ultra"), /思考等级/);
+});
+
+test("clearing the thinking level restarts pi without --thinking", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const session = h.manager.create({ path: h.repo, agent: "pi", thinking: "high" });
+  assert.equal(h.spawns[0].args[h.spawns[0].args.indexOf("--thinking") + 1], "high");
+
+  await h.manager.setThinking(session.sessionId, null);
+  await h.manager.send(session.sessionId, "继续");
+  // 改回跟随 pi 设置只能靠重启进程：新进程不带 --thinking。
+  assert.equal(h.spawns.at(-1).args.includes("--thinking"), false);
+  assert.equal(h.manager.models(session.sessionId).thinking, undefined);
+});
+
+test("the subagent thinking level is written to the session agent dir", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  withAgentDir(t, source);
+  const session = h.manager.create({ path: h.repo, agent: "pi" });
+  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+
+  await h.manager.setSubagentThinking(session.sessionId, "xhigh");
+  await h.manager.send(session.sessionId, "继续");
+  const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
+  const settings = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(settings.subagents.defaultThinking, "xhigh");
+  assert.equal(h.manager.models(session.sessionId).subagentThinking, "xhigh");
+
+  // 清掉之后没有别的覆盖项，会话自己的 agent 目录整个删掉，回到用户设置。
+  h.spawns.at(-1).child.kill("SIGTERM");
+  await h.manager.setSubagentThinking(session.sessionId, null);
+  assert.equal(existsSync(dir), false);
+  assert.equal(h.manager.models(session.sessionId).subagentThinking, undefined);
+});
+
+test("thinking levels are pi only", async (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  withAgentDir(t, fakeAgentDir(h.stateDir));
+  const claude = h.manager.create({ path: h.repo });
+  await assert.rejects(h.manager.setThinking(claude.sessionId, "high"), /只有 pi/);
+  await assert.rejects(h.manager.setSubagentThinking(claude.sessionId, "high"), /只有 pi/);
+  const info = h.manager.models(claude.sessionId);
+  assert.equal(info.canSwitchThinking, undefined);
+  assert.equal(info.thinkingLevels, undefined);
 });
 
 test("changing the subagent model restarts the idle pi process with the new setting", async (t) => {

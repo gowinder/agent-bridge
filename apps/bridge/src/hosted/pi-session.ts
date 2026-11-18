@@ -1,4 +1,5 @@
 import type { ContextUsage, MessageBlock, ModelOption } from "@craftstead/protocol";
+import { toolSummaryOf } from "../tool-summary.js";
 
 const MAX_TOOL_CHARS = 300;
 /** 换模型等回执的上限：进程刚好退出时不能把网页一直挂着。 */
@@ -495,7 +496,16 @@ function blocksOf(content: unknown): MessageBlock[] {
     }
     if (part["type"] === "toolCall" && typeof part["name"] === "string") {
       const args = typeof part["arguments"] === "string" ? part["arguments"] : safeJson(part["arguments"]);
-      blocks.push({ type: "tool", text: cut(`调用 ${part["name"]} ${args}`.trim(), MAX_TOOL_CHARS) });
+      {
+        // 托管 RPC 事件里参数叫 arguments（原生 jsonl 里才叫 args）：写错就等于永远
+        // 拿不到工具自带的说明，网页只能退回「动作标签 + 命令」。
+        const summary = toolSummaryOf(part["arguments"]);
+        blocks.push({
+          type: "tool",
+          text: cut(`调用 ${part["name"]} ${args}`.trim(), MAX_TOOL_CHARS),
+          ...(summary ? { summary } : {}),
+        });
+      }
     }
   }
   return blocks;

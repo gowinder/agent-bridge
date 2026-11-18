@@ -18,12 +18,14 @@ import type {
   HostedPermissionMode,
   HostInfoResult,
   MessageAttachment,
+  MessageListResult,
   PairResult,
   PushInfoResult,
   PushSubscribeResult,
   RequestMessage,
   ResponseMessage,
   SessionListParams,
+  SessionSearchResult,
   ShellEventData,
   TodoKind,
   WireMessage,
@@ -107,6 +109,173 @@ function numberParam(params: Record<string, unknown>, name: string): number | un
 }
 
 /**
+ * 对话内容搜索。只在用户勾了「搜内容」时调用，作用范围是前端传进来的那批会话
+ * （侧栏历史最多几十条），所以直接复用各适配器的 messages()：它们内部按
+ * transcript 的 mtime/size 缓存了解析结果，第二次搜同一会话基本只 stat 一次。
+ */
+const SEARCH_MAX_SESSIONS = 80;
+const SEARCH_MAX_QUERY_CHARS = 120;
+const SEARCH_PAGE_SIZE = 200;
+const SEARCH_MAX_PAGES = 40;
+const SEARCH_CONCURRENCY = 3;
+const SEARCH_BUDGET_MS = 8_000;
+const SEARCH_HIT_TTL_MS = 30_000;
+const SEARCH_HIT_CACHE_MAX = 2_000;
+
+interface SearchHit {
+  at: number;
+  hit: boolean;
+}
+
+const searchHitCache = new Map<string, SearchHit>();
+
+/** 搜索只需要「按会话读一页消息」这一件事，抽出来是为了能在测试里替换掉适配器。 */
+export interface SearchMessageSource {
+  messages(
+    sessionId: string,
+    params: { limit?: number; before?: string },
+  ): Promise<MessageListResult>;
+  /** 取单条消息的完整正文：列表里的长文本被截到 MAX_BLOCK_CHARS，搜索要靠它补全。 */
+  messageText?(sessionId: string, messageId: string): Promise<{ text: string }>;
+}
+
+/**
+ * 一个会话里是否同时出现全部关键词。
+ *
+ * 边翻页边匹配，不攒全文：这样老会话（一两千条消息、五百 KB 以上）靠前的内容也
+ * 能搜到，不会因为只留尾部而漏词；内存也不随会话大小涨。全部关键词都出现就停。
+ */
+async function sessionSearchHit(
+  adapters: SearchMessageSource,
+  sessionId: string,
+  words: string[],
+  cacheKey: string,
+  deadline: number,
+): Promise<boolean | undefined> {
+  const cached = searchHitCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < SEARCH_HIT_TTL_MS) return cached.hit;
+
+  const seen = new Set<string>();
+  let before: string | undefined;
+  for (let page = 0; page < SEARCH_MAX_PAGES; page += 1) {
+    // 预算必须在页循环里也查：一个几千条消息的会话光翻页就能跑很久，
+    // 只在会话之间检查等于不设上限。
+    if (Date.now() > deadline) return undefined;
+    const result = await adapters.messages(sessionId, {
+      limit: SEARCH_PAGE_SIZE,
+      ...(before ? { before } : {}),
+    });
+    for (const message of result.messages) {
+      for (const block of message.blocks) {
+        if (seen.size === words.length) break;
+        const text = block.text.toLowerCase();
+        for (const word of words) {
+          if (!seen.has(word) && text.includes(word)) seen.add(word);
+        }
+        // 列表里的长文本只给了前 4000 字：超长的再取一次全文，
+        // 否则「工人」这种落在工具输出后半段的词永远匹配不到。
+        if (block.truncated && seen.size < words.length && adapters.messageText) {
+          try {
+            const full = (await adapters.messageText(sessionId, message.messageId)).text.toLowerCase();
+            for (const word of words) {
+              if (!seen.has(word) && full.includes(word)) seen.add(word);
+            }
+          } catch {
+            // 取不到全文就按已截断的算，不影响其它会话。
+          }
+        }
+      }
+    }
+    if (seen.size === words.length) break;
+    if (!result.nextBefore) break;
+    before = result.nextBefore;
+  }
+
+  const hit = seen.size === words.length;
+  searchHitCache.delete(cacheKey);
+  searchHitCache.set(cacheKey, { at: Date.now(), hit });
+  while (searchHitCache.size > SEARCH_HIT_CACHE_MAX) {
+    const oldest = searchHitCache.keys().next().value;
+    if (oldest === undefined) break;
+    searchHitCache.delete(oldest);
+  }
+  return hit;
+}
+
+/**
+ * 同一时刻只跑一个搜索：解析 transcript 是同步 CPU 活（首次要 JSON.parse 整份文件），
+ * 多设备各发一个就能把桥的事件循环占满，连 `host.ping` 和 5 秒轮询都会排在后面。
+ * 后来的请求排队而不是拒绝：前端有防抖，排队通常只有一个。
+ */
+let searchChain: Promise<void> = Promise.resolve();
+
+export async function searchSessionTexts(
+  adapters: SearchMessageSource,
+  query: string,
+  sessionIds: string[],
+): Promise<SessionSearchResult> {
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length > 0);
+  if (words.length === 0) return { matches: [], searched: 0 };
+
+  const cachePrefix = words.join("\u0001");
+  const ids = sessionIds.filter((id, index) => sessionIds.indexOf(id) === index).slice(0, SEARCH_MAX_SESSIONS);
+  const gate = searchChain;
+  let open!: () => void;
+  searchChain = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  await gate;
+  // 预算从真正开始搜的那一刻算：排队等待不该吃掉自己的 8 秒。
+  const started = Date.now();
+  const matches: string[] = [];
+  let searched = 0;
+  let errors = 0;
+  let cursor = 0;
+
+  // 解析 transcript 是同步 CPU 活，分几个 worker 并发 + 每会话让出一次事件循环，
+  // 免得搜索把正在跑的会话卡住半分钟。
+  const workers = Array.from({ length: Math.min(SEARCH_CONCURRENCY, ids.length) }, async () => {
+    for (;;) {
+      if (Date.now() - started > SEARCH_BUDGET_MS) return;
+      const index = cursor;
+      cursor += 1;
+      if (index >= ids.length) return;
+      const sessionId = ids[index] as string;
+      try {
+        const hit = await sessionSearchHit(
+          adapters,
+          sessionId,
+          words,
+          `${cachePrefix}\u0000${sessionId}`,
+          started + SEARCH_BUDGET_MS,
+        );
+        // undefined = 这一页还没翻完就超时了，不算命中也不算没命中。
+        if (hit === undefined) return;
+        searched += 1;
+        if (hit) matches.push(sessionId);
+      } catch {
+        // 读不到 transcript 的会话跳过：搜索不该因为一个坏会话整单失败。
+        errors += 1;
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+  });
+  try {
+    await Promise.all(workers);
+  } finally {
+    open();
+  }
+
+  const result: SessionSearchResult = { matches, searched };
+  if (errors > 0) result.errors = errors;
+  if (Date.now() - started > SEARCH_BUDGET_MS) result.partial = true;
+  return result;
+}
+
+/**
  * 读接口（session.list、message.list、fs.* 等）每隔几秒就被轮询一次，记进操作日志
  * 只会把真正做过的操作冲掉，所以只挑会改变状态或内容的请求。
  */
@@ -115,14 +284,16 @@ const ACTIVITY_METHODS = new Set([
   "shell.exec",
   "shell.cancel",
   "file.upload.finish",
-  "hosted.addDir",
-  "hosted.removeDir",
   "hosted.create",
   "hosted.stop",
   "hosted.resume",
   "hosted.interrupt",
+  "fs.list",
+  "fs.read",
   "hosted.setModel",
   "hosted.setSubagentModel",
+  "hosted.setThinking",
+  "hosted.setSubagentThinking",
   "hosted.setCompaction",
   "hosted.archive",
   "hosted.delete",
@@ -135,8 +306,14 @@ const ACTIVITY_METHODS = new Set([
   "device.rename",
 ]);
 
+/** 操作日志里的路径只要看得懂是哪一份，太长反而看不清。 */
+function shortPath(path: string): string {
+  const text = path.trim();
+  return text.length > 64 ? `…${text.slice(-63)}` : text;
+}
+
 /** 把一次请求压缩成一行给人看的操作记录；不关心的请求返回 null。 */
-function describeActivity(request: RequestMessage): string | null {
+export function describeActivity(request: RequestMessage): string | null {
   if (!ACTIVITY_METHODS.has(request.method)) return null;
   const params = isObject(request.params) ? request.params : {};
   const sessionId = stringParam(params, "sessionId");
@@ -151,6 +328,14 @@ function describeActivity(request: RequestMessage): string | null {
     if (!command) return "执行命令";
     return `执行命令「${command.length > 40 ? `${command.slice(0, 40)}…` : command}」`;
   }
+  if (request.method === "fs.list") {
+    const path = (stringParam(params, "path") ?? "").trim();
+    return `浏览项目目录${path ? `「${shortPath(path)}」` : ""}${suffix}`;
+  }
+  if (request.method === "fs.read") {
+    const path = (stringParam(params, "path") ?? "").trim();
+    return `查看文件${path ? `「${shortPath(path)}」` : ""}${suffix}`;
+  }
   if (request.method === "hosted.setModel") {
     const model = (stringParam(params, "model") ?? "").trim();
     return `${model ? `把托管会话模型换成「${model}」` : "把托管会话模型改回 CLI 默认"}${suffix}`;
@@ -159,15 +344,18 @@ function describeActivity(request: RequestMessage): string | null {
     const model = (stringParam(params, "model") ?? "").trim();
     return `${model ? `把托管会话的子代理模型换成「${model}」` : "把托管会话的子代理模型改回跟随 pi 设置"}${suffix}`;
   }
+  if (request.method === "hosted.setThinking") {
+    const level = (stringParam(params, "level") ?? "").trim();
+    return `${level ? `把托管会话的思考等级换成「${level}」` : "把托管会话的思考等级改回跟随 pi 设置"}${suffix}`;
+  }
+  if (request.method === "hosted.setSubagentThinking") {
+    const level = (stringParam(params, "level") ?? "").trim();
+    return `${level ? `把托管会话的子代理思考等级换成「${level}」` : "把托管会话的子代理思考等级改回跟随 pi 设置"}${suffix}`;
+  }
   if (request.method === "hosted.setCompaction") {
     const raw = params["triggerPercent"] ?? params["reserveTokens"];
     if (raw === null || raw === undefined) return `把自动压缩触发点改回默认${suffix}`;
     return `把自动压缩触发点改成窗口的 ${String(raw)}%${suffix}`;
-  }
-  if (request.method === "hosted.addDir" || request.method === "hosted.removeDir") {
-    const path = (stringParam(params, "path") ?? "").trim();
-    const verb = request.method === "hosted.addDir" ? "添加" : "移除";
-    return path ? `${verb}托管目录「${path}」` : `${verb}托管目录`;
   }
   if (request.method === "session.create") {
     const appId = stringParam(params, "appId") ?? "";
@@ -345,11 +533,16 @@ export interface DeviceSessionOptions extends SessionOptions {
 /** 一条用户输入在日志里保留的最大长度。 */
 const MAX_LOGGED_MESSAGE_CHARS = 500;
 
+/** 同一段操作在日志里去重的窗口。 */
+const ACTIVITY_DEDUPE_MS = 30_000;
+
 export class DeviceSession implements ChannelSession {
   private handshake: NoiseHandshake | null = null;
   private secure: SecureChannel | null = null;
   private queue: Promise<void> = Promise.resolve();
   private disposed = false;
+  /** 文件浏览会连着点好几下：同一份记录 30 秒内只写一条。 */
+  private readonly activitySeen = new Map<string, number>();
 
   constructor(private readonly options: DeviceSessionOptions) {}
 
@@ -391,10 +584,28 @@ export class DeviceSession implements ChannelSession {
     await this.handleRequest(message);
   }
 
+  /**
+   * 读写类请求每点一次都记会把日志刷满；同一段描述 30 秒内只记一次。
+   * 其它写操作照旧每条都记。
+   */
+  private shouldLogActivity(key: string): boolean {
+    const now = Date.now();
+    for (const [old, at] of this.activitySeen) {
+      if (now - at >= ACTIVITY_DEDUPE_MS) this.activitySeen.delete(old);
+    }
+    const last = this.activitySeen.get(key);
+    if (last !== undefined) return false;
+    this.activitySeen.set(key, now);
+    return true;
+  }
+
   private async handleRequest(request: RequestMessage): Promise<void> {
     let response: ResponseMessage;
     const activity = describeActivity(request);
-    if (activity) this.options.activity?.(activity);
+    // 文件浏览会连着点好几下，同一份记录 30 秒只写一条；发送消息、改设置这类真实操作
+    // 每一条都要记，去重会把「连发两条」里的第二条吞掉。
+    const dedupe = request.method === "fs.list" || request.method === "fs.read";
+    if (activity && (!dedupe || this.shouldLogActivity(activity))) this.options.activity?.(activity);
     if (request.method === "message.send") this.reportMessage(request);
     try {
       response = { v: 1, kind: "response", id: request.id, ok: true, result: await this.dispatch(request) };
@@ -456,6 +667,9 @@ export class DeviceSession implements ChannelSession {
   private async dispatch(request: RequestMessage): Promise<unknown> {
     const params = isObject(request.params) ? request.params : {};
     switch (request.method) {
+      // 心跳不碰任何状态：只回时间戳，网页据此判断通道是否还活着。
+      case "host.ping":
+        return { at: Date.now() };
       case "host.info": {
         const info: HostInfoResult = {
           name: this.options.hostName,
@@ -507,6 +721,16 @@ export class DeviceSession implements ChannelSession {
         if (!messageId) throw new RpcError("invalid_params", "messageId required");
         return this.options.adapters.messageText(sessionId, messageId);
       }
+      case "session.search": {
+        const query = (stringParam(params, "query") ?? "").trim();
+        if (!query) return { matches: [], searched: 0 } satisfies SessionSearchResult;
+        if (query.length > SEARCH_MAX_QUERY_CHARS) {
+          throw new RpcError("invalid_params", `搜索词太长（最多 ${SEARCH_MAX_QUERY_CHARS} 个字）`);
+        }
+        const raw = params["sessionIds"];
+        const sessionIds = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
+        return await searchSessionTexts(this.options.adapters, query, sessionIds);
+      }
       case "session.rail": {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
@@ -541,10 +765,10 @@ export class DeviceSession implements ChannelSession {
       }
       case "hosted.dirs":
         return this.options.adapters.hostedDirs();
+      // 白名单只能本机改：远程设备若能自己往里加目录，"只有白名单里的目录能建会话" 就形同虚设。
       case "hosted.addDir":
-        return this.options.adapters.hostedAddDir(stringParam(params, "path") ?? "");
       case "hosted.removeDir":
-        return this.options.adapters.hostedRemoveDir(stringParam(params, "path") ?? "");
+        throw new RpcError("unsupported", "托管目录只能在 Mac 菜单栏的「设定」里修改");
       case "hosted.create": {
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
@@ -671,6 +895,24 @@ export class DeviceSession implements ChannelSession {
           throw new RpcError("invalid_params", "model 必须是字符串或 null");
         }
         return this.options.adapters.hostedSetSubagentModel(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setThinking": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["level"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "level 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetThinking(sessionId, typeof raw === "string" ? raw : null);
+      }
+      case "hosted.setSubagentThinking": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["level"];
+        if (raw !== null && raw !== undefined && typeof raw !== "string") {
+          throw new RpcError("invalid_params", "level 必须是字符串或 null");
+        }
+        return this.options.adapters.hostedSetSubagentThinking(sessionId, typeof raw === "string" ? raw : null);
       }
       case "hosted.setCompaction": {
         const sessionId = stringParam(params, "sessionId");
