@@ -43,6 +43,7 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText } from "../adapters/types.js";
+import { toolSummaryOf } from "../tool-summary.js";
 import { contextUsageFromUsage, sanitizeContextUsage } from "../context-usage.js";
 import { effortLevels } from "../effort.js";
 import { modelCatalog } from "../model-catalog.js";
@@ -2804,7 +2805,12 @@ function blocksFromContent(content: unknown): MessageBlock[] {
     } else if (item["type"] === "tool_use") {
       const name = typeof item["name"] === "string" ? item["name"] : "tool";
       const input = isRecord(item["input"]) ? item["input"] : {};
-      blocks.push({ type: "tool", text: truncate(`${name} ${describeToolInput(input)}`, MAX_BLOCK_CHARS).text });
+      const summary = toolSummaryOf(input);
+      blocks.push({
+        type: "tool",
+        text: truncate(`${name} ${describeToolInput(input)}`, MAX_BLOCK_CHARS).text,
+        ...(summary ? { summary } : {}),
+      });
     }
   }
   return blocks;

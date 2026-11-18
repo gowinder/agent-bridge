@@ -36,6 +36,7 @@ import { contextUsageFromUsage } from "../context-usage.js";
 import { modelCatalog } from "../model-catalog.js";
 import { subagentDirsFor, subagentTasks as readSubagentTasks } from "../subagents.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { toolSummaryOf } from "../tool-summary.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
 const SUPPORT_DIR = join(homedir(), "Library", "Application Support");
@@ -1186,7 +1187,12 @@ export class ClaudeCodeAdapter implements SessionAdapter {
           continue;
         }
         const input = block["input"] === undefined ? "" : JSON.stringify(block["input"]);
-        blocks.push({ type: "tool", ...truncate(`调用 ${name} ${input}`.trim(), 300) });
+        const summary = toolSummaryOf(block["input"]);
+        blocks.push({
+          type: "tool",
+          ...truncate(`调用 ${name} ${input}`.trim(), 300),
+          ...(summary ? { summary } : {}),
+        });
       }
     }
     return blocks;

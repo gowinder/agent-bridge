@@ -26,6 +26,7 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { toolSummaryOf } from "../tool-summary.js";
 
 const DSH_HOME = join(homedir(), ".dsh");
 const SESSIONS_DIR = join(DSH_HOME, "sessions");
@@ -294,7 +295,14 @@ function parseLog(path: string, sessionId: string): ParsedLog {
           if (callId && seenTools.has(callId)) continue;
           if (callId) seenTools.add(callId);
           const args = typeof item.arguments === "string" ? item.arguments : "";
-          blocks.push({ type: "tool", ...truncate(`调用 ${item.name} ${args}`.trim(), 300) });
+          {
+            const summary = toolSummaryOf(item.arguments);
+            blocks.push({
+              type: "tool",
+              ...truncate(`调用 ${item.name} ${args}`.trim(), 300),
+              ...(summary ? { summary } : {}),
+            });
+          }
         }
       }
       if (blocks.length === 0) continue;

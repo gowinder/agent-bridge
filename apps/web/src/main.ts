@@ -6565,7 +6565,9 @@ function processFold(steps: MessageBlock[]): HTMLDetailsElement {
         const summary = el("summary", { className: "turn-step-summary" }, [
           icon("chevron", "icon turn-step-chev"),
         ]);
-        if (view.label) summary.append(el("span", { className: "turn-step-tag", text: tr(view.label) }));
+        if (view.label && !view.described) {
+          summary.append(el("span", { className: "turn-step-tag", text: tr(view.label) }));
+        }
         summary.append(el("span", { className: "turn-step-title", text: view.detail || tr("过程") }));
         const body = el("div", { className: "turn-step-body", text: view.body });
         if (block.truncated) body.append(el("span", { className: "turn-step-note", text: tr("…（已截断）") }));

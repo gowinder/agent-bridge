@@ -1,4 +1,5 @@
 import type { ContextUsage, MessageBlock, ModelOption } from "@craftstead/protocol";
+import { toolSummaryOf } from "../tool-summary.js";
 
 const MAX_TOOL_CHARS = 300;
 /** 换模型等回执的上限：进程刚好退出时不能把网页一直挂着。 */
@@ -495,7 +496,14 @@ function blocksOf(content: unknown): MessageBlock[] {
     }
     if (part["type"] === "toolCall" && typeof part["name"] === "string") {
       const args = typeof part["arguments"] === "string" ? part["arguments"] : safeJson(part["arguments"]);
-      blocks.push({ type: "tool", text: cut(`调用 ${part["name"]} ${args}`.trim(), MAX_TOOL_CHARS) });
+      {
+        const summary = toolSummaryOf(part["args"]);
+        blocks.push({
+          type: "tool",
+          text: cut(`调用 ${part["name"]} ${args}`.trim(), MAX_TOOL_CHARS),
+          ...(summary ? { summary } : {}),
+        });
+      }
     }
   }
   return blocks;

@@ -4,6 +4,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- 执行过程里每一步优先显示工具自己写的一句话说明（Claude Code 的 Bash `description`、Codex 的 `justification`），点开这一步才是具体命令 —— 和 Claude 桌面版一样能直接看出「这一步在做什么」。没有自带说明的工具仍然显示「动作标签 + 目标」（如「读取 AGENTS.md」）。
+
+### Changed
+
+- `MessageBlock` 新增可选 `summary` 字段；claude-code / pi / dsh / antigravity / 托管 Claude / 托管 pi / 子代理记录在生成工具块时把说明一并带上。已经落盘的旧消息没有这个字段，仍按原来的方式显示。
+
 ## [0.11.4-rc.14] - 2026-11-18
 
 ### Changed
