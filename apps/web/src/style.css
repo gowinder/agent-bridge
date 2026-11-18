@@ -1016,12 +1016,26 @@ details[open] > .dock-project-head::before {
   font-size: 12.5px;
 }
 
-/* 手机上点开的待办：不再截成一行，换行铺开整段。 */
+/* 点开的待办：不再截成一行，换行铺开整段；按钮挪到下方，别把正文挤成一窄条。 */
+.todo-item.is-expanded {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.todo-item.is-expanded .todo-main {
+  align-items: flex-start;
+}
+
 .todo-item.is-expanded .todo-title {
   white-space: pre-wrap;
   overflow: visible;
   text-overflow: clip;
   overflow-wrap: anywhere;
+}
+
+.todo-item.is-expanded .todo-actions {
+  align-self: flex-end;
+  padding: 0 4px 4px 0;
 }
 
 .todo-item.is-done .todo-title {
@@ -1037,7 +1051,8 @@ details[open] > .dock-project-head::before {
 }
 
 .todo-item:hover .todo-actions,
-.todo-item:focus-within .todo-actions {
+.todo-item:focus-within .todo-actions,
+.todo-item.is-expanded .todo-actions {
   opacity: 1;
 }
 
@@ -1063,29 +1078,6 @@ details[open] > .dock-project-head::before {
 .todo-action:hover {
   background: var(--surface-2);
   color: var(--text);
-}
-
-/* 桌面 hover 的待办全文浮层；定位由 main.ts 按行的位置算。 */
-.todo-tip {
-  position: fixed;
-  z-index: 60;
-  display: none;
-  max-width: min(320px, calc(100vw - 16px));
-  padding: 7px 9px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-2);
-  color: var(--text);
-  font-size: 12px;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  box-shadow: 0 6px 20px rgb(0 0 0 / 28%);
-  pointer-events: none;
-}
-
-.todo-tip.is-open {
-  display: block;
 }
 
 /* 就地编辑一行：分类 + 输入框 + 保存/取消。 */

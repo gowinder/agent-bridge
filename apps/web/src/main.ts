@@ -2388,47 +2388,8 @@ function dockHistory(): HTMLElement {
 
 /** 待办面板的本地状态：切换 tab 会重绘，草稿与上次数据留着。 */
 let todoDraft: { title: string; kind: TodoKind } = { title: "", kind: "feature" };
-/** 手机上点开的待办：列表里标题是单行截断的，展开后才看得到整段。 */
+/** 点开的待办：列表里标题是单行截断的，展开后才看得到整段。桌面和手机同一套。 */
 let expandedTodoId: string | null = null;
-
-/** 触屏没有 hover：这类设备上点条目是展开/收起，填到输入框另给按钮。 */
-function touchLayout(): boolean {
-  return !window.matchMedia("(hover: hover) and (pointer: fine)").matches;
-}
-
-/**
- * 桌面 hover 的浮层：待办标题在列表里被截成一行，悬停时把完整文字铺开。
- * 用自建节点而不是 title 属性：title 有 1 秒延迟、不能换行，样式也跟不上。
- */
-let todoTip: HTMLElement | null = null;
-let todoTipTimer: number | null = null;
-
-function hideTodoTip(): void {
-  if (todoTipTimer !== null) {
-    window.clearTimeout(todoTipTimer);
-    todoTipTimer = null;
-  }
-  if (todoTip) todoTip.classList.remove("is-open");
-}
-
-function showTodoTip(anchor: HTMLElement, text: string): void {
-  if (!todoTip) {
-    todoTip = el("div", { className: "todo-tip", attrs: { role: "tooltip" } });
-    document.body.append(todoTip);
-  }
-  todoTip.textContent = text;
-  todoTip.classList.add("is-open");
-  const box = anchor.getBoundingClientRect();
-  const tip = todoTip.getBoundingClientRect();
-  const margin = 8;
-  const left = Math.max(margin, Math.min(box.left, window.innerWidth - margin - tip.width));
-  const below = box.bottom + 6;
-  const top = below + tip.height > window.innerHeight - margin
-    ? Math.max(margin, box.top - 6 - tip.height)
-    : below;
-  todoTip.style.left = `${Math.round(left)}px`;
-  todoTip.style.top = `${Math.round(top)}px`;
-}
 let todoCache: TodoListResult | null = null;
 let todoError = "";
 /** 待办读取失败时点「重试」要怎么重来；不懂重试的错误留 null。 */
@@ -2492,8 +2453,6 @@ function dockTodos(): HTMLElement {
   trackIme(input);
 
   const list = el("div", { className: "todo-list" });
-  // 浮层是按行的位置摆的，列表滚了它不会跟着走，直接收掉。
-  list.addEventListener("scroll", hideTodoTip);
   const addButton = button("", () => void add(), "btn primary todo-add");
   addButton.append(icon("plus"));
   addButton.setAttribute("aria-label", tr("添加待办"));
@@ -2573,28 +2532,21 @@ function dockTodos(): HTMLElement {
   const row = (item: TodoItem): HTMLElement => {
     const done = item.checkedAt !== null;
     if (item.todoId === editingTodoId) return editRow(item, done);
-    const touch = touchLayout();
     const expanded = expandedTodoId === item.todoId;
     const main = el(
       "button",
       {
         className: "todo-main",
-        attrs: {
-          type: "button",
-          title: touch ? (expanded ? tr("收起") : tr("展开查看全文")) : tr("填到输入框"),
-        },
+        attrs: { type: "button", title: expanded ? tr("收起") : tr("展开查看全文") },
       },
       [
         el("span", { className: `todo-tag is-${item.kind}`, text: todoKindLabel(item.kind) }),
         el("span", { className: "todo-title", text: item.title }),
       ],
     );
+    // 点条目只做一件事：展开/收起全文。填到输入框挪到右侧按钮，
+    // 否则长待办永远看不全，点一下又会被勾成完成。
     main.addEventListener("click", () => {
-      if (!touch) {
-        void use(item);
-        return;
-      }
-      // 触屏上先给「看全」，填到输入框交给旁边那个按钮，免得一次点击两种意思。
       expandedTodoId = expanded ? null : item.todoId;
       paintList();
     });
@@ -2608,32 +2560,18 @@ function dockTodos(): HTMLElement {
       return node;
     };
     const actions = el("div", { className: "todo-actions" }, [
-      ...(touch ? [action("swap", tr("填到输入框"), () => void use(item))] : []),
+      action("swap", tr("填到输入框"), () => void use(item)),
       ...(done ? [action("refresh", tr("标记未完成"), () => void setChecked(item, false))] : []),
       action("pencil", tr("编辑"), () => startEdit(item)),
       action("trash", tr("删除待办"), () => void remove(item)),
     ]);
-    const node = el(
+    return el(
       "div",
       {
         className: `todo-item${done ? " is-done" : ""}${expanded ? " is-expanded" : ""}`,
       },
       [main, actions],
     );
-    if (!touch) {
-      node.addEventListener("mouseenter", () => {
-        // 标题没被截断就没有可补的信息，别弹一个重复的浮层。
-        const title = main.querySelector<HTMLElement>(".todo-title");
-        if (!title || title.scrollWidth <= title.clientWidth + 1) return;
-        hideTodoTip();
-        todoTipTimer = window.setTimeout(() => {
-          todoTipTimer = null;
-          showTodoTip(node, item.title);
-        }, 300);
-      });
-      node.addEventListener("mouseleave", hideTodoTip);
-    }
-    return node;
   };
 
   /** 就地编辑：标题、分类都能改，改完才发 RPC。 */
@@ -2721,8 +2659,6 @@ function dockTodos(): HTMLElement {
   };
 
   const paintList = (): void => {
-    // 重建会把 hover 的行换掉，浮层必须跟着收，否则会挂在旧位置上。
-    hideTodoTip();
     const parts: HTMLElement[] = [];
     if (todoError) {
       parts.push(
