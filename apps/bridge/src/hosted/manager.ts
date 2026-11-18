@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { basename, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DEFAULT_COMPACTION_TRIGGER_PERCENT } from "@craftstead/protocol";
 import type {
   ContextUsage,
@@ -108,6 +108,15 @@ const BLOCKED_EXTRA_ARGS = new Set([
   "--dangerously-skip-permissions",
   // settings 文件里能写 permissions.allow 和 hooks，等于绕过上面的模式门禁。
   "--settings",
+  // 这组能把白名单之外的目录拉进工作区、或换一套 MCP / 工具配置：
+  // 白名单管的是「能建在哪」，这些旗标一放，目录边界就没了。
+  "--add-dir",
+  "--mcp-config",
+  "--allowedTools",
+  "--allowed-tools",
+  "--disallowedTools",
+  "--disallowed-tools",
+  "--append-system-prompt",
 ]);
 
 /** pi 这边同理：会话身份、协议模式与信任开关由 Bridge 决定。 */
@@ -371,6 +380,7 @@ export class HostedSessionManager {
         name: basename(path) || path,
         sessionCount: [...this.records.values()].filter((record) => record.cwd === path).length,
         exists,
+        allowed: true,
       });
       seen.add(path);
     }
@@ -382,6 +392,7 @@ export class HostedSessionManager {
         name: basename(record.cwd) || record.cwd,
         sessionCount: [...this.records.values()].filter((item) => item.cwd === record.cwd).length,
         exists: false,
+        allowed: false,
       });
       seen.add(record.cwd);
     }
@@ -444,11 +455,20 @@ export class HostedSessionManager {
    */
   setDirs(input: string[]): HostedDirsResult {
     const dirs: string[] = [];
+    const current = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
     for (const item of input) {
       const raw = String(item ?? "").trim();
       if (!raw) continue;
       const target = this.normalizeDir(raw);
-      if (!isDirectory(target)) throw new RpcError("invalid_params", `目录不存在：${target}`);
+      if (!isDirectory(target)) {
+        // 已经在白名单里的目录被删了：跳过，不要让整份写入失败。否则只要留着一个
+        // 早已删掉的旧目录，「添加目录」就永远报错，而界面上没有移除入口。
+        if (current.has(this.compareDir(target))) {
+          this.log(`hosted: 跳过已不存在的托管目录 ${target}`);
+          continue;
+        }
+        throw new RpcError("invalid_params", `目录不存在：${target}`);
+      }
       if (!dirs.includes(target)) dirs.push(target);
     }
     if (dirs.length > MAX_HOSTED_DIRS) {
@@ -460,6 +480,18 @@ export class HostedSessionManager {
       this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
     }
     return this.configForClient();
+  }
+
+  /**
+   * 目录已经不在时 realpath 会失败，退一步解析父目录：这样 `/var/…` 与 `/private/var/…`
+   * 这类系统性符号链接能对齐，否则「早已删掉、但还在白名单里」的旧目录永远匹配不上。
+   */
+  private compareDir(path: string): string {
+    try {
+      return join(realpathSync(dirname(path)), basename(path));
+    } catch {
+      return path;
+    }
   }
 
   /** 统一成绝对路径（~ 展开、存在的路径取 realpath）；不检查目录是否存在。 */

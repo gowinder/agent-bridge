@@ -666,6 +666,11 @@ export interface HostedDirInfo {
   sessionCount: number;
   /** false when the directory was removed after it was allowlisted. */
   exists: boolean;
+  /**
+   * false = 只在历史会话里出现过、已经不在白名单里。这类目录仍要显示（否则历史会话
+   * 看起来没有目录），但不能再用来新建会话，也不能被菜单栏合并时写回白名单。
+   */
+  allowed?: boolean;
 }
 
 export interface HostedDirsResult {

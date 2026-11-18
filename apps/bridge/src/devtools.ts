@@ -41,7 +41,7 @@ const MAX_CONCURRENT_EXECS = 8;
 
 type Capability = DevtoolsCapabilityName;
 /** `projectIds` keeps every adapter project that resolves to this directory, so a chat in any of them is accepted. */
-type ScopedRoot = FsRoot & { real: string; projectIds: Set<string> };
+type ScopedRoot = FsRoot & { real: string; projectIds: Set<string>; realResolved?: string };
 
 const CAPABILITY_LABEL: Record<Capability, string> = {
   files: "文件浏览",
@@ -321,11 +321,28 @@ export class Devtools {
     } catch {
       throw new RpcError("not_found", "路径不存在");
     }
-    const inside = real === root.real || real.startsWith(root.real + sep);
+    const base = this.rootReal(root);
+    const inside = real === base || real.startsWith(base + sep);
     if (!inside && !(allowUploads && this.insideUploads(real))) {
       throw new RpcError("unauthorized", "路径不在该项目目录内");
     }
     return real;
+  }
+
+  /**
+   * 索引里的 root 只做了纯字符串归一（那份索引每几秒重建一次，不能 realpath 受保护目录）；
+   * 工程目录本身带符号链接时（macOS 的 `/tmp` → `/private/tmp` 最常见），realpath 后的
+   * 子路径不会以原字符串开头，整棵树都会被误判成越界。真正读文件时才解析一次并缓存。
+   */
+  private rootReal(root: ScopedRoot): string {
+    if (root.realResolved === undefined) {
+      try {
+        root.realResolved = realpathSync(root.real);
+      } catch {
+        root.realResolved = root.real;
+      }
+    }
+    return root.realResolved;
   }
 
   /**
@@ -352,12 +369,22 @@ export class Devtools {
     }
   }
 
+  /**
+   * 附件判定的第一道闸：先比字符串，不碰文件系统。
+   * `realpath` 打到「桌面 / 文档 / 下载」这类受保护目录会弹系统授权，而这一步在
+   * capability 检查之前 —— 没开文件浏览的设备不该能用一次 `fs.read` 换来一个授权弹窗。
+   */
+  private looksLikeUpload(path: string): boolean {
+    if (!path.startsWith(join(this.store.dir, "uploads") + sep)) return false;
+    return this.insideUploadsPath(path);
+  }
+
   async listDirs(sessionId: string | undefined, root: string, path?: string): Promise<FsListResult> {
     this.requireCapability("files");
     const scoped = await this.scope(sessionId, root);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     this.requireCapability("files");
-    const real = path ? this.resolveInside(scoped, path) : scoped.real;
+    const real = path ? this.resolveInside(scoped, path) : this.rootReal(scoped);
     let stats;
     try {
       stats = statSync(real);
@@ -392,7 +419,7 @@ export class Devtools {
     });
     return {
       path: real,
-      parent: real === scoped.real ? null : dirname(real),
+      parent: real === this.rootReal(scoped) ? null : dirname(real),
       entries,
     };
   }
@@ -401,7 +428,7 @@ export class Devtools {
     // 自己发的附件落在 state/uploads 下：不开「文件浏览」也该能点开预览，否则只能拿到一句
     // 「文件浏览未开启」。只免这一个目录的开关，其它路径照旧先要开关，
     // 免得未开启的设备拿 fs.read 探测项目里有什么。
-    const attachment = this.insideUploadsPath(resolve(root, path));
+    const attachment = this.looksLikeUpload(resolve(root, path));
     if (!attachment) this.requireCapability("files");
     const scoped = await this.scope(sessionId, root);
     const real = this.resolveInside(scoped, path, true);

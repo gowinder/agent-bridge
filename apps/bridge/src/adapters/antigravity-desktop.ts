@@ -15,6 +15,7 @@ import type {
   SessionRailResult,
   SessionSummary,
 } from "@craftstead/protocol";
+import { toolSummaryOf } from "../tool-summary.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
 
 const ANTIGRAVITY_DIR = join(homedir(), ".gemini", "antigravity");
@@ -450,7 +451,10 @@ export class AntigravityDesktopAdapter implements SessionAdapter {
         if (seenTools.has(toolId)) return;
         seenTools.add(toolId);
       }
-      appendAssistant(messageId, createdAt, [{ type: "tool", ...truncate(label, 400) }]);
+      const summary = toolSummaryOf(step.metadata?.toolCall?.argumentsJson);
+      appendAssistant(messageId, createdAt, [
+        { type: "tool", ...truncate(label, 400), ...(summary ? { summary } : {}) },
+      ]);
     });
 
     return { messages, busy, interrupted, texts };

@@ -150,13 +150,17 @@ async function sessionSearchHit(
   sessionId: string,
   words: string[],
   cacheKey: string,
-): Promise<boolean> {
+  deadline: number,
+): Promise<boolean | undefined> {
   const cached = searchHitCache.get(cacheKey);
   if (cached && Date.now() - cached.at < SEARCH_HIT_TTL_MS) return cached.hit;
 
   const seen = new Set<string>();
   let before: string | undefined;
   for (let page = 0; page < SEARCH_MAX_PAGES; page += 1) {
+    // 预算必须在页循环里也查：一个几千条消息的会话光翻页就能跑很久，
+    // 只在会话之间检查等于不设上限。
+    if (Date.now() > deadline) return undefined;
     const result = await adapters.messages(sessionId, {
       limit: SEARCH_PAGE_SIZE,
       ...(before ? { before } : {}),
@@ -198,6 +202,13 @@ async function sessionSearchHit(
   return hit;
 }
 
+/**
+ * 同一时刻只跑一个搜索：解析 transcript 是同步 CPU 活（首次要 JSON.parse 整份文件），
+ * 多设备各发一个就能把桥的事件循环占满，连 `host.ping` 和 5 秒轮询都会排在后面。
+ * 后来的请求排队而不是拒绝：前端有防抖，排队通常只有一个。
+ */
+let searchChain: Promise<void> = Promise.resolve();
+
 export async function searchSessionTexts(
   adapters: SearchMessageSource,
   query: string,
@@ -211,6 +222,13 @@ export async function searchSessionTexts(
 
   const cachePrefix = words.join("\u0001");
   const ids = sessionIds.filter((id, index) => sessionIds.indexOf(id) === index).slice(0, SEARCH_MAX_SESSIONS);
+  const gate = searchChain;
+  let open!: () => void;
+  searchChain = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  await gate;
+  // 预算从真正开始搜的那一刻算：排队等待不该吃掉自己的 8 秒。
   const started = Date.now();
   const matches: string[] = [];
   let searched = 0;
@@ -227,7 +245,15 @@ export async function searchSessionTexts(
       if (index >= ids.length) return;
       const sessionId = ids[index] as string;
       try {
-        const hit = await sessionSearchHit(adapters, sessionId, words, `${cachePrefix}\u0000${sessionId}`);
+        const hit = await sessionSearchHit(
+          adapters,
+          sessionId,
+          words,
+          `${cachePrefix}\u0000${sessionId}`,
+          started + SEARCH_BUDGET_MS,
+        );
+        // undefined = 这一页还没翻完就超时了，不算命中也不算没命中。
+        if (hit === undefined) return;
         searched += 1;
         if (hit) matches.push(sessionId);
       } catch {
@@ -237,7 +263,11 @@ export async function searchSessionTexts(
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
   });
-  await Promise.all(workers);
+  try {
+    await Promise.all(workers);
+  } finally {
+    open();
+  }
 
   const result: SessionSearchResult = { matches, searched };
   if (errors > 0) result.errors = errors;
@@ -572,7 +602,10 @@ export class DeviceSession implements ChannelSession {
   private async handleRequest(request: RequestMessage): Promise<void> {
     let response: ResponseMessage;
     const activity = describeActivity(request);
-    if (activity && this.shouldLogActivity(activity)) this.options.activity?.(activity);
+    // 文件浏览会连着点好几下，同一份记录 30 秒只写一条；发送消息、改设置这类真实操作
+    // 每一条都要记，去重会把「连发两条」里的第二条吞掉。
+    const dedupe = request.method === "fs.list" || request.method === "fs.read";
+    if (activity && (!dedupe || this.shouldLogActivity(activity))) this.options.activity?.(activity);
     if (request.method === "message.send") this.reportMessage(request);
     try {
       response = { v: 1, kind: "response", id: request.id, ok: true, result: await this.dispatch(request) };

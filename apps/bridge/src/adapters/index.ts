@@ -101,7 +101,8 @@ export class SessionAdapters {
     const info = this.hostedManager.configForClient();
     return {
       allowBypassPermissions: info.allowBypassPermissions,
-      dirs: info.dirs.map((dir) => dir.path),
+      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
+      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
       idleTimeoutMs: info.idleTimeoutMs,
     };
   }
@@ -110,7 +111,8 @@ export class SessionAdapters {
     const info = this.hostedManager.setAllowBypassPermissions(enabled);
     return {
       allowBypassPermissions: info.allowBypassPermissions,
-      dirs: info.dirs.map((dir) => dir.path),
+      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
+      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
       idleTimeoutMs: info.idleTimeoutMs,
     };
   }
@@ -120,7 +122,8 @@ export class SessionAdapters {
     const info = this.hostedManager.setDirs(dirs);
     return {
       allowBypassPermissions: info.allowBypassPermissions,
-      dirs: info.dirs.map((dir) => dir.path),
+      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
+      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
       idleTimeoutMs: info.idleTimeoutMs,
     };
   }

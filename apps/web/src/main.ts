@@ -267,9 +267,17 @@ let active: PeerClient | null = null;
 let generation = 0;
 /** 可见时的心跳间隔与判定窗口；手机挂起后回来靠它第一时间发现「假活」。 */
 const HEARTBEAT_MS = 20_000;
-const HEARTBEAT_TIMEOUT_MS = 6_000;
+/**
+ * Bridge 的请求是一条串行队列：搜索预算 8 秒、压缩能跑两分钟。探活给的时间比队列
+ * 里最长的那类任务短，就会把「正在忙」误判成「已经死了」并主动拆链。
+ */
+const HEARTBEAT_TIMEOUT_MS = 20_000;
+/** 连续两次探活都没回音才算死：一次超时可能只是它排在长任务后面。 */
+const HEARTBEAT_MISSES = 2;
 /** 请求超时/回到前台时的短探活：够快，又不至于把慢请求误判成断线。 */
-const PROBE_TIMEOUT_MS = 4_000;
+const PROBE_TIMEOUT_MS = 10_000;
+/** 探活失败计数，见 HEARTBEAT_MISSES。 */
+let heartbeatMisses = 0;
 /** 心跳定时器：页面可见时每 20 秒 ping 一次，隐藏时停掉省电。 */
 let heartbeatTimer: number | null = null;
 /** 刚配对完回到首页时提示一句回落地页的入口；只影响一次渲染。 */
@@ -773,11 +781,33 @@ function startHeartbeat(): void {
 }
 
 /** 通道还在但可能已经死了：只有 Bridge 真的回话才能证明它活着。 */
+/**
+ * `host.ping` 是 0.11.4 才有的空方法。更早的 Bridge 不认识它：`parseWireMessage`
+ * 按 METHODS 白名单校验，不在表里整帧丢弃，既不回包也不报错 —— 探活必然超时，
+ * 网页就会每 20 秒断一次链（而网页是随部署立即生效的）。这类旧 Bridge 退回
+ * 用各版本都有的 `host.info` 做探活。
+ */
+/** `0.11.4-rc.17` → 按 0.11.4 比（预发布后缀不参与）。 */
+function atLeastVersion(version: string, want: [number, number, number]): boolean {
+  const base = (version.split("-")[0] ?? "").split(".").map((part) => Number(part) || 0);
+  for (let index = 0; index < 3; index += 1) {
+    const have = base[index] ?? 0;
+    const need = want[index] ?? 0;
+    if (have !== need) return have > need;
+  }
+  return true;
+}
+
+function heartbeatMethod(): "host.ping" | "host.info" {
+  const version = connected?.info.version;
+  return version !== undefined && atLeastVersion(version, [0, 11, 4]) ? "host.ping" : "host.info";
+}
+
 async function pingHost(timeoutMs: number): Promise<boolean> {
   const client = active;
   if (!client) return false;
   try {
-    await client.request("host.ping", undefined, timeoutMs);
+    await client.request(heartbeatMethod(), undefined, timeoutMs);
     return true;
   } catch {
     return false;
@@ -804,7 +834,13 @@ function connectionLost(message: string): void {
 
 async function heartbeatTick(): Promise<void> {
   if (!active || document.visibilityState !== "visible") return;
-  if (await pingHost(HEARTBEAT_TIMEOUT_MS)) return;
+  if (await pingHost(HEARTBEAT_TIMEOUT_MS)) {
+    heartbeatMisses = 0;
+    return;
+  }
+  heartbeatMisses += 1;
+  if (heartbeatMisses < HEARTBEAT_MISSES) return;
+  heartbeatMisses = 0;
   connectionLost(tr("连接无响应，正在重连…"));
 }
 
@@ -816,7 +852,15 @@ async function probeAfterTimeout(): Promise<void> {
   if (probing) return;
   probing = true;
   try {
-    if (await pingHost(PROBE_TIMEOUT_MS)) return;
+    if (await pingHost(PROBE_TIMEOUT_MS)) {
+      heartbeatMisses = 0;
+      return;
+    }
+    // 请求超时最常见的原因就是 Bridge 正忙着跑长任务，这时探活也答不上来。
+    // 记一次，等心跳累计到两次再判死，不然会把好好的连接掐掉。
+    heartbeatMisses += 1;
+    if (heartbeatMisses < HEARTBEAT_MISSES) return;
+    heartbeatMisses = 0;
     connectionLost(tr("连接无响应，正在重连…"));
   } finally {
     probing = false;
@@ -1961,9 +2005,12 @@ function renderShell(content: HTMLElement, crumbs: Crumb[]): void {
   restoreDockFocus(focus);
 }
 
-/** dock 里正在编辑的输入框（新增待办 / 就地编辑）：整页重建后要还原焦点，否则打字被打断。 */
+/**
+ * dock 里正在编辑的输入框（新增待办 / 就地编辑 / 历史搜索）：整页重建后要还原焦点，
+ * 否则打字被打断。列表页每 5 秒就可能因为某个会话换了状态整页重绘，搜索框是最容易撞上的。
+ */
 interface DockFocus {
-  target: "new" | "edit";
+  target: "new" | "edit" | "search";
   value: string;
   start: number | null;
   end: number | null;
@@ -1976,19 +2023,27 @@ function captureDockFocus(): DockFocus | null {
     ? "new"
     : active.classList.contains("todo-edit-input")
       ? "edit"
-      : null;
+      : active.classList.contains("dock-search-input")
+        ? "search"
+        : null;
   if (!target) return null;
   return { target, value: active.value, start: active.selectionStart, end: active.selectionEnd };
 }
 
 function restoreDockFocus(saved: DockFocus | null): void {
   if (!saved) return;
-  const selector = saved.target === "new" ? ".dock-todos .todo-input" : ".dock-todos .todo-edit-input";
+  const selector =
+    saved.target === "new"
+      ? ".dock-todos .todo-input"
+      : saved.target === "edit"
+        ? ".dock-todos .todo-edit-input"
+        : ".dock-search-input";
   const input = document.querySelector<HTMLInputElement>(selector);
   if (!input || input.disabled) return;
   input.value = saved.value;
   if (saved.target === "new") todoDraft.title = saved.value;
-  else todoEditDraft.title = saved.value;
+  else if (saved.target === "edit") todoEditDraft.title = saved.value;
+  // 搜索框的值由 dockSearchQuery 保存，重画时会回填；这里只负责把焦点和光标放回去。
   // preventScroll：重绘发生在输入框上方时别把页面拉过去。
   input.focus({ preventScroll: true });
   if (saved.start !== null && saved.end !== null) input.setSelectionRange(saved.start, saved.end);
@@ -2066,7 +2121,9 @@ function dockStateKey(session: SessionSummary): string {
     session.live ? 1 : 0,
     unreadAt(session.sessionId) !== undefined ? 1 : 0,
     session.needsDecision ? 1 : 0,
-  ].join("");
+    // 历史行右侧写着「· 3 分钟前」：只看状态会让这串时间停在上次整页重绘那一刻。
+    Math.floor(session.updatedAt / 60_000),
+  ].join(":");
 }
 
 /**
@@ -2359,15 +2416,32 @@ async function runDeepSearch(query: string): Promise<void> {
     return;
   }
 
+  // 比网页还旧的 Bridge 连 METHOD 都不认识：帧在协议层就被丢掉，不会回错误，
+  // 等下去只会白等到超时。直接按版本判定，省掉这一次干等。
+  const hostVersion = connected?.info.version;
+  if (hostVersion !== undefined && !atLeastVersion(hostVersion, [0, 11, 4])) {
+    dockSearchStale = true;
+    dockSearchBusy = false;
+    dockSearchMatches = new Set();
+    dockSearchNote = "";
+    renderDockHistoryList();
+    return;
+  }
+
   // 直接用 request 而不是 call()：要拿到错误码，才能把「Bridge 太旧」和「网络断了」分开说。
   let response;
   try {
-    response = await peer.request("session.search", { query, sessionIds }, 30_000);
+    // 桥端预算 8 秒，超时给到 10 秒就够；再长只会让人干等。
+    response = await peer.request("session.search", { query, sessionIds }, 10_000);
   } catch (error) {
     if (token !== dockSearchToken) return;
     dockSearchBusy = false;
     dockSearchMatches = new Set();
     dockSearchNote = error instanceof Error ? error.message : tr("搜索失败");
+    // 连不上 / 没回音时也按「Bridge 太旧或不在线」降级，别再每敲一个字等 10 秒。
+    const code =
+      error instanceof PeerError || error instanceof RpcCallError ? error.code : undefined;
+    if (code === "timeout" || code === "unsupported") dockSearchStale = true;
     renderDockHistoryList();
     return;
   }

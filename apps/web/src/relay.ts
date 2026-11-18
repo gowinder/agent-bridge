@@ -63,7 +63,12 @@ export class RelayConnection {
         if (this.controls.length > MAX_QUEUED_CONTROLS) this.controls.shift();
       } else {
         this.frames.push(new Uint8Array(data));
-        if (this.frames.length > MAX_QUEUED_FRAMES) this.frames.shift();
+        if (this.frames.length > MAX_QUEUED_FRAMES) {
+          // 丢一帧会让接收端的 nonce 错位，之后每一帧都解密失败 —— 表现成永久静默。
+          // 溢出就关连接，让上层重连重建通道。
+          this.close(1000, "backlog");
+          return;
+        }
       }
       this.pump();
     });

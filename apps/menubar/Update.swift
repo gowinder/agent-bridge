@@ -237,9 +237,12 @@ final class Updater {
         }
     }
 
-    /// Release 里带了 sha256 就必须对上，避免装到半截或被人换过的包。
+    /// 必须对上 Release 里的 sha256，避免装到半截或被人换过的包。
+    /// 缺校验文件时直接失败：放宽成「没有就跳过」等于只剩 TLS 一层保护。
     private func verify(_ dmg: URL, release: GitHubRelease) async throws {
-        guard let asset = release.assets.first(where: { $0.name.hasSuffix(".sha256") }) else { return }
+        guard let asset = release.assets.first(where: { $0.name.hasSuffix(".sha256") }) else {
+            throw UpdateError.message(T("这个版本缺少校验文件（.sha256），已放弃更新"))
+        }
         var request = URLRequest(url: URL(string: asset.url)!)
         request.timeoutInterval = 15
         request.setValue("AgentBridge-menubar", forHTTPHeaderField: "User-Agent")

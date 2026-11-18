@@ -497,7 +497,9 @@ function blocksOf(content: unknown): MessageBlock[] {
     if (part["type"] === "toolCall" && typeof part["name"] === "string") {
       const args = typeof part["arguments"] === "string" ? part["arguments"] : safeJson(part["arguments"]);
       {
-        const summary = toolSummaryOf(part["args"]);
+        // 托管 RPC 事件里参数叫 arguments（原生 jsonl 里才叫 args）：写错就等于永远
+        // 拿不到工具自带的说明，网页只能退回「动作标签 + 命令」。
+        const summary = toolSummaryOf(part["arguments"]);
         blocks.push({
           type: "tool",
           text: cut(`调用 ${part["name"]} ${args}`.trim(), MAX_TOOL_CHARS),
