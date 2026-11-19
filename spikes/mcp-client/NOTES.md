@@ -85,7 +85,9 @@ node spikes/mcp-client/spike.mjs reconnect
   **它不覆盖真实 relay/Bridge**：网络路径只有实跑才能验证。
 - verify 会真的在 Bridge 机器上用 `pi` 建一个托管会话（在白名单目录里），发一条
   `Reply with exactly: SPIKE-OK`，最后 `hosted.stop` + `hosted.archive`。**不 `hosted.delete`**，
-  归档会话会留在列表里，需要人工清理。
+  归档会话会留在列表里，需要人工清理。会话中途若出现 `needsDecision`（pi 的 UI 提问），
+  会再发一条普通消息「继续」尝试解卡（不是 approval.respond，那方法这版 Bridge 未实现）；
+  中途任何一步抛错时也会在 finally 里 best-effort `hosted.stop`，避免留下还在跑的进程。
 - `hosted.create` 依赖 Bridge 机器上装了 `pi`；没装就报错，不要当成脚本 bug。
 - `PeerClient` 的通道判死阈值是 60s 无下行帧（照抄网页 `FRAME_IDLE_MS`）。`hosted.create` 冷启动
   超过 60 秒还没任何事件的话，通道会被判死、请求以 `closed` 失败——这一版 Bridge 没有心跳补偿。

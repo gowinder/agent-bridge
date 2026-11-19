@@ -101,6 +101,9 @@ export async function runVerify(noise, { name, dir }) {
   // unsupported：白名单只能在 Mac 菜单栏里改）。这里仍然试一次留下证据，然后退回
   // 白名单里已有的目录。
   const tempDir = await mkdtemp(join(stateDir(), "spike-dir-"));
+  // 提到 try 外：中途任何一步抛错都要在 finally 里 best-effort hosted.stop，
+  // 不然会在 Bridge 机器上留下一个还在跑的 pi 托管进程。
+  let session = null;
   try {
     const added = await call(client, "hosted.addDir", { path: tempDir }, 30_000).then(
       (result) => ({ ok: true, result }),
@@ -122,7 +125,7 @@ export async function runVerify(noise, { name, dir }) {
     console.log(`  用目录：${path}`);
 
     const created = await call(client, "hosted.create", { path, agent: "pi" }, 60_000);
-    const session = created?.session;
+    session = created?.session;
     if (!session) throw new Error(`hosted.create 没有返回 session：${JSON.stringify(created).slice(0, 400)}`);
     console.log(
       `  hosted.create → ${session.sessionId}  app=${session.appId}  hostedState=${session.hostedState}  busy=${session.busy === true}  ${JSON.stringify(session.title)}`,
@@ -189,6 +192,14 @@ export async function runVerify(noise, { name, dir }) {
     if (removed.ok) console.log(`  ⚠ hosted.removeDir 竟然成功了：${JSON.stringify(removed.result)}`);
     else console.log(`  hosted.removeDir 被拒绝（预期：远程不支持）→ ${removed.error.code}: ${removed.error.message}`);
   } finally {
+    // 失败路径也要收尾：停掉自己建出来的托管会话，再删临时目录。
+    if (session) {
+      await call(client, "hosted.stop", { sessionId: session.sessionId }, 60_000)
+        .then(
+          (result) => console.log(`  [finally] hosted.stop → ${JSON.stringify(result).slice(0, 200)}`),
+          (error) => console.log(`  [finally] hosted.stop 失败（会话可能已停）：${error.code}: ${error.message}`),
+        );
+    }
     await rm(tempDir, { recursive: true, force: true }).catch(() => {});
   }
 

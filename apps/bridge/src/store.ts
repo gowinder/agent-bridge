@@ -182,7 +182,13 @@ export class Store {
   private migrateDeviceClientType(): void {
     const columns = this.db.prepare("PRAGMA table_info(devices)").all();
     if (columns.some((row) => row["name"] === "client_type")) return;
-    this.db.exec("ALTER TABLE devices ADD COLUMN client_type TEXT NOT NULL DEFAULT 'web'");
+    try {
+      this.db.exec("ALTER TABLE devices ADD COLUMN client_type TEXT NOT NULL DEFAULT 'web'");
+    } catch (error) {
+      // CLI 与守护进程可能同时在未迁移的老库上打开，另一进程已把列补上时会报 duplicate column，忽略即可。
+      const message = error instanceof Error ? error.message : String(error);
+      if (!message.includes("duplicate column name")) throw error;
+    }
   }
 
   /**
