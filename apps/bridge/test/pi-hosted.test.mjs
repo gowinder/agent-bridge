@@ -621,6 +621,14 @@ test("pi session rail lists its background subagent runs", (t) => {
     currentStep: 1,
     steps: [{ agent: "scout" }, { agent: "builder", sessionName: "builder: 写报告" }],
   });
+  // paused 是终态（pi-subagents 的 terminalState 也这么算），不该一直显示在跑。
+  writeRun(runs, "run-paused", {
+    sessionId: piId,
+    state: "paused",
+    startedAt: now - 30_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "tester" }],
+  });
   // 真实 pi-subagents 记的是会话文件绝对路径，不是裸 id。
   writeRun(runs, "run-path", {
     sessionId: `/state/sessions/--repo--/2026-11-13T22-45-14-079Z_${piId}.jsonl`,
@@ -645,6 +653,7 @@ test("pi session rail lists its background subagent runs", (t) => {
     tasks.map((task) => [task.taskId, task.status, task.agentType, task.name]),
     [
       ["run-live", "running", "builder", "builder: 写报告"],
+      ["run-paused", "done", "tester", "tester"],
       ["run-done", "done", "scout", "scout: 数一下目录"],
       ["run-path", "done", "reviewer", "reviewer"],
     ],
