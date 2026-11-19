@@ -35,7 +35,7 @@
 - 改动涉及 wasm 或 web 构建时，本地也跑一遍部署链路：
   - `npm run build:wasm -w @craftstead/crypto`
   - `npm run build -w @craftstead/web`
-- 仓库当前没有 lint / test 脚本，不要声称跑过。
+- `npm test`（`npm run build && node --test apps/bridge/test`）也要通过；没有 lint 脚本。
 
 ## 约定
 
