@@ -14,6 +14,8 @@ struct DeviceInfo: Decodable {
     let expiresAt: Double?
     let revokedAt: Double?
     let lastSeenAt: Double?
+    /// MCP 客户端自报的类型；旧 Bridge 的 /status 没有这个字段，必须可选。
+    let clientType: String?
     let online: Bool
     /// 最近操作日志，最新的在最前面。
     let log: [String]?
@@ -756,14 +758,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let revoked = device.revokedAt != nil
             let expired = device.expiresAt.map { $0 < Date().timeIntervalSince1970 * 1000 } ?? false
             let state = revoked ? T("已作废") : expired ? T("已过期") : device.online ? T("在线") : T("离线")
+            let isMcp = device.clientType == "mcp"
+            // MCP 是专有缩写，各语言同形，不进 L10n；图标也换掉，菜单里一眼能分。
+            let badge = isMcp ? " · MCP" : ""
             let entry = NSMenuItem(
-                title: "\(device.name) · \(state) · \(relativeTime(device.lastSeenAt))",
+                title: "\(device.name)\(badge) · \(state) · \(relativeTime(device.lastSeenAt))",
                 action: nil,
                 keyEquivalent: ""
             )
             entry.isEnabled = true
             entry.image = NSImage(
-                systemSymbolName: device.online ? "circle.fill" : "circle",
+                systemSymbolName: isMcp ? "network" : device.online ? "circle.fill" : "circle",
                 accessibilityDescription: state
             )
             entry.image?.isTemplate = true
