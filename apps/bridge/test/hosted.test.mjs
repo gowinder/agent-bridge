@@ -242,6 +242,8 @@ test("extra args reject the flags that decide identity and permissions", (t) => 
     "--dangerously-skip-permissions",
     "--permission-mode=bypassPermissions",
     "--resume",
+    // 每轮换一个会话 id：侧栏的后台任务与子任务记录会跟真实执行记录脱节。
+    "--fork-session",
     // 白名单管的是「会话建在哪个目录」，这些旗标能把别的目录拉进来。
     "--add-dir /tmp/extra",
     "--add-dir=/tmp/extra",

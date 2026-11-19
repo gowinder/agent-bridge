@@ -31,13 +31,18 @@ jobs:
 
       - id: detect
         name: 检查版本号是否变化
+        env:
+          # GitHub 在跑脚本前做文本替换：任何来自仓库文件的值都必须走 env，
+          # 否则 package.json 里的 version 会被当成 shell 代码执行。
+          BEFORE: ${{ github.event.before }}
+          FORCE: ${{ inputs.force }}
         run: |
           set -eu
           version=$(node -p "require('./package.json').version ?? ''")
           echo "version=$version" >> "$GITHUB_OUTPUT"
           # Compare against the tip before this push: a multi-commit push can carry
           # the bump in an earlier commit, where HEAD^ already has the new version.
-          before="${{ github.event.before }}"
+          before="$BEFORE"
           base=""
           if [ -n "$before" ] && ! echo "$before" | grep -qE '^0+$' && git cat-file -e "$before^{commit}" 2>/dev/null; then
             base="$before"
@@ -45,7 +50,7 @@ jobs:
             base="HEAD^"
           fi
           changed=false
-          if [ "${{ inputs.force }}" = "true" ]; then
+          if [ "$FORCE" = "true" ]; then
             changed=true
           elif [ -z "$version" ]; then
             changed=false
@@ -62,6 +67,10 @@ jobs:
 
       - id: maincheck
         name: 检查提交是否已合入 main
+        env:
+          # 版本号来自仓库里的 package.json，绝不能直接插值进 run 脚本。
+          VERSION: ${{ steps.detect.outputs.version }}
+          REF_TYPE: ${{ github.ref_type }}
         run: |
           set -eu
           # A tag can point at any commit, including develop or an unreviewed branch;
@@ -75,15 +84,15 @@ jobs:
           # 推送 tag 的人不一定走过 PR、也不一定 bump 过版本号。tag 必须与
           # package.json 的版本一致，否则任何人都能给 main 上的旧提交打 tag 触发生产部署。
           tag_ok=true
-          if [ "${{ github.ref_type }}" = "tag" ] && [ "${GITHUB_REF#refs/tags/v}" != "${{ steps.detect.outputs.version }}" ]; then
+          if [ "$REF_TYPE" = "tag" ] && [ "${GITHUB_REF#refs/tags/v}" != "$VERSION" ]; then
             tag_ok=false
           fi
           echo "tag_ok=$tag_ok" >> "$GITHUB_OUTPUT"
-          echo "tag 与版本号匹配：${tag_ok}（ref ${GITHUB_REF}，版本 ${{ steps.detect.outputs.version }}）"
+          echo "tag 与版本号匹配：${tag_ok}（ref ${GITHUB_REF}，版本 ${VERSION}）"
           # 预发布 tag（v0.1.5-rc.1）只用来发 DMG，绝不碰生产。正式版 tag 必须
           # 是干净的 v<major>.<minor>.<patch>，多一段预发布后缀就不算正式发布。
           release_tag=false
-          if [ "${{ github.ref_type }}" = "tag" ] && echo "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+          if [ "$REF_TYPE" = "tag" ] && echo "$GITHUB_REF_NAME" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             release_tag=true
           fi
           echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"

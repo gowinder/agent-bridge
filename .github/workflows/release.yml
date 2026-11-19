@@ -23,7 +23,10 @@ jobs:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
       APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # 发布前要确认这个提交已经进过 main，需要完整历史。
+          fetch-depth: 0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -76,10 +79,12 @@ jobs:
         env:
           AGENT_BRIDGE_NODE: ${{ runner.temp }}/node/bin/node
           AGENT_BRIDGE_ARCHS: arm64 x86_64
+          # GitHub 在跑脚本前做文本替换：app_name 与 version 来自仓库文件，必须走 env。
+          APP_NAME: ${{ steps.version.outputs.app_name }}
         run: |
           set -eu
           bash apps/menubar/build.sh
-          app="apps/menubar/build/${{ steps.version.outputs.app_name }}"
+          app="apps/menubar/build/$APP_NAME"
           lipo -info "$app/Contents/MacOS/AgentBridge"
           test -x "$app/Contents/Resources/node/bin/node"
           test -f "$app/Contents/Resources/bridge/apps/bridge/dist/main.js"
@@ -88,7 +93,7 @@ jobs:
           # 用 bundle 里的 node 跑一次 CLI，证明拷进去的运行时真的能用。
           # 从仓库外的一份拷贝里跑：留在仓库内时 Node 会顺着目录往上解析到源码树的
           # node_modules，bundle 少带依赖也照样通过。
-          outside="$RUNNER_TEMP/outside/${{ steps.version.outputs.app_name }}"
+          outside="$RUNNER_TEMP/outside/$APP_NAME"
           rm -rf "$RUNNER_TEMP/outside"
           mkdir -p "$RUNNER_TEMP/outside"
           cp -R "$app" "$outside"
@@ -101,9 +106,10 @@ jobs:
         env:
           P12: ${{ secrets.APPLE_CERT_P12 }}
           P12_PASS: ${{ secrets.APPLE_CERT_PASSWORD }}
+          APP_NAME: ${{ steps.version.outputs.app_name }}
         run: |
           set -eu
-          app="apps/menubar/build/${{ steps.version.outputs.app_name }}"
+          app="apps/menubar/build/$APP_NAME"
           if [ -z "${P12:-}" ] || [ -z "${P12_PASS:-}" ]; then
             echo "signed=false" >> "$GITHUB_OUTPUT"
             echo "未配置 APPLE_CERT_P12 / APPLE_CERT_PASSWORD，保留 ad-hoc 签名"
@@ -134,25 +140,30 @@ jobs:
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
       - name: 打包 DMG
+        env:
+          APP_NAME: ${{ steps.version.outputs.app_name }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
           stage="$RUNNER_TEMP/dmg"
           rm -rf "$stage"
           mkdir -p "$stage"
-          cp -R "apps/menubar/build/${{ steps.version.outputs.app_name }}" "$stage/"
+          cp -R "apps/menubar/build/$APP_NAME" "$stage/"
           ln -s /Applications "$stage/Applications"
           rm -f AgentBridge.dmg
           hdiutil create -volname "Agent Bridge" -srcfolder "$stage" -ov -format UDZO AgentBridge.dmg
-          cp AgentBridge.dmg "AgentBridge-${{ steps.version.outputs.version }}.dmg"
+          cp AgentBridge.dmg "AgentBridge-$VERSION.dmg"
 
       - name: 公证（Apple ID 与证书都配好时）
         if: steps.sign.outputs.signed == 'true' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -eu
           xcrun notarytool submit AgentBridge.dmg \
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple AgentBridge.dmg
-          cp AgentBridge.dmg "AgentBridge-${{ steps.version.outputs.version }}.dmg"
+          cp AgentBridge.dmg "AgentBridge-$VERSION.dmg"
 
       - name: 计算 sha256
         run: |
@@ -160,12 +171,36 @@ jobs:
           shasum -a 256 AgentBridge.dmg | tee AgentBridge.dmg.sha256
 
       - name: 保存构建产物
-        uses: actions/upload-artifact@v4
+        # 钉到 v4 tag 的 commit：可移动 tag 被换掉就等于换代码。
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: AgentBridge-${{ steps.version.outputs.version }}
           path: |
             AgentBridge.dmg
             AgentBridge.dmg.sha256
+
+      # 任何有写权限的人都能打 tag。Release 又是自动更新的来源，所以必须确认
+      # 这个提交走过 main 的 PR，并且 tag 与 package.json 的版本号一致。
+      - name: 检查发布条件
+        id: gate
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME 与 package.json 的版本 $VERSION 不一致，拒绝发布" >&2
+            exit 1
+          fi
+          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+            echo "读不到 origin/main，无法确认这个提交是否已合入 main" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "提交 $GITHUB_SHA 不在 main 上（tag 可以指向任何分支，Release 不能）" >&2
+            exit 1
+          fi
+          echo "发布前检查通过：$GITHUB_SHA 在 main 上，tag 与版本号一致"
 
       - name: 创建 GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -173,6 +208,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           VERSION: ${{ steps.version.outputs.version }}
+          APP_NAME: ${{ steps.version.outputs.app_name }}
           SIGNED: ${{ steps.sign.outputs.signed }}
         run: |
           set -eu
@@ -203,7 +239,7 @@ jobs:
             echo
             echo "## 安装"
             echo
-            echo "打开 DMG，把 ${{ steps.version.outputs.app_name }} 拖进「应用程序」。首次启动后在菜单栏点菱形图标，"
+            echo "打开 DMG，把 $APP_NAME 拖进「应用程序」。首次启动后在菜单栏点菱形图标，"
             echo "选择「初始化 Bridge…」填入中继地址即可配对。"
             echo
             if [ "$SIGNED" != "true" ]; then

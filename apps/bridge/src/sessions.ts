@@ -483,6 +483,20 @@ export class PairingSession implements ChannelSession {
     }
     if (!this.browserPublicKey) throw new Error("missing browser key");
 
+    // 邀请是一次性的。中继不可信，所以不能只靠它在 hello 时把邀请置为已用：
+    // 这里在读设备之前先复查并占位（同步 SQLite，中间没有 await，不会交错），
+    // 同一张邀请被重复下发时第二台设备会在这里被挡掉。
+    const fresh = this.options.store.invite(this.options.invite.id);
+    if (!fresh || fresh.usedAt !== null || fresh.expiresAt < Date.now()) {
+      this.options.log(`配对失败：邀请 ${this.options.invite.id} 已使用或已过期`);
+      this.respond(
+        errorResponse(request.id, "invalid_params", "邀请已使用或已过期，请重新生成配对链接"),
+      );
+      this.dispose();
+      return;
+    }
+    this.options.store.markInviteUsed(this.options.invite.id);
+
     const deviceId = randomUUID();
     const publicKey = toHex(this.browserPublicKey);
     const grant = await this.options.api.registerDevice({
@@ -501,7 +515,6 @@ export class PairingSession implements ChannelSession {
       lastSeenAt: null,
     };
     this.options.store.saveDevice(device);
-    this.options.store.markInviteUsed(this.options.invite.id);
 
     const result: PairResult = {
       deviceId,
@@ -624,6 +637,19 @@ export class DeviceSession implements ChannelSession {
   }
 
   private async handleRequest(request: RequestMessage): Promise<void> {
+    // 撤销与到期要立刻生效：通道是长连接，只在握手时查一次的话，菜单栏里点
+    // 「移除设备」之后这台设备仍然能继续发命令，直到自己断开为止。
+    const current = this.options.store.device(this.options.device.id);
+    if (
+      !current ||
+      current.revokedAt !== null ||
+      (current.expiresAt !== null && current.expiresAt < Date.now())
+    ) {
+      this.options.log(`设备「${this.options.device.name}」已被移除或已过期，断开连接`);
+      this.respond(errorResponse(request.id, "unauthorized", "device 已被移除或已过期"));
+      this.dispose();
+      return;
+    }
     let response: ResponseMessage;
     const activity = describeActivity(request);
     // 文件浏览会连着点好几下，同一份记录 30 秒只写一条；发送消息、改设置这类真实操作
@@ -647,6 +673,11 @@ export class DeviceSession implements ChannelSession {
       }
     }
     this.respond(response);
+    // 自己把自己撤销掉之后，这条通道立刻断开：否则还要等定时器那一次复核。
+    if (request.method === "device.revoke") {
+      const after = this.options.store.device(this.options.device.id);
+      if (!after || after.revokedAt !== null) this.dispose();
+    }
   }
 
   /**
@@ -1157,7 +1188,9 @@ export class DeviceSession implements ChannelSession {
         return this.options.devtools.cancel(this.options.channel, execId);
       }
       default:
-        throw new Error(`unsupported method: ${request.method}`);
+        // 协议表里有几个还没实现的方法（session.subscribe / turn.cancel 等）：报
+        // unsupported 而不是 internal，客户端才能按「Bridge 太旧」降级。
+        throw new RpcError("unsupported", `unsupported method: ${request.method}`);
     }
   }
 
