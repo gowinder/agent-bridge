@@ -4971,7 +4971,11 @@ function renderDevices(): void {
     const revoked = item.revokedAt !== null;
     const self = item.deviceId === state.device.deviceId;
     const label = el("div", { className: "row-main" }, [
-      el("strong", { text: item.name }),
+      el("strong", {}, [
+        item.name,
+        // MCP 客户端自己报的标记，文本固定，不走 i18n。
+        ...(item.clientType === "mcp" ? [el("span", { className: "pill mcp", text: "MCP" })] : []),
+      ]),
       el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString(locale())}` }),
     ]);
     list.append(

@@ -2135,6 +2135,16 @@ details[open] > .dock-project-head::before {
   background: var(--accent-soft);
 }
 
+/* MCP 客户端设备标记：与普通网页设备一眼区分，文本固定 "MCP"，不进 i18n。 */
+.pill.mcp {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-soft);
+  margin-left: 6px;
+  letter-spacing: 0.04em;
+  vertical-align: 1px;
+}
+
 .notify-btn.is-on {
   color: var(--accent);
 }

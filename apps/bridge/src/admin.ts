@@ -83,6 +83,8 @@ export interface AdminDevice {
   expiresAt: number | null;
   revokedAt: number | null;
   lastSeenAt: number | null;
+  /** 本地设备记录里的客户端类型；老设备按 web。 */
+  clientType?: "web" | "mcp";
   online: boolean;
   /** 最近操作日志，最新的在最前面。 */
   log: string[];

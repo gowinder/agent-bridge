@@ -471,6 +471,8 @@ export class PairingSession implements ChannelSession {
     }
     const params = isObject(request.params) ? request.params : {};
     const name = typeof params["deviceName"] === "string" ? params["deviceName"].trim() : "";
+    // 客户端自报类型：只认精确的 "mcp"，缺省与未知值都按网页设备，老客户端照旧能配对。
+    const clientType = params["clientType"] === "mcp" ? "mcp" : "web";
     const code = typeof params["confirmCode"] === "string" ? params["confirmCode"] : "";
     if (!name || name.length > 64) {
       this.respond(errorResponse(request.id, "invalid_params", "invalid device name"));
@@ -513,6 +515,7 @@ export class PairingSession implements ChannelSession {
       expiresAt: grant.expiresAt,
       revokedAt: null,
       lastSeenAt: null,
+      clientType,
     };
     this.options.store.saveDevice(device);
 
@@ -528,7 +531,7 @@ export class PairingSession implements ChannelSession {
       },
     };
     this.respond({ v: 1, kind: "response", id: request.id, ok: true, result });
-    this.options.log(`已配对设备「${name}」，deviceId=${deviceId}`);
+    this.options.log(`已配对设备「${name}」${clientType === "mcp" ? "（MCP）" : ""}，deviceId=${deviceId}`);
     this.finishSoon();
   }
 
@@ -1115,6 +1118,7 @@ export class DeviceSession implements ChannelSession {
           expiresAt: device.expiresAt,
           revokedAt: device.revokedAt,
           lastSeenAt: device.lastSeenAt,
+          clientType: device.clientType,
         }));
         return { devices };
       }
