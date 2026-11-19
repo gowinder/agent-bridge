@@ -85,7 +85,7 @@ import { connectDevice, finishPairing, startPairing, type PairingChallenge } fro
 import { PeerError, type PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
-import { langSwitchLabel, serverTr, toggleLang, tr } from "./i18n";
+import { LANGS, langId, serverTr, setLang, tr } from "./i18n";
 
 const RELAY_ERRORS: Record<string, string> = {
   invite_expired: tr("邀请已过期，请在 Mac 上重新生成配对链接。"),
@@ -3806,12 +3806,19 @@ function topbarOverflow(panel: HTMLElement): HTMLElement {
 }
 
 /**
- * 中英切换：按钮上直接写目标语言（当前中文就显示 English），点了整页重载。
+ * 语言切换：下拉里每一条都用该语言的自称，点了整页重载。
  */
-function languageButton(): HTMLButtonElement {
-  const node = button(langSwitchLabel(), () => toggleLang(), "btn ghost small lang-btn");
-  node.setAttribute("aria-label", tr("切换语言"));
-  node.title = tr("切换语言");
+function languageButton(): HTMLSelectElement {
+  const node = el("select", {
+    className: "btn ghost small lang-btn",
+    attrs: { "aria-label": tr("切换语言"), title: tr("切换语言") },
+  }) as HTMLSelectElement;
+  for (const item of LANGS) {
+    const option = el("option", { text: item.label, attrs: { value: item.id } }) as HTMLOptionElement;
+    if (item.id === langId()) option.selected = true;
+    node.append(option);
+  }
+  node.addEventListener("change", () => setLang(node.value as (typeof LANGS)[number]["id"]));
   return node;
 }
 

@@ -7,7 +7,7 @@
     "dev": "node scripts/copy-wasm.mjs && vite",
     "build": "node scripts/copy-wasm.mjs && vite build",
     "preview": "vite preview",
-    "check": "tsc --noEmit -p tsconfig.json"
+    "check": "tsc --noEmit -p tsconfig.json && node scripts/check-i18n.mjs"
   },
   "dependencies": {
     "@craftstead/crypto": "*",
