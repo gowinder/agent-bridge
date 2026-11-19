@@ -57,7 +57,7 @@ node spikes/mcp-client/spike.mjs reconnect
 | `HostedCreateParams` | `path` 必填且必须是 `hosted.dirs` 里的条目（`manager.ts:2365-2381` `allowedPath`），`agent?: "claude" \| "pi"`（`:743-770`）；pi 的 `permissionMode` 被强制成 `manual` |
 | `device.rename` | 仍只许改自身设备（`sessions.ts:1134-1149`，`unauthorized: 只能重命名当前设备`）；成功返回 `{ok: true, name}`，不只是 `{ok}` |
 | `device.list` | 返回全部设备（`sessions.ts:1110-1119`），无「只看自己」的过滤 |
-| `pair.request` | Bridge 只读 `deviceName` 与 `confirmCode`（`sessions.ts:463-512`），`platform` 被忽略；确认码不符 → `invalid_params` + 关通道 |
+| `pair.request` | Bridge 只读 `deviceName`、`confirmCode` 与 `clientType`（`sessions.ts:463-536`）；`platform` 被忽略；确认码不符 → `invalid_params` + 关通道；本 spike 自报 `clientType: "mcp"`（老 Bridge 忽略该键，新版会标成 MCP 设备） |
 | 邀请一次性 | 中继在 hello 阶段就 `UPDATE invites SET used_at`（`apps/relay/src/room.ts:602`），Bridge 在 `pair.request` 前再复查（`sessions.ts:484-500`）→ 一次握手失败就烧掉邀请 |
 | 中继错误码 | `bridge_offline` / `invite_used` / `invite_expired` / `invalid_credential` / `device_revoked` / `device_expired` / `channel_in_use`（`room.ts:573-647`） |
 | 帧上限 | 中继 64KiB（`room.ts:30`）；协议单帧明文 32KiB、分片 20000B/片、重组上限 4MiB（`protocol:5-11`、`crypto/src/channel.ts:17`）→ selftest 里 40KB 消息=3 帧，最大一帧 26785B |
