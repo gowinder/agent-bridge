@@ -1,4 +1,5 @@
-import type { ContextUsage, MessageBlock, ModelOption } from "@craftstead/protocol";
+import type { ContextUsage, MessageBlock, ModelOption, TokenUsage } from "@craftstead/protocol";
+import { tokenUsageFromPi } from "../context-usage.js";
 import { toolSummaryOf } from "../tool-summary.js";
 
 const MAX_TOOL_CHARS = 300;
@@ -21,8 +22,8 @@ export interface PiPending {
 }
 
 export interface PiHandlers {
-  /** 一条助手消息（文本 + 工具调用）。 */
-  assistant(blocks: MessageBlock[]): void;
+  /** 一条助手消息（文本 + 工具调用），以及这次调用的 token 用量。 */
+  assistant(blocks: MessageBlock[], usage?: TokenUsage): void;
   system(text: string): void;
   context(usage: ContextUsage): void;
   /** 扩展要用户选/确认/输入；null 表示已经答完。 */
@@ -299,7 +300,7 @@ export class PiSession {
         }
         return;
       }
-      this.handlers.assistant(blocks);
+      this.handlers.assistant(blocks, tokenUsageFromPi(message["usage"]));
       return;
     }
     if (type === "agent_start") {

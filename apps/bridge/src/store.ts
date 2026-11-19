@@ -3,8 +3,23 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { TodoItem, TodoKind, TodoListResult } from "@craftstead/protocol";
+import type {
+  SessionTagRef,
+  TagColor,
+  TagDef,
+  TodoItem,
+  TodoKind,
+  TodoListResult,
+} from "@craftstead/protocol";
 import { migrateRelayUrls } from "./relay-url.js";
+
+/** 标签重名：调用方转成 invalid_params，别让 SQLite 的唯一约束变成 internal。 */
+export class DuplicateTagName extends Error {
+  constructor(name: string) {
+    super(`标签「${name}」已经存在`);
+    this.name = "DuplicateTagName";
+  }
+}
 
 export interface DeviceRecord {
   id: string;
@@ -132,6 +147,25 @@ export class Store {
        )`,
     );
     this.db.exec("CREATE INDEX IF NOT EXISTS todos_checked ON todos (checked_at, created_at)");
+    // 标签库是 Bridge 级的：换前端还在，换一台主机就是另一个库。
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS tags (
+         tag_id TEXT PRIMARY KEY,
+         name TEXT NOT NULL,
+         color TEXT NOT NULL,
+         created_at INTEGER NOT NULL
+       )`,
+    );
+    this.db.exec(
+      `CREATE TABLE IF NOT EXISTS session_tags (
+         app_id TEXT NOT NULL,
+         session_id TEXT NOT NULL,
+         tag_id TEXT NOT NULL,
+         created_at INTEGER NOT NULL,
+         PRIMARY KEY (app_id, session_id, tag_id)
+       )`,
+    );
+    this.db.exec("CREATE INDEX IF NOT EXISTS session_tags_tag ON session_tags (tag_id)");
     migrateRelayUrls(this);
   }
 
@@ -398,6 +432,96 @@ export class Store {
          ON CONFLICT(app_id, session_id) DO UPDATE SET pinned_at = excluded.pinned_at`,
       )
       .run(appId, sessionId, Date.now());
+  }
+
+  listTags(): TagDef[] {
+    const rows = this.db.prepare("SELECT tag_id, name, color FROM tags ORDER BY created_at, rowid").all() as Array<
+      Record<string, unknown>
+    >;
+    return rows.map((row) => ({
+      tagId: String(row["tag_id"]),
+      name: String(row["name"]),
+      color: row["color"] as TagColor,
+    }));
+  }
+
+  /** 新建或改名改色；名字重复时抛错，由调用方转成 invalid_params。 */
+  saveTag(params: { tagId?: string; name: string; color: TagColor }): TagDef {
+    const name = params.name.trim();
+    const clash = this.db
+      .prepare("SELECT tag_id FROM tags WHERE name = ? AND tag_id <> ?")
+      .get(name, params.tagId ?? "") as Record<string, unknown> | undefined;
+    if (clash) throw new DuplicateTagName(name);
+    if (params.tagId) {
+      this.db.prepare("UPDATE tags SET name = ?, color = ? WHERE tag_id = ?").run(name, params.color, params.tagId);
+      return { tagId: params.tagId, name, color: params.color };
+    }
+    const tagId = randomUUID();
+    this.db
+      .prepare("INSERT INTO tags (tag_id, name, color, created_at) VALUES (?, ?, ?, ?)")
+      .run(tagId, name, params.color, Date.now());
+    return { tagId, name, color: params.color };
+  }
+
+  /** 删标签同时断开所有会话，别留下指向不存在标签的记录。 */
+  deleteTag(tagId: string): void {
+    this.db.prepare("DELETE FROM session_tags WHERE tag_id = ?").run(tagId);
+    this.db.prepare("DELETE FROM tags WHERE tag_id = ?").run(tagId);
+  }
+
+  /** 某个会话的标签，按标签库里的顺序。 */
+  sessionTags(appId: string, sessionId: string): SessionTagRef[] {
+    const rows = this.db
+      .prepare(
+        `SELECT t.tag_id, t.name, t.color
+           FROM session_tags s JOIN tags t ON t.tag_id = s.tag_id
+          WHERE s.app_id = ? AND s.session_id = ?
+          ORDER BY t.created_at, t.rowid`,
+      )
+      .all(appId, sessionId) as Array<Record<string, unknown>>;
+    return rows.map((row) => ({
+      tagId: String(row["tag_id"]),
+      name: String(row["name"]),
+      color: row["color"] as TagColor,
+    }));
+  }
+
+  setSessionTags(appId: string, sessionId: string, tagIds: string[]): SessionTagRef[] {
+    const wanted = [...new Set(tagIds)];
+    this.db.prepare("DELETE FROM session_tags WHERE app_id = ? AND session_id = ?").run(appId, sessionId);
+    const insert = this.db.prepare(
+      "INSERT INTO session_tags (app_id, session_id, tag_id, created_at) VALUES (?, ?, ?, ?)",
+    );
+    const now = Date.now();
+    for (const tagId of wanted) {
+      // 只写标签库里真实存在的 id：前端拿旧列表点一下不该造出孤儿记录。
+      const exists = this.db.prepare("SELECT 1 FROM tags WHERE tag_id = ?").get(tagId);
+      if (exists) insert.run(appId, sessionId, tagId, now);
+    }
+    return this.sessionTags(appId, sessionId);
+  }
+
+  /** 一次取出所有会话的标签，列表页不用按行查库。 */
+  allSessionTags(): Map<string, SessionTagRef[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT s.app_id, s.session_id, t.tag_id, t.name, t.color
+           FROM session_tags s JOIN tags t ON t.tag_id = s.tag_id
+          ORDER BY t.created_at, t.rowid`,
+      )
+      .all() as Array<Record<string, unknown>>;
+    const out = new Map<string, SessionTagRef[]>();
+    for (const row of rows) {
+      const key = `${String(row["app_id"])}\u0000${String(row["session_id"])}`;
+      const list = out.get(key) ?? [];
+      list.push({
+        tagId: String(row["tag_id"]),
+        name: String(row["name"]),
+        color: row["color"] as TagColor,
+      });
+      out.set(key, list);
+    }
+    return out;
   }
 
   hostName(): string {

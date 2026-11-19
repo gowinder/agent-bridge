@@ -621,6 +621,23 @@ test("pi session rail lists its background subagent runs", (t) => {
     currentStep: 1,
     steps: [{ agent: "scout" }, { agent: "builder", sessionName: "builder: 写报告" }],
   });
+  // 跑很久的工具调用不会重写 status.json：进程还活着就必须算在跑，别按文件年龄判。
+  writeRun(runs, "run-slow", {
+    sessionId: piId,
+    state: "running",
+    pid: process.pid,
+    startedAt: now - 40 * 60_000,
+    lastActivityAt: now - 30 * 60_000,
+    steps: [{ agent: "builder", sessionName: "builder: 长任务" }],
+  });
+  // paused 是终态（pi-subagents 的 terminalState 也这么算），不该一直显示在跑。
+  writeRun(runs, "run-paused", {
+    sessionId: piId,
+    state: "paused",
+    startedAt: now - 30_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "tester" }],
+  });
   // 真实 pi-subagents 记的是会话文件绝对路径，不是裸 id。
   writeRun(runs, "run-path", {
     sessionId: `/state/sessions/--repo--/2026-11-13T22-45-14-079Z_${piId}.jsonl`,
@@ -645,11 +662,183 @@ test("pi session rail lists its background subagent runs", (t) => {
     tasks.map((task) => [task.taskId, task.status, task.agentType, task.name]),
     [
       ["run-live", "running", "builder", "builder: 写报告"],
+      ["run-paused", "done", "tester", "tester"],
       ["run-done", "done", "scout", "scout: 数一下目录"],
       ["run-path", "done", "reviewer", "reviewer"],
+      // 文件时间早于 10 分钟，但 pid 还活着：长工具调用期间 status.json 不重写。
+      ["run-slow", "running", "builder", "builder: 长任务"],
     ],
   );
   assert.equal(tasks[0].detail, "2 步 · 第 2 步");
+});
+
+test("后台子代理还在跑时，托管会话仍算运行中", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const running = h.manager.create({ path: h.repo, agent: "pi" });
+  const idle = h.manager.create({ path: h.repo, agent: "pi" });
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-busy-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  // 主 agent 已经说完话（没有进程、RPC 也不再报 busy），但子代理还在干活。
+  writeRun(runs, "run-live", {
+    sessionId: running.sessionId.replace("hosted:", ""),
+    state: "running",
+    startedAt: now - 5_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "builder", sessionName: "builder: 写报告" }],
+  });
+  writeRun(runs, "run-done", {
+    sessionId: idle.sessionId.replace("hosted:", ""),
+    state: "complete",
+    startedAt: now - 60_000,
+    lastActivityAt: now - 50_000,
+    steps: [{ agent: "scout" }],
+  });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  assert.equal(h.manager.session(running.sessionId)?.busy, true);
+  assert.equal(h.manager.messagesFor(running.sessionId, { limit: 20 }).busy, true);
+  // 后台 run 已经结束的会话不该一直显示在跑。
+  assert.equal(h.manager.session(idle.sessionId)?.busy, false);
+});
+
+test("/new 之后的会话按 pi 新 id 认后台子代理", async (t) => {
+  const sessionPath = "/state/sessions/2026-01-01T00-00-00-000Z_pi-new-id.jsonl";
+  const h = piHarness((repo) => [
+    { id: "hosted-id", cwd: repo, agent: "pi", title: "新会话", piSessionPath: sessionPath },
+  ]);
+  t.after(() => h.manager.dispose());
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-new-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  // 真实 status.json 记的是会话文件绝对路径，而 /new 之后 record.id 已经对不上了。
+  writeRun(runs, "run-new", {
+    sessionId: sessionPath,
+    state: "running",
+    startedAt: now - 5_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "scout", sessionName: "scout: 数一下目录" }],
+  });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  // 先把进程拉起来：/new 之后 record.id 与 pi 的会话 id 已经不是同一个了。
+  await h.manager.send("hosted:hosted-id", "继续");
+  const child = h.spawns[0].child;
+  // 主回合收尾，RPC 的 busy 归零；后台子代理还在跑，会话仍然算运行中。
+  child.emitJson({ type: "agent_settled", aborted: false });
+  assert.equal(h.manager.session("hosted:hosted-id")?.busy, true);
+  assert.deepEqual(
+    h.manager.rail("hosted:hosted-id").tasks.map((task) => [task.taskId, task.status]),
+    [["run-new", "running"]],
+  );
+});
+
+test("后台子代理还在跑时点停止会停掉进程", async (t) => {
+  const h = piHarness((repo) => [{ id: "bg", cwd: repo, agent: "pi", title: "后台", createdAt: 1, updatedAt: 1 }]);
+  t.after(() => h.manager.dispose());
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-stop-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  writeRun(runs, "run-live", {
+    sessionId: "bg",
+    state: "running",
+    startedAt: now - 5_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "builder" }],
+  });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  await h.manager.send("hosted:bg", "继续");
+  const child = h.spawns[0].child;
+  child.emitJson({ type: "agent_settled", aborted: false });
+  assert.equal(h.manager.session("hosted:bg")?.busy, true);
+
+  // 主回合已经收尾，abort 停不掉进程内的后台 run，只能把进程停掉。
+  assert.equal(h.manager.interrupt("hosted:bg").interrupted, true);
+  assert.ok(child.signals.includes("SIGTERM"));
+  assert.equal(h.manager.session("hosted:bg")?.busy, false);
+  const last = h.manager.messagesFor("hosted:bg", { limit: 20 }).messages.at(-1);
+  assert.equal(last.role, "system");
+  assert.match(last.blocks[0].text, /已停止后台子代理/);
+});
+
+test("runner 进程没了，停在那儿的 running run 不再算在跑", (t) => {
+  const h = piHarness((repo) => [{ id: "dead", cwd: repo, agent: "pi", title: "停掉的", createdAt: 1, updatedAt: 1 }]);
+  t.after(() => h.manager.dispose());
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-dead-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  // 用户停掉后台子代理后 status.json 会永远停在 running：pid 不在了就别再显示在跑。
+  writeRun(runs, "run-dead", {
+    sessionId: "dead",
+    state: "running",
+    pid: 4_194_303,
+    startedAt: now - 60_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "builder" }],
+  });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  assert.equal(h.manager.rail("hosted:dead").tasks[0].status, "done");
+});
+
+test("/new 之后的会话也能打开后台子代理记录", (t) => {
+  const sessionPath = "/state/sessions/2026-01-01T00-00-00-000Z_pi-new-id.jsonl";
+  const h = piHarness((repo) => [
+    { id: "hosted-id", cwd: repo, agent: "pi", title: "新会话", createdAt: 1, updatedAt: 1, piSessionPath: sessionPath },
+  ]);
+  t.after(() => h.manager.dispose());
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-msgs-"));
+  const runs = join(root, "async-subagent-runs");
+  // run 记在 pi 的新会话 id 下，rail 列得出来，点开也得读得到。
+  writeRun(runs, "run-new", { sessionId: sessionPath, state: "complete", steps: [{ agent: "scout" }] });
+  writeFileSync(
+    join(runs, "run-new", "events.jsonl"),
+    `${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "做完了" }], timestamp: 1 },
+    })}\n`,
+  );
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  const page = h.manager.taskMessages("hosted:hosted-id", "run-new", { limit: 10 });
+  assert.equal(page.messages.at(-1).blocks[0].text, "做完了");
 });
 
 /** 假装用户的 pi agent 目录：真实目录里只有一个 settings.json 和一个 npm 包目录。 */

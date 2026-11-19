@@ -43,7 +43,7 @@ archs="${AGENT_BRIDGE_ARCHS:-$(uname -m)}"
 slices=()
 for arch in $archs; do
   slice="$contents/MacOS/AgentBridge-$arch"
-  swiftc -O -target "$arch-apple-macos13.0" "$here/main.swift" "$here/Update.swift" "$here/L10n.swift" -o "$slice" -framework AppKit -framework UserNotifications
+  swiftc -O -target "$arch-apple-macos13.0" "$here/main.swift" "$here/Update.swift" "$here/L10n.swift" "$here/L10nTables.swift" -o "$slice" -framework AppKit -framework UserNotifications
   slices+=("$slice")
 done
 if [ "${#slices[@]}" -gt 1 ]; then

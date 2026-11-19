@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { summarizeHostedDirs } from "../dist/adapters/index.js";
 import { HostedAdapter } from "../dist/adapters/hosted.js";
 import { HostedSessionManager } from "../dist/hosted/manager.js";
 
@@ -241,6 +242,8 @@ test("extra args reject the flags that decide identity and permissions", (t) => 
     "--dangerously-skip-permissions",
     "--permission-mode=bypassPermissions",
     "--resume",
+    // 每轮换一个会话 id：侧栏的后台任务与子任务记录会跟真实执行记录脱节。
+    "--fork-session",
     // 白名单管的是「会话建在哪个目录」，这些旗标能把别的目录拉进来。
     "--add-dir /tmp/extra",
     "--add-dir=/tmp/extra",
@@ -514,6 +517,56 @@ test("rail and messages report context usage from assistant events", (t) => {
     ["输入", "缓存读", "缓存写", "输出"],
   );
   assert.equal(h.manager.messagesFor(session.sessionId, { limit: 50 }).context.usedTokens, 35_200);
+});
+
+test("per-message usage rolls up into session tokens and per-turn detail", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo });
+  const child = h.spawns[0].child;
+  await h.manager.send(session.sessionId, "第一轮");
+  child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: "好" }],
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 1000,
+        cache_creation_input_tokens: 0,
+        output_tokens: 100,
+      },
+    },
+  });
+  await h.manager.send(session.sessionId, "第二轮");
+  child.emitJson({
+    type: "assistant",
+    message: {
+      model: "claude-sonnet-4-5",
+      content: [{ type: "text", text: "好" }],
+      usage: {
+        input_tokens: 20,
+        cache_read_input_tokens: 2000,
+        cache_creation_input_tokens: 500,
+        output_tokens: 200,
+      },
+    },
+  });
+
+  const page = h.manager.messagesFor(session.sessionId, { limit: 50 });
+  const assistant = page.messages.filter((message) => message.role === "assistant");
+  assert.deepEqual(assistant[0].usage, { input: 10, cacheRead: 1000, cacheWrite: 0, output: 100 });
+  assert.deepEqual(assistant[1].usage, { input: 20, cacheRead: 2000, cacheWrite: 500, output: 200 });
+  assert.equal(page.tokens.input, 30);
+  assert.equal(page.tokens.cacheRead, 3000);
+  assert.equal(page.tokens.cacheWrite, 500);
+  assert.equal(page.tokens.output, 300);
+  assert.equal(page.tokens.turns.length, 2);
+  const users = page.messages.filter((message) => message.role === "user");
+  assert.deepEqual(
+    page.tokens.turns.map((turn) => turn.messageId),
+    users.map((message) => message.messageId),
+  );
 });
 
 test("context usage is recorded even when the assistant event has no blocks", (t) => {
@@ -846,4 +899,21 @@ test("删除托管会话：先停进程，再删记录与聊天记录文件", as
   assert.equal(existsSync(transcript), false);
   assert.equal(h.spawns[0].child.signals.length, 1);
   assert.throws(() => h.manager.archive(session.sessionId, true), /未知托管会话/);
+});
+
+test("the settings summary lists allowlisted folders with existence and session counts", () => {
+  // 菜单栏的「托管目录」列表用这份：只剩历史会话的目录不能新建，所以不进列表。
+  const summary = summarizeHostedDirs({
+    enabled: true,
+    allowBypassPermissions: false,
+    idleTimeoutMs: 60_000,
+    permissionModes: [],
+    dirs: [
+      { path: "/repo", name: "repo", sessionCount: 2, exists: true, allowed: true },
+      { path: "/gone", name: "gone", sessionCount: 1, exists: false, allowed: false },
+    ],
+  });
+  assert.deepEqual(summary.dirs, [{ path: "/repo", exists: true, sessionCount: 2 }]);
+  assert.equal(summary.idleTimeoutMs, 60_000);
+  assert.equal(summary.allowBypassPermissions, false);
 });

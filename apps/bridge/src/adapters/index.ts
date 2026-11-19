@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { AdminHostedConfig } from "../admin.js";
 import { MAX_TRANSFER_CHARS } from "@craftstead/protocol";
 import type {
   AppInfo,
@@ -24,11 +25,16 @@ import type {
   SessionCompactResult,
   SessionRailResult,
   SessionSummary,
+  SessionTagRef,
+  SessionTagsResult,
+  TagColor,
+  TagDef,
+  TagListResult,
   TransferCommitResult,
   TransferPrepareResult,
 } from "@craftstead/protocol";
 import { HostedSessionManager, MAX_TITLE_CHARS } from "../hosted/manager.js";
-import type { Store } from "../store.js";
+import { DuplicateTagName, type Store } from "../store.js";
 import { AntigravityAdapter } from "./antigravity.js";
 import { AntigravityDesktopAdapter } from "./antigravity-desktop.js";
 import { ClaudeCodeAdapter } from "./claude-code.js";
@@ -97,35 +103,21 @@ export class SessionAdapters {
   }
 
   /** 设置界面看到的托管配置，对应状态目录里的 hosted.json。 */
-  hostedConfig(): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
-    const info = this.hostedManager.configForClient();
-    return {
-      allowBypassPermissions: info.allowBypassPermissions,
-      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
-      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
-      idleTimeoutMs: info.idleTimeoutMs,
-    };
+  hostedConfig(): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.configForClient());
   }
 
-  setHostedAllowBypass(enabled: boolean): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
-    const info = this.hostedManager.setAllowBypassPermissions(enabled);
-    return {
-      allowBypassPermissions: info.allowBypassPermissions,
-      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
-      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
-      idleTimeoutMs: info.idleTimeoutMs,
-    };
+  setHostedAllowBypass(enabled: boolean): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.setAllowBypassPermissions(enabled));
   }
 
   /** 整份替换托管白名单，只给本机 admin 接口用。 */
-  setHostedDirs(dirs: string[]): { allowBypassPermissions: boolean; dirs: string[]; idleTimeoutMs: number } {
-    const info = this.hostedManager.setDirs(dirs);
-    return {
-      allowBypassPermissions: info.allowBypassPermissions,
-      // 菜单栏拿这份做「合并后整份写回」，混进「只剩历史会话的目录」等于把它们重新授权。
-      dirs: info.dirs.filter((dir) => dir.allowed !== false).map((dir) => dir.path),
-      idleTimeoutMs: info.idleTimeoutMs,
-    };
+  setHostedDirs(dirs: string[]): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.setDirs(dirs));
+  }
+
+  private hostedSummary(info: HostedDirsResult): AdminHostedConfig {
+    return summarizeHostedDirs(info);
   }
 
   hostedOptions(): HostedOptionsResult {
@@ -203,6 +195,8 @@ export class SessionAdapters {
     // 托管会话的转录也在对应 CLI 自己的会话目录里：适配器会把同一段对话再列一遍，
     // 改过名后标题对不上，历史里就是两条。托管那份带改名后的标题与运行状态，优先留它。
     const hostedNativeIds = this.hostedManager.hostedNativeSessionIds();
+    // 标签一次全取出来，列表里按行查库会变成 500 次查询。
+    const tagMap = this.store.allSessionTags();
     for (const adapter of this.adapters) {
       if (params.appId && adapter.key !== params.appId) continue;
       const app = adapter.app();
@@ -228,7 +222,7 @@ export class SessionAdapters {
       if (app.capabilities.enumerate !== "complete") {
         completeness = demote(completeness, app.capabilities.enumerate === "unknown" ? "unknown" : "partial");
       }
-      collected.push(...sessions.map((session) => this.decorate(session, adapter.key)));
+      collected.push(...sessions.map((session) => this.decorate(session, adapter.key, tagMap)));
     }
     // 置顶的排最前，其余按更新时间；两组内部都是新的在前。
     collected.sort((a, b) => {
@@ -279,6 +273,32 @@ export class SessionAdapters {
     if (!session) throw new RpcError("not_found", "未知会话");
     this.store.setSessionPin(adapter.key, sessionId, pinned);
     return { session: this.decorate(session, adapter.key) };
+  }
+
+  listTags(): TagListResult {
+    return { tags: this.store.listTags() };
+  }
+
+  saveTag(params: { tagId?: string; name: string; color: TagColor }): TagDef {
+    const name = params.name.trim();
+    if (!name) throw new RpcError("invalid_params", "标签名不能为空");
+    if (name.length > 24) throw new RpcError("invalid_params", "标签名最多 24 个字");
+    try {
+      return this.store.saveTag({ ...params, name });
+    } catch (error) {
+      if (error instanceof DuplicateTagName) throw new RpcError("invalid_params", error.message);
+      throw error;
+    }
+  }
+
+  deleteTag(tagId: string): { deleted: boolean } {
+    this.store.deleteTag(tagId);
+    return { deleted: true };
+  }
+
+  setSessionTags(sessionId: string, tagIds: string[]): SessionTagsResult {
+    const adapter = this.adapterFor(sessionId);
+    return { tags: this.store.setSessionTags(adapter.key, sessionId, tagIds) };
   }
 
   /** 归档：只有 Bridge 托管的会话归 Bridge 管，桌面会话请在原应用里归档。 */
@@ -494,10 +514,19 @@ export class SessionAdapters {
    * 叠上 Bridge 侧的覆盖名与置顶标记。
    * 两者都按 adapter key 存（写入时用的也是它），读也必须用同一把 key。
    */
-  private decorate(session: SessionSummary, adapterKey: string): SessionSummary {
+  private decorate(
+    session: SessionSummary,
+    adapterKey: string,
+    tagMap?: Map<string, SessionTagRef[]>,
+  ): SessionSummary {
     const override = this.store.sessionTitle(adapterKey, session.sessionId);
     const pinned = this.store.sessionPinned(adapterKey, session.sessionId);
-    const next = pinned ? { ...session, pinned: true } : session;
+    const tags = tagMap
+      ? (tagMap.get(`${adapterKey}\u0000${session.sessionId}`) ?? [])
+      : this.store.sessionTags(adapterKey, session.sessionId);
+    let next: SessionSummary = session;
+    if (pinned) next = { ...next, pinned: true };
+    if (tags.length > 0) next = { ...next, tags };
     if (override === null) return next;
     return { ...next, title: override, originalTitle: session.title };
   }
@@ -514,6 +543,20 @@ function demote(
 ): SessionListResult["completeness"] {
   const rank = { complete: 0, partial: 1, unknown: 2, unavailable: 3 } as const;
   return rank[next] > rank[current] ? next : current;
+}
+
+/**
+ * 设置界面要看的白名单：只剩历史会话的目录不列出来（它们本来就不能新建，
+ * 菜单栏整份写回时混进去等于重新授权）。
+ */
+export function summarizeHostedDirs(info: HostedDirsResult): AdminHostedConfig {
+  return {
+    allowBypassPermissions: info.allowBypassPermissions,
+    dirs: info.dirs
+      .filter((dir) => dir.allowed !== false)
+      .map((dir) => ({ path: dir.path, exists: dir.exists, sessionCount: dir.sessionCount })),
+    idleTimeoutMs: info.idleTimeoutMs,
+  };
 }
 
 export type { AppInfo };

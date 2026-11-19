@@ -111,6 +111,11 @@ export const METHODS = [
   "session.rename",
   "session.pin",
   "session.create",
+  // 会话标签：标签库是 Bridge 级的，会话与标签是多对多。
+  "tag.list",
+  "tag.save",
+  "tag.delete",
+  "session.tags",
   "hosted.dirs",
   "hosted.addDir",
   "hosted.removeDir",
@@ -442,6 +447,21 @@ export interface ProjectInfo {
   sessionCount: number;
 }
 
+/** 标签颜色：与 Finder 一样的七个固定色，前端按名字取色。 */
+export type TagColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
+
+export const TAG_COLORS: readonly TagColor[] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
+
+/** 标签库里的一个标签。 */
+export interface TagDef {
+  tagId: string;
+  name: string;
+  color: TagColor;
+}
+
+/** 挂在会话上的标签：名字与颜色取自标签库，改名改色后列表里立刻跟着变。 */
+export type SessionTagRef = TagDef;
+
 export interface SessionSummary {
   sessionId: string;
   appId: string;
@@ -455,6 +475,8 @@ export interface SessionSummary {
   archived: boolean;
   /** 用户在网页置顶的会话：列表里排在前面。 */
   pinned?: boolean;
+  /** 用户打的标签（可以多个）；没有标签时字段不出现。 */
+  tags?: SessionTagRef[];
   /** Desktop currently holds a live process / open view for this session. */
   live: boolean;
   /** The session process is actively running a turn right now. */
@@ -555,6 +577,8 @@ export interface MessageRecord {
   blocks: MessageBlock[];
   /** `peer` marks a message injected by another local agent session. */
   origin?: "local" | "peer";
+  /** 这条助手消息对应那一次调用的 token 用量；客户端没上报时没有。 */
+  usage?: TokenUsage;
 }
 
 export interface AppListResult {
@@ -570,6 +594,31 @@ export interface SessionListResult {
   completeness: Completeness;
   /** Set when completeness is not complete. */
   note?: string;
+}
+
+export interface TagListResult {
+  tags: TagDef[];
+}
+
+export interface TagSaveParams {
+  /** 有值就是改名／改色，没有就新建。 */
+  tagId?: string;
+  name: string;
+  color: TagColor;
+}
+
+export interface TagDeleteParams {
+  tagId: string;
+}
+
+/** 整个替换一个会话的标签集合。 */
+export interface SessionTagsParams {
+  sessionId: string;
+  tagIds: string[];
+}
+
+export interface SessionTagsResult {
+  tags: SessionTagRef[];
 }
 
 export interface SessionGetResult {
@@ -757,6 +806,30 @@ export interface ContextDetail {
   value: string;
 }
 
+/** 一次模型调用的 token 用量。 */
+export interface TokenUsage {
+  /** 没命中缓存的输入。 */
+  input: number;
+  /** 命中缓存、直接复用的输入（cacheRead）。 */
+  cacheRead: number;
+  /** 写进缓存的输入（cacheWrite），不计入「命中」。 */
+  cacheWrite: number;
+  output: number;
+}
+
+/** 一个回合（一条用户消息到下一条之前）的用量合计。 */
+export interface TurnTokens {
+  /** 回合里第一条用户消息的 id；网页端据此把用量行挂到该回合末尾。 */
+  messageId: string;
+  usage: TokenUsage;
+}
+
+/** 整个会话的用量累计。 */
+export interface SessionTokens extends TokenUsage {
+  /** 每个回合的合计，最早的在前；只有真的用到 token 的回合才在列表里。 */
+  turns: TurnTokens[];
+}
+
 /** How much of the model context window the session currently occupies. */
 export interface ContextUsage {
   usedTokens: number;
@@ -776,6 +849,8 @@ export interface MessageListResult {
   note?: string;
   /** Context window usage of the session, when the client exposes it. */
   context?: ContextUsage;
+  /** 整个会话的 token 累计（不只是当前这一页）。客户端没上报用量时没有。 */
+  tokens?: SessionTokens;
   /** Slash commands (skills included) the client accepts in this session; names without the slash. */
   slashCommands?: string[];
   /** The client is still working on the latest turn. */
@@ -841,6 +916,8 @@ export interface RailTask {
 export interface SessionRailResult {
   environment: RailRow[];
   context?: ContextUsage;
+  /** 整个会话的 token 累计与每轮明细。 */
+  tokens?: SessionTokens;
   servers: Array<{ name: string; detail?: string }>;
   tasks: RailTask[];
   note?: string;
