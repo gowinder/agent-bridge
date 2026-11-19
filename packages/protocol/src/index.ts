@@ -111,6 +111,11 @@ export const METHODS = [
   "session.rename",
   "session.pin",
   "session.create",
+  // 会话标签：标签库是 Bridge 级的，会话与标签是多对多。
+  "tag.list",
+  "tag.save",
+  "tag.delete",
+  "session.tags",
   "hosted.dirs",
   "hosted.addDir",
   "hosted.removeDir",
@@ -442,6 +447,21 @@ export interface ProjectInfo {
   sessionCount: number;
 }
 
+/** 标签颜色：与 Finder 一样的七个固定色，前端按名字取色。 */
+export type TagColor = "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "gray";
+
+export const TAG_COLORS: readonly TagColor[] = ["red", "orange", "yellow", "green", "blue", "purple", "gray"];
+
+/** 标签库里的一个标签。 */
+export interface TagDef {
+  tagId: string;
+  name: string;
+  color: TagColor;
+}
+
+/** 挂在会话上的标签：名字与颜色取自标签库，改名改色后列表里立刻跟着变。 */
+export type SessionTagRef = TagDef;
+
 export interface SessionSummary {
   sessionId: string;
   appId: string;
@@ -455,6 +475,8 @@ export interface SessionSummary {
   archived: boolean;
   /** 用户在网页置顶的会话：列表里排在前面。 */
   pinned?: boolean;
+  /** 用户打的标签（可以多个）；没有标签时字段不出现。 */
+  tags?: SessionTagRef[];
   /** Desktop currently holds a live process / open view for this session. */
   live: boolean;
   /** The session process is actively running a turn right now. */
@@ -572,6 +594,31 @@ export interface SessionListResult {
   completeness: Completeness;
   /** Set when completeness is not complete. */
   note?: string;
+}
+
+export interface TagListResult {
+  tags: TagDef[];
+}
+
+export interface TagSaveParams {
+  /** 有值就是改名／改色，没有就新建。 */
+  tagId?: string;
+  name: string;
+  color: TagColor;
+}
+
+export interface TagDeleteParams {
+  tagId: string;
+}
+
+/** 整个替换一个会话的标签集合。 */
+export interface SessionTagsParams {
+  sessionId: string;
+  tagIds: string[];
+}
+
+export interface SessionTagsResult {
+  tags: SessionTagRef[];
 }
 
 export interface SessionGetResult {

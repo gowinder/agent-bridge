@@ -1,4 +1,4 @@
-import { DEFAULT_COMPACTION_TRIGGER_PERCENT, MAX_TRANSFER_CHARS } from "@craftstead/protocol";
+import { DEFAULT_COMPACTION_TRIGGER_PERCENT, MAX_TRANSFER_CHARS, TAG_COLORS } from "@craftstead/protocol";
 import type {
   AppInfo,
   AppListResult,
@@ -27,6 +27,8 @@ import type {
   MessageQuestion,
   MessageRecord,
   MessageSendResult,
+  SessionTagRef,
+  SessionTagsResult,
   SessionTokens,
   TokenUsage,
   MessageTextResult,
@@ -51,6 +53,9 @@ import type {
   ShellCancelResult,
   ShellEventData,
   ShellExecResult,
+  TagColor,
+  TagDef,
+  TagListResult,
   TodoItem,
   TodoKind,
   TodoListResult,
@@ -380,6 +385,8 @@ interface Snapshot {
   apps: AppInfo[];
   projects: ProjectInfo[];
   sessions: SessionSummary[];
+  /** 标签库：Bridge 级的，与桌面端共用的那一份。 */
+  tags: TagDef[];
   note?: string;
 }
 let snapshot: Snapshot | null = null;
@@ -1939,8 +1946,10 @@ async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot 
   const apps = await call<AppListResult>("app.list");
   // 按客户端分别取会话：共用一个 500 条上限时，会话多的客户端会把另一个客户端的
   // 工程挤掉，表现为「新建的会话刷新不出来」。
-  const [projects, ...sessionPages] = await Promise.all([
+  const [projects, tagList, ...sessionPages] = await Promise.all([
     call<ProjectListResult>("project.list"),
+    // 比网页还旧的 Bridge 不认识 tag.list：帧在协议层被丢掉，这里退成空标签库。
+    call<TagListResult>("tag.list").catch(() => ({ tags: [] })),
     ...apps.apps.map((app) =>
       call<SessionListResult>("session.list", { appId: app.appId, includeArchived: true, limit: 500 }),
     ),
@@ -1950,6 +1959,7 @@ async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot 
     apps: apps.apps,
     projects: projects.projects,
     sessions: sessionPages.flatMap((page) => page.sessions),
+    tags: tagList.tags,
     ...(notes.length > 0 ? { note: notes.join("；") } : {}),
   };
   observeSessions(snapshot.sessions);
@@ -2166,12 +2176,14 @@ function syncDockSessions(): void {
 
 function dockSessionButton(session: SessionSummary, active: boolean): HTMLButtonElement {
   const pills = dockStatePills(session);
+  const dots = tagDots(session.tags);
   const node = el("button", { className: `dock-session${active ? " is-active" : ""}`, attrs: { type: "button" } }, [
     el("span", {
       className: `mark ${session.busy ? "busy" : session.live ? "live" : ""}`,
       text: agentMark(session.kind, session.hostedAgent),
     }),
     el("span", { className: "dock-session-title", text: session.title }),
+    ...(dots ? [dots] : []),
     ...(pills.length > 0 ? [el("span", { className: "dock-session-pills" }, pills)] : []),
   ]);
   node.title = session.title;
@@ -2275,6 +2287,369 @@ let dockHistoryView: {
   status: HTMLElement;
 } | null = null;
 
+/** 标签库由 snapshot 带下来，新建/删除后本地同步，不用整份重拉。 */
+function allTags(): TagDef[] {
+  return snapshot?.tags ?? [];
+}
+
+function tagDot(tag: { name: string; color: TagColor }): HTMLElement {
+  return el("span", {
+    className: `tag-dot tag-${tag.color}`,
+    attrs: { title: tag.name, "aria-label": tag.name },
+  });
+}
+
+function tagDots(tags: SessionTagRef[] | undefined): HTMLElement | null {
+  if (!tags || tags.length === 0) return null;
+  return el(
+    "span",
+    { className: "tag-dots" },
+    tags.map((tag) => tagDot(tag)),
+  );
+}
+
+const TAG_COLOR_LABELS: Record<TagColor, string> = {
+  red: "红",
+  orange: "橙",
+  yellow: "黄",
+  green: "绿",
+  blue: "蓝",
+  purple: "紫",
+  gray: "灰",
+};
+
+const TAG_FILTER_KEY = "ab.dockTagFilter";
+
+function readTagFilter(): string[] {
+  try {
+    const raw = localStorage.getItem(TAG_FILTER_KEY);
+    if (!raw) return [];
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeTagFilter(): void {
+  try {
+    localStorage.setItem(TAG_FILTER_KEY, JSON.stringify([...dockTagFilter]));
+  } catch {
+    // storage unavailable; the filter still applies in this tab
+  }
+}
+
+/** 多选筛选按「命中任一标签」算，跟 Finder 的标签筛选一致。 */
+let dockTagFilter = new Set<string>(readTagFilter());
+
+function dockTagMatch(session: SessionSummary): boolean {
+  if (dockTagFilter.size === 0) return true;
+  return (session.tags ?? []).some((tag) => dockTagFilter.has(tag.tagId));
+}
+
+let dockTagFilterHost: HTMLElement | null = null;
+
+function renderTagFilter(): void {
+  const host = dockTagFilterHost;
+  if (!host) return;
+  const tags = allTags();
+  host.hidden = tags.length === 0;
+  if (tags.length === 0) {
+    host.replaceChildren();
+    return;
+  }
+  const nodes: Node[] = [];
+  for (const tag of tags) {
+    const on = dockTagFilter.has(tag.tagId);
+    const chip = el("button", { className: `dock-tag-chip${on ? " is-on" : ""}`, attrs: { type: "button" } }, [
+      tagDot(tag),
+      el("span", { text: tag.name }),
+    ]);
+    chip.setAttribute("aria-pressed", on ? "true" : "false");
+    chip.addEventListener("click", () => {
+      if (on) dockTagFilter.delete(tag.tagId);
+      else dockTagFilter.add(tag.tagId);
+      writeTagFilter();
+      renderTagFilter();
+      renderDockHistoryList();
+    });
+    nodes.push(chip);
+  }
+  if (dockTagFilter.size > 0) {
+    const clear = el("button", { className: "dock-tag-chip is-clear", attrs: { type: "button" }, text: tr("清除筛选") });
+    clear.addEventListener("click", () => {
+      dockTagFilter = new Set();
+      writeTagFilter();
+      renderTagFilter();
+      renderDockHistoryList();
+    });
+    nodes.push(clear);
+  }
+  host.replaceChildren(...nodes);
+}
+
+let tagMenu: { sessionId: string; anchor: HTMLElement } | null = null;
+let tagMenuEl: HTMLElement | null = null;
+/** 正在编辑的标签：tagId，或 "new" 表示新建。 */
+let tagEditing: string | null = null;
+let tagEditDraft: { name: string; color: TagColor } = { name: "", color: "blue" };
+let tagMenuStatus = "";
+
+function closeTagMenu(): void {
+  tagMenuEl?.remove();
+  tagMenuEl = null;
+  tagMenu = null;
+  tagEditing = null;
+  tagMenuStatus = "";
+}
+
+function positionTagMenu(): void {
+  const node = tagMenuEl;
+  const anchor = tagMenu?.anchor;
+  if (!node || !anchor || !anchor.isConnected) return;
+  const rect = anchor.getBoundingClientRect();
+  const width = node.offsetWidth;
+  const height = node.offsetHeight;
+  const left = Math.min(Math.max(8, window.innerWidth - width - 8), Math.max(8, rect.right - width));
+  const below = rect.bottom + 6;
+  const top = below + height > window.innerHeight - 8 ? Math.max(8, rect.top - height - 6) : below;
+  node.style.left = `${left}px`;
+  node.style.top = `${top}px`;
+}
+
+function openTagMenu(sessionId: string, anchor: HTMLElement): void {
+  if (tagMenu?.sessionId === sessionId) {
+    closeTagMenu();
+    return;
+  }
+  closeTagMenu();
+  tagMenu = { sessionId, anchor };
+  tagMenuEl = el("div", { className: "tag-menu", attrs: { role: "dialog", "aria-label": tr("标签") } });
+  document.body.append(tagMenuEl);
+  renderTagMenu();
+}
+
+function tagEditor(editing: string): HTMLElement {
+  const wrap = el("div", { className: "tag-editor" });
+  const input = el("input", {
+    className: "tag-editor-name",
+    attrs: { type: "text", placeholder: tr("标签名"), "aria-label": tr("标签名"), maxlength: "24" },
+  });
+  input.value = tagEditDraft.name;
+  input.addEventListener("input", () => {
+    tagEditDraft.name = input.value;
+  });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      void saveTagDraft();
+    }
+  });
+  const colors = el("div", { className: "tag-editor-colors" });
+  for (const color of TAG_COLORS) {
+    const label = TAG_COLOR_LABELS[color];
+    const swatch = el("button", {
+      className: `tag-swatch tag-${color}${tagEditDraft.color === color ? " is-on" : ""}`,
+      attrs: { type: "button", title: label, "aria-label": tr(`颜色：{0}`, label) },
+    });
+    swatch.addEventListener("click", () => {
+      tagEditDraft.color = color;
+      renderTagMenu();
+    });
+    colors.append(swatch);
+  }
+  const save = el("button", { className: "btn small", attrs: { type: "button" }, text: tr("保存") });
+  save.addEventListener("click", () => void saveTagDraft());
+  const cancel = el("button", { className: "btn small ghost", attrs: { type: "button" }, text: tr("取消") });
+  cancel.addEventListener("click", () => {
+    tagEditing = null;
+    tagMenuStatus = "";
+    renderTagMenu();
+  });
+  const actions = el("div", { className: "tag-editor-actions" }, [save, cancel]);
+  if (editing !== "new") {
+    const remove = el("button", { className: "btn small danger", attrs: { type: "button" }, text: tr("删除标签") });
+    remove.addEventListener("click", () => void deleteTagDef(editing));
+    actions.append(remove);
+  }
+  wrap.append(input, colors, actions);
+  window.setTimeout(() => input.focus(), 0);
+  return wrap;
+}
+
+function renderTagMenu(): void {
+  const node = tagMenuEl;
+  const sessionId = tagMenu?.sessionId;
+  const session = sessionId ? snapshot?.sessions.find((item) => item.sessionId === sessionId) : undefined;
+  if (!node || !session) return;
+  const current = new Set((session.tags ?? []).map((tag) => tag.tagId));
+  const list = el("div", { className: "tag-menu-list" });
+  const tags = allTags();
+  if (tags.length === 0 && tagEditing !== "new") {
+    list.append(el("p", { className: "tag-menu-empty", text: tr("还没有标签") }));
+  }
+  for (const tag of tags) {
+    if (tagEditing === tag.tagId) {
+      list.append(tagEditor(tag.tagId));
+      continue;
+    }
+    const on = current.has(tag.tagId);
+    const item = el("button", { className: `tag-menu-item${on ? " is-on" : ""}`, attrs: { type: "button" } }, [
+      el("span", { className: "tag-menu-check", text: on ? "✓" : "" }),
+      tagDot(tag),
+      el("span", { className: "tag-menu-name", text: tag.name }),
+    ]);
+    item.setAttribute("aria-pressed", on ? "true" : "false");
+    item.addEventListener("click", () => void toggleSessionTag(session.sessionId, tag.tagId, !on));
+    const edit = el("button", {
+      className: "tag-menu-edit",
+      attrs: { type: "button", title: tr("改名、换颜色或删除"), "aria-label": tr("编辑标签") },
+      text: "⋯",
+    });
+    edit.addEventListener("click", () => {
+      tagEditing = tag.tagId;
+      tagEditDraft = { name: tag.name, color: tag.color };
+      tagMenuStatus = "";
+      renderTagMenu();
+    });
+    list.append(el("div", { className: "tag-menu-row" }, [item, edit]));
+  }
+  if (tagEditing === "new") list.append(tagEditor("new"));
+  const add = el("button", { className: "tag-menu-add", attrs: { type: "button" }, text: tr("新建标签…") });
+  add.addEventListener("click", () => {
+    tagEditing = "new";
+    tagEditDraft = { name: "", color: "blue" };
+    tagMenuStatus = "";
+    renderTagMenu();
+  });
+  const nodes: Node[] = [el("p", { className: "tag-menu-head", text: session.title })];
+  nodes.push(list, el("div", { className: "tag-menu-sep" }), add);
+  if (tagMenuStatus) nodes.push(el("p", { className: "tag-menu-status", text: tagMenuStatus }));
+  node.replaceChildren(...nodes);
+  positionTagMenu();
+}
+
+function patchSessionTags(sessionId: string, tags: SessionTagRef[]): void {
+  const data = snapshot;
+  if (!data) return;
+  snapshot = {
+    ...data,
+    sessions: data.sessions.map((item) =>
+      item.sessionId === sessionId ? (tags.length > 0 ? { ...item, tags } : { ...item, tags: undefined }) : item,
+    ),
+  };
+  renderDockHistoryList();
+  renderTagMenu();
+}
+
+async function toggleSessionTag(sessionId: string, tagId: string, on: boolean): Promise<void> {
+  const session = snapshot?.sessions.find((item) => item.sessionId === sessionId);
+  if (!session) return;
+  const ids = new Set((session.tags ?? []).map((tag) => tag.tagId));
+  if (on) ids.add(tagId);
+  else ids.delete(tagId);
+  try {
+    const result = await call<SessionTagsResult>("session.tags", { sessionId, tagIds: [...ids] });
+    tagMenuStatus = "";
+    patchSessionTags(sessionId, result.tags);
+  } catch (error) {
+    tagMenuStatus = messageOf(error);
+    renderTagMenu();
+  }
+}
+
+async function saveTagDraft(): Promise<void> {
+  const name = tagEditDraft.name.trim();
+  if (!name) {
+    tagMenuStatus = tr("标签名不能为空");
+    renderTagMenu();
+    return;
+  }
+  const editing = tagEditing;
+  try {
+    const saved = await call<TagDef>("tag.save", {
+      ...(editing && editing !== "new" ? { tagId: editing } : {}),
+      name,
+      color: tagEditDraft.color,
+    });
+    const data = snapshot;
+    if (data) {
+      const exists = data.tags.some((tag) => tag.tagId === saved.tagId);
+      snapshot = {
+        ...data,
+        tags: exists ? data.tags.map((tag) => (tag.tagId === saved.tagId ? saved : tag)) : [...data.tags, saved],
+        sessions: data.sessions.map((item) =>
+          item.tags?.some((tag) => tag.tagId === saved.tagId)
+            ? { ...item, tags: item.tags.map((tag) => (tag.tagId === saved.tagId ? saved : tag)) }
+            : item,
+        ),
+      };
+    }
+    tagEditing = null;
+    tagMenuStatus = "";
+    // 新建的标签直接挂到当前会话上，省一次点击。
+    if (!editing || editing === "new") {
+      if (tagMenu) {
+        await toggleSessionTag(tagMenu.sessionId, saved.tagId, true);
+        renderTagFilter();
+        renderTagMenu();
+        return;
+      }
+    }
+    renderTagFilter();
+    renderDockHistoryList();
+    renderTagMenu();
+  } catch (error) {
+    tagMenuStatus = messageOf(error);
+    renderTagMenu();
+  }
+}
+
+async function deleteTagDef(tagId: string): Promise<void> {
+  try {
+    await call("tag.delete", { tagId });
+  } catch (error) {
+    tagMenuStatus = messageOf(error);
+    renderTagMenu();
+    return;
+  }
+  const data = snapshot;
+  if (data) {
+    snapshot = {
+      ...data,
+      tags: data.tags.filter((tag) => tag.tagId !== tagId),
+      sessions: data.sessions.map((item) => {
+        if (!item.tags?.some((tag) => tag.tagId === tagId)) return item;
+        const rest = item.tags.filter((tag) => tag.tagId !== tagId);
+        return rest.length > 0 ? { ...item, tags: rest } : { ...item, tags: undefined };
+      }),
+    };
+  }
+  dockTagFilter.delete(tagId);
+  writeTagFilter();
+  tagEditing = null;
+  tagMenuStatus = "";
+  renderTagFilter();
+  renderDockHistoryList();
+  renderTagMenu();
+}
+
+/** 点空白处或按 Esc 收起标签面板；只装一次。 */
+function watchTagMenu(): void {
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target as Node | null;
+    if (!target || !tagMenuEl) return;
+    if (tagMenuEl.contains(target) || tagMenu?.anchor.contains(target)) return;
+    closeTagMenu();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && tagMenuEl) closeTagMenu();
+  });
+  window.addEventListener("resize", () => {
+    if (tagMenuEl) closeTagMenu();
+  });
+}
+
 function dockHistorySessions(): SessionSummary[] {
   const data = snapshot;
   if (!data) return [];
@@ -2299,24 +2674,26 @@ function renderDockHistoryList(): void {
   if (!view) return;
   const active = dockActive(parseRoute());
   const all = dockHistorySessions();
-  const sessions = all.filter(dockHistoryMatch);
+  const sessions = all.filter(dockHistoryMatch).filter(dockTagMatch);
   const nodes: HTMLElement[] = [];
   if (sessions.length === 0) {
     nodes.push(
       el("p", {
         className: "hint",
         text:
-          dockSearchQuery.trim() === ""
-            ? tr("还没有会话。")
-            : dockSearchBusy
-              ? tr("正在搜索…")
-              : tr("没有匹配的会话。"),
+          dockTagFilter.size > 0 && dockSearchQuery.trim() === ""
+            ? tr("没有带这些标签的会话。")
+            : dockSearchQuery.trim() === ""
+              ? tr("还没有会话。")
+              : dockSearchBusy
+                ? tr("正在搜索…")
+                : tr("没有匹配的会话。"),
       }),
     );
   }
   for (const session of sessions) {
     const current = active.sessionId === session.sessionId;
-    const node = el("button", { className: `dock-history-row${current ? " is-active" : ""}`, attrs: { type: "button" } }, [
+    const open = el("button", { className: "dock-history-open", attrs: { type: "button" } }, [
       el("span", { className: "dock-history-title" }, [
         ...(session.pinned ? [icon("pin", "icon pin-mark")] : []),
         document.createTextNode(session.title),
@@ -2329,11 +2706,9 @@ function renderDockHistoryList(): void {
         ...dockStatePills(session),
       ]),
     ]);
-    node.title = `${session.title}\n${session.projectId}`;
-    node.dataset.sessionId = session.sessionId;
-    node.dataset.state = dockStateKey(session);
-    if (current) node.setAttribute("aria-current", "page");
-    node.addEventListener("click", () => {
+    open.title = `${session.title}\n${session.projectId}`;
+    if (current) open.setAttribute("aria-current", "page");
+    open.addEventListener("click", () => {
       navigate({
         level: "chat",
         appId: session.appId,
@@ -2341,6 +2716,23 @@ function renderDockHistoryList(): void {
         sessionId: session.sessionId,
       });
     });
+    const tagButton = el(
+      "button",
+      {
+        className: `dock-tag-btn${session.tags?.length ? " is-set" : ""}`,
+        attrs: { type: "button", title: tr("标签"), "aria-label": tr("给这个会话打标签") },
+      },
+      session.tags?.length
+        ? session.tags.slice(0, 3).map((tag) => tagDot(tag))
+        : [el("span", { className: "tag-dot tag-none" })],
+    );
+    tagButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      openTagMenu(session.sessionId, tagButton);
+    });
+    const node = el("div", { className: `dock-history-row${current ? " is-active" : ""}` }, [open, tagButton]);
+    node.dataset.sessionId = session.sessionId;
+    node.dataset.state = dockStateKey(session);
     nodes.push(node);
   }
   view.list.replaceChildren(...nodes);
@@ -2510,10 +2902,14 @@ function dockHistory(): HTMLElement {
     search.append(input, label);
     const status = el("p", { className: "dock-search-status" });
     status.hidden = true;
+    const filters = el("div", { className: "dock-tag-filter", attrs: { role: "group", "aria-label": tr("按标签筛选") } });
+    dockTagFilterHost = filters;
     const list = el("div", { className: "dock-list dock-history-list" });
-    wrap.append(search, status, list);
+    wrap.append(search, filters, status, list);
     dockHistoryView = { wrap, list, input, check, status };
+    renderTagFilter();
   }
+  renderTagFilter();
   renderDockHistoryList();
   return dockHistoryView.wrap;
 }
@@ -2923,6 +3319,8 @@ function dockSidebar(route: Route): HTMLElement {
     const node = el("button", { className: "dock-tab", text: label, attrs: { type: "button", role: "tab" } });
     node.addEventListener("click", () => {
       if (tab === id) return;
+      // 标签面板挂在 body 上，换 tab 时按钮会被换掉，浮层要一起收。
+      closeTagMenu();
       tab = id;
       writeDockTab(id);
       paint();
@@ -8669,6 +9067,7 @@ if (bootUrl.searchParams.has("v")) {
   history.replaceState(null, "", bootUrl.toString());
 }
 watchForUpdates();
+watchTagMenu();
 
 const initialLink = takeInviteLink();
 if (initialLink) {
