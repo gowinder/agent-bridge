@@ -21,8 +21,12 @@ function sameSession(recorded: string | undefined, piSessionId: string): boolean
 const RUN_STALE_MS = 10 * 60_000;
 /** 侧栏只列最新的这些。 */
 export const MAX_PI_TASKS = 20;
-/** 按目录时间挑这么多份 status.json 读，免得扫几百个 run。 */
-const MAX_SCANNED_RUNS = MAX_PI_TASKS * 2;
+/**
+ * 最多读这么多份 status.json，免得扫几百个 run。
+ * 排序键是 status.json 自己的 mtime（run 执行期间会被重写），目录 mtime 只在增删文件时变，
+ * 按目录 mtime 排会把「早开始、还在跑」的 run 挤出去，会话就又显示成不忙了。
+ */
+const MAX_SCANNED_RUNS = 200;
 /**
  * 一次扫描的结果缓存这么久：侧栏、消息列表、会话列表会各问一次「还有没有在跑的」，
  * 同一个 root 下几十个会话没必要各扫一遍目录。
@@ -84,9 +88,13 @@ function scanRuns(root: string): ScannedRun[] {
       .filter((entry) => entry.isDirectory())
       .map((entry) => {
         try {
-          return { name: entry.name, mtimeMs: statSync(join(runsDir, entry.name)).mtimeMs };
+          return { name: entry.name, mtimeMs: statSync(join(runsDir, entry.name, "status.json")).mtimeMs };
         } catch {
-          return { name: entry.name, mtimeMs: 0 };
+          try {
+            return { name: entry.name, mtimeMs: statSync(join(runsDir, entry.name)).mtimeMs };
+          } catch {
+            return { name: entry.name, mtimeMs: 0 };
+          }
         }
       });
   } catch {
@@ -188,7 +196,8 @@ function pidAlive(pid: number | undefined): boolean {
 function isRunning(status: PiRunStatus, dirMtimeMs: number): boolean {
   const state = typeof status.state === "string" ? status.state : "";
   if (state !== "queued" && state !== "running") return false;
-  if (pidAlive(status.pid)) return true;
+  // 有 pid 就以 pid 为准：被停掉的 run 会永远停在 running，退回时间判断会让它假活 10 分钟。
+  if (typeof status.pid === "number" && status.pid > 0) return pidAlive(status.pid);
   return Date.now() - updatedAtOf(status, dirMtimeMs) < RUN_STALE_MS;
 }
 

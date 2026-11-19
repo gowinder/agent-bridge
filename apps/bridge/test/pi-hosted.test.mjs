@@ -784,6 +784,63 @@ test("后台子代理还在跑时点停止会停掉进程", async (t) => {
   assert.match(last.blocks[0].text, /已停止后台子代理/);
 });
 
+test("runner 进程没了，停在那儿的 running run 不再算在跑", (t) => {
+  const h = piHarness((repo) => [{ id: "dead", cwd: repo, agent: "pi", title: "停掉的", createdAt: 1, updatedAt: 1 }]);
+  t.after(() => h.manager.dispose());
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-dead-"));
+  const runs = join(root, "async-subagent-runs");
+  const now = Date.now();
+  // 用户停掉后台子代理后 status.json 会永远停在 running：pid 不在了就别再显示在跑。
+  writeRun(runs, "run-dead", {
+    sessionId: "dead",
+    state: "running",
+    pid: 4_194_303,
+    startedAt: now - 60_000,
+    lastActivityAt: now - 1_000,
+    steps: [{ agent: "builder" }],
+  });
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  assert.equal(h.manager.rail("hosted:dead").tasks[0].status, "done");
+});
+
+test("/new 之后的会话也能打开后台子代理记录", (t) => {
+  const sessionPath = "/state/sessions/2026-01-01T00-00-00-000Z_pi-new-id.jsonl";
+  const h = piHarness((repo) => [
+    { id: "hosted-id", cwd: repo, agent: "pi", title: "新会话", createdAt: 1, updatedAt: 1, piSessionPath: sessionPath },
+  ]);
+  t.after(() => h.manager.dispose());
+
+  const root = mkdtempSync(join(tmpdir(), "pi-subagents-msgs-"));
+  const runs = join(root, "async-subagent-runs");
+  // run 记在 pi 的新会话 id 下，rail 列得出来，点开也得读得到。
+  writeRun(runs, "run-new", { sessionId: sessionPath, state: "complete", steps: [{ agent: "scout" }] });
+  writeFileSync(
+    join(runs, "run-new", "events.jsonl"),
+    `${JSON.stringify({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: "做完了" }], timestamp: 1 },
+    })}\n`,
+  );
+
+  const previous = process.env.PI_SUBAGENTS_TEMP_ROOT;
+  process.env.PI_SUBAGENTS_TEMP_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.PI_SUBAGENTS_TEMP_ROOT;
+    else process.env.PI_SUBAGENTS_TEMP_ROOT = previous;
+  });
+
+  const page = h.manager.taskMessages("hosted:hosted-id", "run-new", { limit: 10 });
+  assert.equal(page.messages.at(-1).blocks[0].text, "做完了");
+});
+
 /** 假装用户的 pi agent 目录：真实目录里只有一个 settings.json 和一个 npm 包目录。 */
 function fakeAgentDir(stateDir) {
   const source = join(stateDir, "pi-source");

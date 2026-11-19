@@ -648,8 +648,16 @@ export class HostedSessionManager {
   taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
-    const all =
-      record.agent === "pi" ? piTaskMessages(record.id, taskId) : claudeTaskMessages(record.id, taskId);
+    let all: MessageRecord[] | null | undefined;
+    if (record.agent === "pi") {
+      // `/new` 之后的 run 记在 pi 的新会话 id 下，rail 列得出来，这里也得读得到。
+      for (const id of this.piSessionIds(record)) {
+        all = piTaskMessages(id, taskId);
+        if (all) break;
+      }
+    } else {
+      all = claudeTaskMessages(record.id, taskId);
+    }
     if (!all) throw new RpcError("not_found", "未知后台任务");
     let end = all.length;
     if (page.before) {
@@ -893,7 +901,7 @@ export class HostedSessionManager {
       this.touch(record);
       return this.summary(record);
     }
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
     }
     // 先停进程再改记录：停不掉就报错，别让界面显示新模型而进程还跑着旧的。
@@ -941,7 +949,7 @@ export class HostedSessionManager {
         : patch.thinking === null
           ? undefined
           : this.thinkingLevel(patch.thinking);
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再改子代理设置");
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
@@ -987,7 +995,7 @@ export class HostedSessionManager {
       this.touch(record);
       return this.summary(record);
     }
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换思考等级");
     }
     // 进程不在、或者要改回跟随 pi 设置：停掉旧进程，下一条消息按新参数启动。
@@ -1015,7 +1023,7 @@ export class HostedSessionManager {
       throw new RpcError("invalid_params", "自动压缩触发点必须是 1 到 100 之间的整数（窗口百分比）");
     }
     const live = this.live.get(record.id);
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再改自动压缩触发点");
     }
     const next: HostedRecord = { ...record };
@@ -1234,7 +1242,7 @@ export class HostedSessionManager {
       if (background) {
         this.kill(record.id);
         void this.stopInSessiond(record.id);
-        record.interrupted = true;
+        // 那一轮是正常收尾的，不置 interrupted：否则网页会把最后一条回复画成「已停止」。
         record.pendingText = undefined;
         this.appendRecord(record, {
           messageId: randomUUID(),
@@ -2284,7 +2292,8 @@ export class HostedSessionManager {
   private piSessionIds(record: HostedRecord): string[] {
     const ids = [record.id];
     const file = basename(record.piSessionPath ?? "").replace(/\.jsonl$/, "");
-    const at = file.lastIndexOf("_");
+    // 文件名是 `<时间戳>_<id>.jsonl`，时间戳里不会有下划线；用第一个下划线切，id 自带下划线也不会切错。
+    const at = file.indexOf("_");
     if (at >= 0 && at < file.length - 1) ids.push(file.slice(at + 1));
     return ids;
   }
