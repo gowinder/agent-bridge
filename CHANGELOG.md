@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+## [0.11.6-rc.2] - 2026-11-19
+
+### Security
+
+- 发版前全套安全审计（Security/Architecture 专项 + 对抗性分析，无 CRITICAL/HIGH）的修复：spike 配对成功后不再把 reconnectToken 打进 stdout；`.gitignore` 加 spike 凭据守卫；协议与 GUIDE 钉死 `clientType` 语义——仅展示元数据，授权判定不得依赖该自报字段。
+
+### Fixed
+
+- CI 的 preview/production 部署在 `npm run check` 之后补跑 `node --test apps/bridge/test/*.test.mjs`（含新迁移测试）；`node --test` 目录参数只有 node 26 支持，统一用 glob 形式兼容 CI 的 node 24。`AGENTS.md` 同步修正过时的「没有 lint / test 脚本」说法。
+
 ## [0.11.6-rc.1] - 2026-11-19
 
 ### Added
