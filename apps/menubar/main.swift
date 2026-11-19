@@ -103,6 +103,36 @@ final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// 动态系统色只有绘制那一刻才有明确外观：`.cgColor` 提前赋给 layer，会把赋值时刻
+/// （视图还没挂进窗口时）的解析结果——通常是浅色——冻进 layer；深色窗口里卡片
+/// 就永远是白的，而文字跟着 effectiveAppearance 重新解析成白色，白字落在白卡上。
+/// 设定页的卡片、描边统一走这里：updateLayer 是绘制路径，每次重画都按本视图的
+/// effectiveAppearance 现解析，系统外观切换时 AppKit 会自动触发重画。
+class DynamicLayerView: NSView {
+    var applyLayerColors: ((NSView) -> Void)?
+    override var wantsUpdateLayer: Bool { true }
+    override func updateLayer() {
+        super.updateLayer()
+        if let applyLayerColors {
+            applyLayerColors(self)
+        }
+    }
+}
+
+/// 设定页的分组卡片：内容从上往下排（isFlipped），底色按绘制时刻的外观解析。
+final class DynamicCardView: DynamicLayerView {
+    override var isFlipped: Bool { true }
+}
+
+/// NSScrollView 自己管理绘制路径，不能改成 updateLayer；改成外观变化时补一次重着色。
+final class DynamicLayerScrollView: NSScrollView {
+    var applyLayerColors: ((NSView) -> Void)?
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyLayerColors?(self)
+    }
+}
+
 struct Snapshot: Decodable {
     let version: String
     let hostName: String
@@ -513,6 +543,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // 设定窗口与消息气泡
     private var settingsWindow: NSWindow?
     private var settingsStatusDot: NSView?
+    /// 状态点当前颜色（动态色）：renderSettings 只改这里，由 dot 的 updateLayer 按绘制时刻外观解析。
+    private var settingsStatusColor: NSColor = .systemGray
     private var settingsStatusLabel: NSTextField?
     private var settingsRelayLabel: NSTextField?
     private var settingsRoomLabel: NSTextField?
@@ -1503,7 +1535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let valueWidth = cardWidth - valueX - cardPad
         var pageY: CGFloat = 20
         var cardY: CGFloat = 12
-        var currentCard: FlippedView?
+        var currentCard: DynamicCardView?
 
         func pageTake(_ height: CGFloat, gap: CGFloat = 10) -> CGFloat {
             let top = pageY
@@ -1540,12 +1572,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             label.textColor = .secondaryLabelColor
             label.frame = NSRect(x: margin + 2, y: pageTake(14, gap: 8), width: cardWidth, height: 14)
             view.addSubview(label)
-            let box = FlippedView(frame: .zero)
+            let box = DynamicCardView(frame: .zero)
             box.wantsLayer = true
             box.layer?.cornerRadius = 10
-            box.layer?.backgroundColor = cardBackground().cgColor
             box.layer?.borderWidth = 1
-            box.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+            box.applyLayerColors = { view in
+                view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                    view.layer?.backgroundColor = self.cardBackground().cgColor
+                    view.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+                }
+            }
             currentCard = box
             cardY = 12
         }
@@ -1594,16 +1630,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // 顶部状态条：一个圆点 + 一行摘要，比一行纯文字更容易一眼看出好坏。
-        let pill = NSView(frame: NSRect(x: margin, y: pageTake(40, gap: 22), width: cardWidth, height: 40))
+        let pill = DynamicLayerView(frame: NSRect(x: margin, y: pageTake(40, gap: 22), width: cardWidth, height: 40))
         pill.wantsLayer = true
         pill.layer?.cornerRadius = 10
-        pill.layer?.backgroundColor = cardBackground().cgColor
         pill.layer?.borderWidth = 1
-        pill.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
-        let dot = NSView(frame: NSRect(x: 16, y: 16, width: 8, height: 8))
+        pill.applyLayerColors = { view in
+            view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                view.layer?.backgroundColor = self.cardBackground().cgColor
+                view.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.55).cgColor
+            }
+        }
+        let dot = DynamicLayerView(frame: NSRect(x: 16, y: 16, width: 8, height: 8))
         dot.wantsLayer = true
         dot.layer?.cornerRadius = 4
-        dot.layer?.backgroundColor = NSColor.systemGray.cgColor
+        dot.applyLayerColors = { view in
+            view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                view.layer?.backgroundColor = self.settingsStatusColor.cgColor
+            }
+        }
         pill.addSubview(dot)
         let status = NSTextField(labelWithString: "…")
         status.font = .systemFont(ofSize: 12.5, weight: .medium)
@@ -1647,7 +1691,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let dirsTop = cardTake(96)
         dirsCaption.frame = NSRect(x: cardPad, y: dirsTop + 2, width: labelWidth, height: 16)
         currentCard?.addSubview(dirsCaption)
-        let dirsScroll = NSScrollView(frame: NSRect(x: valueX, y: dirsTop, width: valueWidth, height: 96))
+        let dirsScroll = DynamicLayerScrollView(frame: NSRect(x: valueX, y: dirsTop, width: valueWidth, height: 96))
         dirsScroll.hasVerticalScroller = true
         dirsScroll.autohidesScrollers = true
         dirsScroll.scrollerStyle = .overlay
@@ -1656,8 +1700,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dirsScroll.wantsLayer = true
         dirsScroll.layer?.cornerRadius = 8
         dirsScroll.layer?.borderWidth = 1
-        dirsScroll.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.7).cgColor
-        dirsScroll.layer?.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.25).cgColor
+        dirsScroll.applyLayerColors = { view in
+            view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                view.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.7).cgColor
+                view.layer?.backgroundColor = NSColor.textBackgroundColor.withAlphaComponent(0.25).cgColor
+            }
+        }
+        dirsScroll.applyLayerColors?(dirsScroll)
         let dirsDoc = FlippedView(frame: NSRect(x: 0, y: 0, width: valueWidth, height: 96))
         dirsDoc.autoresizingMask = [.width]
         dirsScroll.documentView = dirsDoc
@@ -1734,14 +1783,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         view.addSubview(count)
         settingsCountLabel = count
 
-        let scroll = NSScrollView(frame: NSRect(x: margin, y: margin, width: size.width - margin * 2, height: size.height - 44 - margin))
+        let scroll = DynamicLayerScrollView(frame: NSRect(x: margin, y: margin, width: size.width - margin * 2, height: size.height - 44 - margin))
         scroll.autoresizingMask = [.width, .height]
         scroll.hasVerticalScroller = true
         scroll.borderType = .noBorder
         scroll.wantsLayer = true
         scroll.layer?.cornerRadius = 8
         scroll.layer?.borderWidth = 1
-        scroll.layer?.borderColor = NSColor.separatorColor.cgColor
+        scroll.applyLayerColors = { view in
+            view.effectiveAppearance.performAsCurrentDrawingAppearance {
+                view.layer?.borderColor = NSColor.separatorColor.cgColor
+            }
+        }
+        scroll.applyLayerColors?(scroll)
 
         let table = NSTableView()
         table.style = .plain
@@ -1801,8 +1855,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func renderSettings() {
         guard let window = settingsWindow, window.isVisible else { return }
         let relayOnline = reachable && snapshot?.relayOnline == true
-        settingsStatusDot?.layer?.backgroundColor =
-            (reachable ? (relayOnline ? NSColor.systemGreen : NSColor.systemOrange) : NSColor.systemRed).cgColor
+        // 只更新颜色属性并触发重画；cgColor 的解析交给 dot 自己在绘制时刻按外观做。
+        settingsStatusColor =
+            reachable ? (relayOnline ? .systemGreen : .systemOrange) : .systemRed
+        settingsStatusDot?.needsDisplay = true
         if reachable, let snapshot {
             settingsStatusLabel?.stringValue =
                 header(snapshot)
