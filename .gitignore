@@ -35,4 +35,9 @@ apps/menubar/build/
 # 本地环境变量（含敏感 token）
 .env*.local
 
+# spike 状态目录被 AGENT_BRIDGE_SPIKE_HOME 指到仓库内时的凭据守卫
+spikes/mcp-client/**/identity.json
+spikes/mcp-client/**/device.json
+spikes/mcp-client/**/confirm
+
 .claude-results/
