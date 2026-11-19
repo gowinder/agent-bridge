@@ -692,9 +692,18 @@ type Route =
   | { level: "chat"; appId: string; projectId: string; sessionId: string; taskId?: string }
   | { level: "devices" };
 
+/** 手改地址栏或旧链接里的 `%` 不是合法转义时 decodeURIComponent 会抛，退回原文。 */
+function safeDecode(part: string): string {
+  try {
+    return decodeURIComponent(part);
+  } catch {
+    return part;
+  }
+}
+
 function parseRoute(): Route {
   const raw = location.hash.replace(/^#\/?/, "");
-  const parts = raw.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+  const parts = raw.split("/").filter(Boolean).map(safeDecode);
   if (parts[0] === "devices") return { level: "devices" };
   if (parts[0] !== "clients") return { level: "clients" };
   const appId = parts[1];
