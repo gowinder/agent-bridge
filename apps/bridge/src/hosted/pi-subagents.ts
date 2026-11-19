@@ -131,10 +131,9 @@ export function piSubagentTasks(
  */
 export function piSubagentRunning(piSessionId: string | undefined, root = piSubagentRoot()): boolean {
   if (!piSessionId) return false;
-  return scanRuns(root).some((run) => {
-    if (!sameSession(run.status.sessionId, piSessionId)) return false;
-    return taskOf(run.runId, run.status, run.dirMtimeMs)?.status === "running";
-  });
+  return scanRuns(root).some(
+    (run) => sameSession(run.status.sessionId, piSessionId) && isRunning(run.status, run.dirMtimeMs),
+  );
 }
 
 /** 这个 pi 会话派生的某次 run 的目录；runId 不合法、或 run 属于别的会话时返回 null。 */
@@ -152,6 +151,23 @@ export function piRunDir(piSessionId: string, runId: string, root = piSubagentRo
   return dir;
 }
 
+/** 这份 run 最后一次有动静的时间；status 里的时间戳都缺时用目录 mtime。 */
+function updatedAtOf(status: PiRunStatus, dirMtimeMs: number): number {
+  return (
+    [status.lastActivityAt, status.lastUpdate, status.endedAt, dirMtimeMs].find(
+      (value): value is number => typeof value === "number" && value > 0,
+    ) ?? dirMtimeMs
+  );
+}
+
+/** 这份 run 是否还在跑：状态没结束，而且不是早就没动静的（进程被杀掉的情况）。 */
+function isRunning(status: PiRunStatus, dirMtimeMs: number): boolean {
+  const state = typeof status.state === "string" ? status.state : "";
+  // queued/running/paused 都算没结束，其余（complete/failed/partial/stopped/rejected）算结束。
+  if (state !== "queued" && state !== "running" && state !== "paused") return false;
+  return Date.now() - updatedAtOf(status, dirMtimeMs) < RUN_STALE_MS;
+}
+
 function taskOf(runId: string, status: PiRunStatus, dirMtimeMs: number): RailTask | null {
   const steps = Array.isArray(status.steps) ? status.steps : [];
   const stepIndex =
@@ -160,20 +176,13 @@ function taskOf(runId: string, status: PiRunStatus, dirMtimeMs: number): RailTas
       : 0;
   const step = steps[stepIndex];
   const agentType = typeof step?.agent === "string" && step.agent ? step.agent : undefined;
-  const state = typeof status.state === "string" ? status.state : "";
-  const updatedAt =
-    [status.lastActivityAt, status.lastUpdate, status.endedAt, dirMtimeMs].find(
-      (value): value is number => typeof value === "number" && value > 0,
-    ) ?? dirMtimeMs;
-  // queued/running/paused 都算没结束，其余（complete/failed/partial/stopped/rejected）算结束。
-  const unfinished = state === "queued" || state === "running" || state === "paused";
   const task: RailTask = {
     taskId: runId,
     name: step?.sessionName?.trim() || agentType || runId,
     kind: "subagent",
-    status: unfinished && Date.now() - updatedAt < RUN_STALE_MS ? "running" : "done",
+    status: isRunning(status, dirMtimeMs) ? "running" : "done",
     startedAt: typeof status.startedAt === "number" ? status.startedAt : undefined,
-    updatedAt,
+    updatedAt: updatedAtOf(status, dirMtimeMs),
     depth: 1,
   };
   if (agentType) task.agentType = agentType;
