@@ -36,6 +36,8 @@ interface PiRunStatus {
   runId?: string;
   sessionId?: string;
   state?: string;
+  /** runner 进程的 pid：判活靠它，别靠文件时间。 */
+  pid?: number;
   mode?: string;
   startedAt?: number;
   lastActivityAt?: number;
@@ -160,16 +162,33 @@ function updatedAtOf(status: PiRunStatus, dirMtimeMs: number): number {
   );
 }
 
+/** 进程还在吗。EPERM 说明进程存在、只是不归我们管，也算活着。 */
+function pidAlive(pid: number | undefined): boolean {
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 /**
- * 这份 run 是否还在跑：状态没结束，而且不是早就没动静的（进程被杀掉的情况）。
+ * 这份 run 是否还在跑。
  *
  * status.json 的 state 全集见 pi-subagents 的 ASYNC_STATUS_SNAPSHOT_STATES：
  * queued / running / complete / failed / partial / paused / stopped / rejected。
- * 它的 terminalState() 把 paused 也算终态，只有 queued 与 running 是在跑。
+ * 它的 terminalState() 把 paused 也算终态，文档也写明只有 queued 与 running 是活的
+ * （docs/extension-api.md「Treat queued and running as live」）。
+ *
+ * 判活优先看 runner 的 pid：pi-subagents 只在活动分类变化时才重写 status.json，
+ * 一个跑很久的工具调用期间文件看着是旧的，按文件年龄判会把它当成已经结束。
+ * pid 拿不到或已经退出时才退回时间判断，兜住「进程崩了、state 停在 running」的情况。
  */
 function isRunning(status: PiRunStatus, dirMtimeMs: number): boolean {
   const state = typeof status.state === "string" ? status.state : "";
   if (state !== "queued" && state !== "running") return false;
+  if (pidAlive(status.pid)) return true;
   return Date.now() - updatedAtOf(status, dirMtimeMs) < RUN_STALE_MS;
 }
 

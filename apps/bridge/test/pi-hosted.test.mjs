@@ -621,6 +621,15 @@ test("pi session rail lists its background subagent runs", (t) => {
     currentStep: 1,
     steps: [{ agent: "scout" }, { agent: "builder", sessionName: "builder: 写报告" }],
   });
+  // 跑很久的工具调用不会重写 status.json：进程还活着就必须算在跑，别按文件年龄判。
+  writeRun(runs, "run-slow", {
+    sessionId: piId,
+    state: "running",
+    pid: process.pid,
+    startedAt: now - 40 * 60_000,
+    lastActivityAt: now - 30 * 60_000,
+    steps: [{ agent: "builder", sessionName: "builder: 长任务" }],
+  });
   // paused 是终态（pi-subagents 的 terminalState 也这么算），不该一直显示在跑。
   writeRun(runs, "run-paused", {
     sessionId: piId,
@@ -656,6 +665,8 @@ test("pi session rail lists its background subagent runs", (t) => {
       ["run-paused", "done", "tester", "tester"],
       ["run-done", "done", "scout", "scout: 数一下目录"],
       ["run-path", "done", "reviewer", "reviewer"],
+      // 文件时间早于 10 分钟，但 pid 还活着：长工具调用期间 status.json 不重写。
+      ["run-slow", "running", "builder", "builder: 长任务"],
     ],
   );
   assert.equal(tasks[0].detail, "2 步 · 第 2 步");
