@@ -25,11 +25,9 @@
 1. 在 worktree 中开发，不在主 checkout 直接改：
    `git worktree add .claude/worktrees/<name> -b feat/<name> origin/develop`
 2. 完成后提交、推送 feature 分支，创建 PR，base 为 `develop`。
-3. 等待 Codex 审核，主动检查 PR 上 Codex 的留言：
-   - `gh pr view <number> --json reviews,comments`
-   - `gh api repos/{owner}/{repo}/pulls/<number>/comments`
-4. Codex 提出的问题必须修复并推送到同一分支，PR 自动更新；修复后重跑检查。
-5. 未解决的意见清零后再合并到 `develop`；preview 验证通过后，再走 `develop` → `main`。
+3. PR 由开发者自行审核（不再使用 Codex 审核）：合并前通读完整 diff，重点看回归面与向后兼容；可派独立 reviewer 交叉核对。
+4. 审核发现的问题必须修复并推送到同一分支，PR 自动更新；修复后重跑检查。
+5. 审核意见清零后再合并到 `develop`；preview 验证通过后，再走 `develop` → `main`。
 
 ## 提交前检查
 
