@@ -17,6 +17,7 @@ opaque ciphertext and routing metadata.
 - Web client: <https://agent-bridge.craftstead.app>
 - Download: [AgentBridge.dmg](https://github.com/gowinder/agent-bridge/releases/latest/download/AgentBridge.dmg)
 - Detailed guide: [docs/GUIDE.md](docs/GUIDE.md)
+- Interface languages: 中文 · English · 日本語 · 한국어 · Español · Français · Deutsch · Português — web client and menu bar app; follows your browser or system language, switchable by hand
 
 ## Contents
 
