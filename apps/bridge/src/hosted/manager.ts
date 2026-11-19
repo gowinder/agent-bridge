@@ -38,6 +38,7 @@ import type {
   ModelOption,
   MessageSendResult,
   ProjectInfo,
+  RailTask,
   SessionModelsResult,
   SessionRailResult,
   SessionSummary,
@@ -58,7 +59,7 @@ import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
 import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
-import { piSubagentTasks } from "./pi-subagents.js";
+import { MAX_PI_TASKS, piSubagentRunning, piSubagentTasks } from "./pi-subagents.js";
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
@@ -586,11 +587,7 @@ export class HostedSessionManager {
       // 只有 pi 需要认领：claude 桌面索引里的 id 是 `local_*`，不是 CLI 的 `--session-id`，
       // 对不上；而 claude-code-cli 适配器本来就按 hosted/sessions.json 排除托管会话。
       if (record.agent !== "pi") continue;
-      claim("pi", record.id);
-      // `/new` 之后续写的是 pi 新建的文件，id 由 pi 生成：文件名是 `<时间戳>_<id>.jsonl`。
-      const file = basename(record.piSessionPath ?? "").replace(/\.jsonl$/, "");
-      const at = file.lastIndexOf("_");
-      if (at >= 0 && at < file.length - 1) claim("pi", file.slice(at + 1));
+      for (const id of this.piSessionIds(record)) claim("pi", id);
     }
     return out;
   }
@@ -618,7 +615,7 @@ export class HostedSessionManager {
     const result: MessageListResult = {
       messages: pageMessages,
       completeness: "complete",
-      busy: live?.busy ?? false,
+      busy: this.busyOf(record),
       ...(record.interrupted ? { interrupted: true } : {}),
       ...(record.context ? { context: record.context } : {}),
       ...(record.slashCommands ? { slashCommands: record.slashCommands } : {}),
@@ -651,8 +648,16 @@ export class HostedSessionManager {
   taskMessages(sessionId: string, taskId: string, page: MessagePage): MessageListResult {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
-    const all =
-      record.agent === "pi" ? piTaskMessages(record.id, taskId) : claudeTaskMessages(record.id, taskId);
+    let all: MessageRecord[] | null | undefined;
+    if (record.agent === "pi") {
+      // `/new` 之后的 run 记在 pi 的新会话 id 下，rail 列得出来，这里也得读得到。
+      for (const id of this.piSessionIds(record)) {
+        all = piTaskMessages(id, taskId);
+        if (all) break;
+      }
+    } else {
+      all = claudeTaskMessages(record.id, taskId);
+    }
     if (!all) throw new RpcError("not_found", "未知后台任务");
     let end = all.length;
     if (page.before) {
@@ -705,7 +710,7 @@ export class HostedSessionManager {
       servers: [],
       // 子代理记录和桌面会话同一份：CLI 按 --session-id 写在自己的 projects 目录下。
       // pi 没有这份转录，后台子代理 run 的状态在 pi-subagents 自己的临时目录里。
-      tasks: pi ? piSubagentTasks(record.id) : subagentTasks([record.id]),
+      tasks: pi ? this.piTasks(record) : subagentTasks([record.id]),
       ...(record.context ? { context: record.context } : {}),
       note: "This session is hosted by Bridge, not by the Claude desktop app.",
     };
@@ -896,7 +901,7 @@ export class HostedSessionManager {
       this.touch(record);
       return this.summary(record);
     }
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
     }
     // 先停进程再改记录：停不掉就报错，别让界面显示新模型而进程还跑着旧的。
@@ -944,7 +949,7 @@ export class HostedSessionManager {
         : patch.thinking === null
           ? undefined
           : this.thinkingLevel(patch.thinking);
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再改子代理设置");
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
@@ -990,7 +995,7 @@ export class HostedSessionManager {
       this.touch(record);
       return this.summary(record);
     }
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换思考等级");
     }
     // 进程不在、或者要改回跟随 pi 设置：停掉旧进程，下一条消息按新参数启动。
@@ -1018,7 +1023,7 @@ export class HostedSessionManager {
       throw new RpcError("invalid_params", "自动压缩触发点必须是 1 到 100 之间的整数（窗口百分比）");
     }
     const live = this.live.get(record.id);
-    if (live?.busy || live?.pending || live?.piPending) {
+    if (this.busyOf(record) || live?.pending || live?.piPending) {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再改自动压缩触发点");
     }
     const next: HostedRecord = { ...record };
@@ -1221,10 +1226,35 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     const live = this.live.get(record.id);
-    if (!live || (!live.busy && !live.pending && !live.piPending)) {
+    // 主回合已经收尾、后台子代理还在跑：进程看着是闲的，但仍然有活没干完。
+    const background =
+      live !== undefined &&
+      record.agent === "pi" &&
+      !live.busy &&
+      !live.pending &&
+      !live.piPending &&
+      this.piSessionIds(record).some((id) => piSubagentRunning(id));
+    if (!live || (!live.busy && !live.pending && !live.piPending && !background)) {
       return { interrupted: false, session: this.summary(record) };
     }
     if (record.agent === "pi") {
+      // 后台子代理跑在 pi 进程内部，abort 停不掉，只能把进程停掉。
+      if (background) {
+        this.kill(record.id);
+        void this.stopInSessiond(record.id);
+        // 那一轮是正常收尾的，不置 interrupted：否则网页会把最后一条回复画成「已停止」。
+        record.pendingText = undefined;
+        this.appendRecord(record, {
+          messageId: randomUUID(),
+          sessionId: record.id,
+          role: "system",
+          createdAt: Date.now(),
+          blocks: [{ type: "text", text: "已停止后台子代理" }],
+        });
+        this.log(`hosted: interrupt background subagents ${record.id}`);
+        this.touch(record);
+        return { interrupted: true, session: this.summary(record) };
+      }
       if (live.piPending) live.pi?.cancel();
       live.pi?.abort();
       live.busy = false;
@@ -2254,6 +2284,44 @@ export class HostedSessionManager {
     return list;
   }
 
+  /**
+   * 这个托管会话在 pi 那边可能是两个 id：首会话用 `--session-id record.id`，
+   * `/new` 之后续写 pi 新建的文件（`<时间戳>_<id>.jsonl`），id 由 pi 生成。
+   * 后台子代理的 status.json 记的是 pi 的会话 id，两边都得认。
+   */
+  private piSessionIds(record: HostedRecord): string[] {
+    const ids = [record.id];
+    const file = basename(record.piSessionPath ?? "").replace(/\.jsonl$/, "");
+    // 文件名是 `<时间戳>_<id>.jsonl`，时间戳里不会有下划线；用第一个下划线切，id 自带下划线也不会切错。
+    const at = file.indexOf("_");
+    if (at >= 0 && at < file.length - 1) ids.push(file.slice(at + 1));
+    return ids;
+  }
+
+  /** 这个会话派生的后台子代理 run：两个 id 的并集，最新在前。 */
+  private piTasks(record: HostedRecord): RailTask[] {
+    const byRun = new Map<string, RailTask>();
+    for (const id of this.piSessionIds(record)) {
+      for (const task of piSubagentTasks(id)) byRun.set(task.taskId, task);
+    }
+    return [...byRun.values()]
+      .sort((a, b) => (b.startedAt ?? b.updatedAt ?? 0) - (a.startedAt ?? a.updatedAt ?? 0))
+      .slice(0, MAX_PI_TASKS);
+  }
+
+  /**
+   * 会话是否还在干活：pi 主进程跑着这一轮，或者它派生的后台子代理还没结束。
+   * 后台 run 跑在 pi 进程内部，主 agent 已经 settled，只看 `live.busy` 会误报成已完成。
+   * 进程已经停掉（用户停止、空闲回收）时不再看后台 run：那些 run 也跟着没了，
+   * status.json 却会一直停在 running，看它反而会显示成永远在跑。
+   */
+  private busyOf(record: HostedRecord): boolean {
+    const live = this.live.get(record.id);
+    if (live?.busy) return true;
+    if (!live || record.agent !== "pi") return false;
+    return this.piSessionIds(record).some((id) => piSubagentRunning(id));
+  }
+
   private summary(record: HostedRecord): SessionSummary {
     const live = this.live.get(record.id);
     const dirExists = isDirectory(record.cwd);
@@ -2269,7 +2337,7 @@ export class HostedSessionManager {
       updatedAt: record.updatedAt,
       archived: record.archived === true,
       live: Boolean(live),
-      busy: live?.busy ?? false,
+      busy: this.busyOf(record),
       needsDecision: Boolean(live?.pending || live?.piPending),
       canSend: dirExists,
       hosted: true,
@@ -2440,6 +2508,8 @@ export class HostedSessionManager {
       if (now - live.startedAt < IDLE_SWEEP_MS) continue;
       const record = this.records.get(id);
       if (!record) continue;
+      // 主 agent 已经 settled、后台子代理还在跑：这时候杀掉进程会把没干完的活掐掉。
+      if (record.agent === "pi" && this.piSessionIds(record).some((sid) => piSubagentRunning(sid))) continue;
       if (now - record.lastActiveAt <= this.config.idleTimeoutMs) continue;
       this.log(`hosted: idle timeout, stopping ${id}`);
       this.kill(id);
