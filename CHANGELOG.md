@@ -4,6 +4,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 修掉一条能把 develop 直接部署到生产的 CI 注入：workflow 里的 `run` 脚本不再插值仓库文件里的版本号，一律走 `env`。
+- Release 之前会先确认 tag 指向的提交已经合入 `main`，且 tag 与 `package.json` 的版本号一致。
+- 一张配对邀请只能注册一台设备：以前只靠中继保证单次性，并发下发时同一张邀请能配出多台。
+- 撤销设备（或到期）立刻生效：之前要先等最多 60 秒的定时复核，这期间被撤销的设备仍能发消息、读文件、执行命令。
+- `--fork-session` 加进托管会话的启动参数黑名单：放进去之后每轮都会换一个 session id，侧栏的后台任务与子任务记录就对不上了。
+- 中继不再为未认领的房间落存储：任何人拿一个自选的房间号发 WebSocket upgrade 都能让 DO 初始化并写一次 alarm。同时给未认证 socket 加了每房间上限，重复的 hello 只认证一次。
+- 地址里出现坏的百分号转义（`#/clients/%`）不再让整个页面白屏。
+- 未实现的方法回报 `unsupported` 而不是 `internal`，客户端能按「Bridge 太旧」正确降级。
+
+### Changed
+
+- `@craftstead/protocol` 与 `@craftstead/crypto` 标成 `private`，避免一次手滑的 `npm publish` 把内部包名暴露到公网。
+
 ## [0.11.5-rc.7] - 2026-11-19
 
 ### Fixed
