@@ -27,10 +27,11 @@ import type {
   SessionListParams,
   SessionSearchResult,
   ShellEventData,
+  TagColor,
   TodoKind,
   WireMessage,
 } from "@craftstead/protocol";
-import { TODO_KINDS } from "@craftstead/protocol";
+import { TAG_COLORS, TODO_KINDS } from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
 import type { AdminMessage } from "./admin.js";
 import { RpcError } from "./adapters/types.js";
@@ -101,6 +102,15 @@ function todoKindParam(value: string | undefined): TodoKind {
     throw new RpcError("invalid_params", "待办分类无效");
   }
   return kind as TodoKind;
+}
+
+/** 颜色只认这七个：前端按名字取色，别让任意字符串进库。 */
+function tagColorParam(value: unknown): TagColor {
+  const color = typeof value === "string" ? value : "gray";
+  if (!(TAG_COLORS as readonly string[]).includes(color)) {
+    throw new RpcError("invalid_params", "标签颜色无效");
+  }
+  return color as TagColor;
 }
 
 function numberParam(params: Record<string, unknown>, name: string): number | undefined {
@@ -301,6 +311,9 @@ const ACTIVITY_METHODS = new Set([
   "session.rename",
   "session.pin",
   "session.create",
+  "session.tags",
+  "tag.save",
+  "tag.delete",
   "transfer.commit",
   "device.revoke",
   "device.rename",
@@ -365,6 +378,17 @@ export function describeActivity(request: RequestMessage): string | null {
   }
   if (request.method === "session.pin") {
     return `${params["pinned"] === true ? "置顶" : "取消置顶"}会话${suffix}`;
+  }
+  if (request.method === "session.tags") {
+    const count = Array.isArray(params["tagIds"]) ? params["tagIds"].length : 0;
+    return count > 0 ? `给会话打上 ${count} 个标签${suffix}` : `清空会话标签${suffix}`;
+  }
+  if (request.method === "tag.save") {
+    const name = (stringParam(params, "name") ?? "").trim();
+    return `${stringParam(params, "tagId") ? "修改" : "新建"}标签${name ? `「${name}」` : ""}`;
+  }
+  if (request.method === "tag.delete") {
+    return "删除标签";
   }
   if (request.method === "hosted.archive") {
     return `${params["archived"] === true ? "归档" : "取消归档"}托管会话${suffix}`;
@@ -822,6 +846,30 @@ export class DeviceSession implements ChannelSession {
         const sessionId = stringParam(params, "sessionId");
         if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
         return this.options.adapters.hostedResume(sessionId);
+      }
+      case "tag.list":
+        return this.options.adapters.listTags();
+      case "tag.save": {
+        const name = stringParam(params, "name") ?? "";
+        const color = tagColorParam(params["color"]);
+        return this.options.adapters.saveTag({
+          ...(stringParam(params, "tagId") ? { tagId: stringParam(params, "tagId") } : {}),
+          name,
+          color,
+        });
+      }
+      case "tag.delete": {
+        const tagId = stringParam(params, "tagId");
+        if (!tagId) throw new RpcError("invalid_params", "tagId required");
+        return this.options.adapters.deleteTag(tagId);
+      }
+      case "session.tags": {
+        const sessionId = stringParam(params, "sessionId");
+        if (!sessionId) throw new RpcError("invalid_params", "sessionId required");
+        const raw = params["tagIds"];
+        if (!Array.isArray(raw)) throw new RpcError("invalid_params", "tagIds 必须是数组");
+        const tagIds = raw.filter((item): item is string => typeof item === "string");
+        return this.options.adapters.setSessionTags(sessionId, tagIds);
       }
       case "session.pin": {
         const sessionId = stringParam(params, "sessionId");
