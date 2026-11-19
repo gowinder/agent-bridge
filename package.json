@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.11.6-rc.1",
+  "version": "0.11.6-rc.2",
   "private": true,
   "type": "module",
   "workspaces": [
@@ -10,7 +10,7 @@
   "scripts": {
     "build": "tsc -b",
     "check": "tsc -b && npm run check -w @craftstead/web",
-    "test": "npm run build && node --test apps/bridge/test",
+    "test": "npm run build && node --test apps/bridge/test/*.test.mjs",
     "web": "npm run dev -w @craftstead/web",
     "relay:dev": "npm --workspace @craftstead/relay run dev",
     "relay:deploy": "npm --workspace @craftstead/relay run deploy",
