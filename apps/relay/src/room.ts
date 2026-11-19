@@ -19,6 +19,8 @@ interface Attachment {
   authedAt: number;
   pending?: boolean;
   deadline?: number;
+  /** 已经在跑认证：期间再来 hello 不再重复查存储、算摘要。 */
+  authenticating?: boolean;
 }
 
 const encoder = new TextEncoder();
@@ -28,6 +30,8 @@ const MAX_DEVICE_TTL_SECONDS = 30 * 24 * 3600;
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_CONTROL_BYTES = 8 * 1024;
 const HELLO_TIMEOUT_MS = 5_000;
+/** 一个房间同时挂着的未认证 socket 上限：挡住用无凭据连接挤占真桥的位置。 */
+const MAX_PENDING_SOCKETS = 32;
 /** 认领房间所需的 bridge 凭据最小长度，避免用可猜的短串占号。 */
 const MIN_BRIDGE_TOKEN_CHARS = 16;
 /** 无人认领或长期没有 bridge 连入的房间，保留这么久后清空存储。 */
@@ -395,20 +399,43 @@ export class Room {
     if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return errorResponse("bad_request", "expected websocket upgrade", 426);
     }
+    // 未认证的 socket 谁都能开：不设上限的话，同一个房间号可以被灌满，
+    // 真桥反而接不进来。
+    if (this.pendingSockets() >= MAX_PENDING_SOCKETS) {
+      return errorResponse("too_many", "too many unauthenticated sockets", 429);
+    }
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
     const deadline = Date.now() + HELLO_TIMEOUT_MS;
-    server.serializeAttachment({ pending: true, deadline } as Attachment);
+    server.serializeAttachment({ pending: true, deadline, authenticating: false } as Attachment);
     void this.scheduleHelloSweep(deadline);
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** Wakes the room so unauthenticated sockets cannot hang forever. */
+  private pendingSockets(): number {
+    let count = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = ws.deserializeAttachment() as Attachment | null;
+      if (!attachment || attachment.pending) count += 1;
+    }
+    return count;
+  }
+
+  /**
+   * Wakes the room so unauthenticated sockets cannot hang forever.
+   * 只给已经认领的房间排闹钟：任何人都能拿一个自选的房间号发 upgrade，未认领的房间
+   * 落一次 alarm 就等于让他免费初始化一个 DO 并写一次持久化存储。
+   */
   private async scheduleHelloSweep(deadline: number): Promise<void> {
-    const existing = await this.ctx.storage.getAlarm();
-    if (existing === null || deadline < existing) await this.ctx.storage.setAlarm(deadline);
+    try {
+      if ((await this.meta("room_id")) === null) return;
+      const existing = await this.ctx.storage.getAlarm();
+      if (existing === null || deadline < existing) await this.ctx.storage.setAlarm(deadline);
+    } catch {
+      // 排不上闹钟只是少一层兜底：握手超时还有客户端断开与 isolate 回收。
+    }
   }
 
   private sendControl(ws: WebSocket, message: RelayServerMessage): void {
@@ -443,12 +470,22 @@ export class Room {
         this.fail(ws, "bad_request", "hello too large");
         return;
       }
+      if (raw?.authenticating) return;
       const hello = parseRelayHello(this.safeJson(data));
       if (!hello) {
         this.fail(ws, "bad_request", "invalid hello");
         return;
       }
-      void this.authenticate(ws, hello);
+      // 认证要读存储、算摘要：期间再来一条 hello 会把这两件事重复一遍，并且
+      // fail() 的 close 要等这些 await 排完。先打标记，后续帧直接丢。
+      ws.serializeAttachment({
+        pending: true,
+        deadline: raw?.deadline,
+        authenticating: true,
+      } as Attachment);
+      void this.authenticate(ws, hello).catch(() => {
+        this.fail(ws, "internal", "authentication failed");
+      });
       return;
     }
     if (typeof data === "string") {
