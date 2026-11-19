@@ -29,6 +29,8 @@ export interface DeviceRecord {
   expiresAt: number | null;
   revokedAt: number | null;
   lastSeenAt: number | null;
+  /** 配对时客户端自报的类型，缺省与未知值都归一为 `web`。 */
+  clientType: "web" | "mcp";
 }
 
 /** 菜单栏「最近操作日志」的一条记录。 */
@@ -62,6 +64,11 @@ function asNumber(value: unknown): number | null {
   return value === null || value === undefined ? null : Number(value);
 }
 
+/** 只认精确的 `mcp`，其余（NULL、未知值）一律当网页设备。 */
+function asClientType(value: unknown): "web" | "mcp" {
+  return value === "mcp" ? "mcp" : "web";
+}
+
 export class Store {
   readonly dir: string;
   readonly db: DatabaseSync;
@@ -87,7 +94,8 @@ export class Store {
          created_at INTEGER NOT NULL,
          expires_at INTEGER,
          revoked_at INTEGER,
-         last_seen_at INTEGER
+         last_seen_at INTEGER,
+         client_type TEXT NOT NULL DEFAULT 'web'
        )`,
     );
     this.db.exec(
@@ -167,6 +175,14 @@ export class Store {
     );
     this.db.exec("CREATE INDEX IF NOT EXISTS session_tags_tag ON session_tags (tag_id)");
     migrateRelayUrls(this);
+    this.migrateDeviceClientType();
+  }
+
+  /** 老库的 devices 表没有 client_type（MCP 标记之前配对过的设备），补列时默认按 web。 */
+  private migrateDeviceClientType(): void {
+    const columns = this.db.prepare("PRAGMA table_info(devices)").all();
+    if (columns.some((row) => row["name"] === "client_type")) return;
+    this.db.exec("ALTER TABLE devices ADD COLUMN client_type TEXT NOT NULL DEFAULT 'web'");
   }
 
   /**
@@ -250,6 +266,7 @@ export class Store {
       expiresAt: asNumber(row["expires_at"]),
       revokedAt: asNumber(row["revoked_at"]),
       lastSeenAt: asNumber(row["last_seen_at"]),
+      clientType: asClientType(row["client_type"]),
     };
   }
 
@@ -265,19 +282,21 @@ export class Store {
         expiresAt: asNumber(row["expires_at"]),
         revokedAt: asNumber(row["revoked_at"]),
         lastSeenAt: asNumber(row["last_seen_at"]),
+        clientType: asClientType(row["client_type"]),
       }));
   }
 
   saveDevice(device: DeviceRecord): void {
     this.db
       .prepare(
-        `INSERT INTO devices (id, name, public_key, created_at, expires_at, revoked_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO devices (id, name, public_key, created_at, expires_at, revoked_at, last_seen_at, client_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            name = excluded.name,
            public_key = excluded.public_key,
            expires_at = excluded.expires_at,
-           revoked_at = excluded.revoked_at`,
+           revoked_at = excluded.revoked_at,
+           client_type = excluded.client_type`,
       )
       .run(
         device.id,
@@ -287,6 +306,7 @@ export class Store {
         device.expiresAt,
         device.revokedAt,
         device.lastSeenAt,
+        device.clientType,
       );
   }
 

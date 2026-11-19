@@ -239,6 +239,11 @@ export type WireMessage =
 export interface PairRequestParams {
   deviceName: string;
   platform?: string;
+  /**
+   * 客户端自报类型。缺省按 `web`，未知值也按 `web`：老客户端不传、新 Bridge 不报错。
+   * `mcp` 用于菜单栏与网页设备列表上的 MCP 标记。
+   */
+  clientType?: "web" | "mcp";
   /** 6-digit code the user must confirm on both screens. */
   confirmCode: string;
 }
@@ -258,6 +263,8 @@ export interface DeviceSummary {
   expiresAt: number | null;
   revokedAt: number | null;
   lastSeenAt: number | null;
+  /** 新版 Bridge 总是带上；老 Bridge 缺省，消费端一律按 `web` 处理。 */
+  clientType?: "web" | "mcp";
 }
 
 /** 心跳响应：只回一个时间戳，不读写任何状态，也不进操作日志。 */

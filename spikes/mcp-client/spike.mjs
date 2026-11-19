@@ -100,6 +100,8 @@ async function runPair(linkText, name) {
       {
         deviceName: name,
         platform: `node ${process.version} mcp-spike`,
+        // 新版 Bridge 会把这个设备标成 MCP；老 Bridge 忽略未知键，不影响配对。
+        clientType: "mcp",
         confirmCode: challenge.confirmCode,
       },
       60_000,

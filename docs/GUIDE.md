@@ -193,6 +193,8 @@ appear in relay logs. The web client clears the fragment after reading it.
    terminal and the menu bar app, the browser shows it on screen. The user
    confirms on both sides.
 6. Browser calls `pair.request` with a device name and its static public key.
+   `clientType` is optional (`web` or `mcp`); anything else, including
+   omitting it, is stored as `web`.
    The bridge verifies the code in constant time, registers the device, marks
    the invite used, returns `PairResult` (device id, room, bridge display name,
    capabilities) and closes the channel.

@@ -530,6 +530,8 @@ async function commandServe(): Promise<void> {
           expiresAt: device.expiresAt,
           revokedAt: device.revokedAt,
           lastSeenAt: device.lastSeenAt,
+          // 中继侧的设备列表没有 clientType，以本地记录为准（缺省 web）。
+          clientType: local.get(device.deviceId)?.clientType ?? "web",
           online: online.has(device.deviceId),
           log: store
             .deviceEvents(device.deviceId)
