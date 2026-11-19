@@ -85,7 +85,7 @@ import { connectDevice, finishPairing, startPairing, type PairingChallenge } fro
 import { PeerError, type PeerClient } from "./peer.js";
 import { RelayError, type RelayConnection } from "./relay.js";
 import "./style.css";
-import { langSwitchLabel, serverTr, toggleLang, tr } from "./i18n";
+import { LANGS, langId, locale, serverTr, setLang, tr } from "./i18n";
 
 const RELAY_ERRORS: Record<string, string> = {
   invite_expired: tr("邀请已过期，请在 Mac 上重新生成配对链接。"),
@@ -3806,12 +3806,19 @@ function topbarOverflow(panel: HTMLElement): HTMLElement {
 }
 
 /**
- * 中英切换：按钮上直接写目标语言（当前中文就显示 English），点了整页重载。
+ * 语言切换：下拉里每一条都用该语言的自称，点了整页重载。
  */
-function languageButton(): HTMLButtonElement {
-  const node = button(langSwitchLabel(), () => toggleLang(), "btn ghost small lang-btn");
-  node.setAttribute("aria-label", tr("切换语言"));
-  node.title = tr("切换语言");
+function languageButton(): HTMLSelectElement {
+  const node = el("select", {
+    className: "btn ghost small lang-btn",
+    attrs: { "aria-label": tr("切换语言"), title: tr("切换语言") },
+  }) as HTMLSelectElement;
+  for (const item of LANGS) {
+    const option = el("option", { text: item.label, attrs: { value: item.id } }) as HTMLOptionElement;
+    if (item.id === langId()) option.selected = true;
+    node.append(option);
+  }
+  node.addEventListener("change", () => setLang(node.value as (typeof LANGS)[number]["id"]));
   return node;
 }
 
@@ -4956,7 +4963,7 @@ function renderDevices(): void {
     const self = item.deviceId === state.device.deviceId;
     const label = el("div", { className: "row-main" }, [
       el("strong", { text: item.name }),
-      el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString()}` }),
+      el("span", { className: "meta", text: `${expireLabel(item.expiresAt)} · ${new Date(item.createdAt).toLocaleString(locale())}` }),
     ]);
     list.append(
       el("li", { className: "device-row" }, [
@@ -5104,7 +5111,7 @@ function timeLabel(timestamp: number): string {
   if (diff < 60_000) return tr("刚刚");
   if (diff < 3_600_000) return tr(`{0} 分钟前`, Math.floor(diff / 60_000));
   if (diff < 86_400_000) return tr(`{0} 小时前`, Math.floor(diff / 3_600_000));
-  return new Date(timestamp).toLocaleDateString();
+  return new Date(timestamp).toLocaleDateString(locale());
 }
 
 interface QueuedMessage {
@@ -6770,7 +6777,7 @@ function filePreview(state: RailState, file: FsReadResult): HTMLElement {
   wrap.append(
     el("p", {
       className: "rail-note",
-      text: tr(`{0} · {1}{2}`, sizeLabel(file.size), new Date(file.mtime).toLocaleString(), file.truncated ? tr(" · 只显示前 1 MB") : ""),
+      text: tr(`{0} · {1}{2}`, sizeLabel(file.size), new Date(file.mtime).toLocaleString(locale()), file.truncated ? tr(" · 只显示前 1 MB") : ""),
     }),
   );
   return wrap;
@@ -7558,7 +7565,7 @@ function queuedBubble(item: QueuedMessage): HTMLElement {
     el("div", { className: "message-meta" }, [
       el("span", { className: "role user", text: tr("用户") }),
       el("span", { className: "pill tiny", text: item.held ? tr("排队中") : tr("已发送") }),
-      el("span", { className: "meta mono", text: new Date(item.at).toLocaleTimeString() }),
+      el("span", { className: "meta mono", text: new Date(item.at).toLocaleTimeString(locale()) }),
     ]),
     el("div", { className: "message-text", text: item.display }),
   );
@@ -7579,7 +7586,7 @@ function messageBubble(
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: `role ${message.role}`, text: message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统") }),
     ...(message.origin === "peer" ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
-    ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString() })] : []),
+    ...(message.createdAt ? [el("span", { className: "meta mono", text: new Date(message.createdAt).toLocaleTimeString(locale()) })] : []),
   ]);
   if (hasText && session) {
     meta.append(
@@ -8125,7 +8132,7 @@ async function openFilePreview(path: string): Promise<void> {
     actions.push(previewDownloadButton(file, path));
     filePreviewActions?.replaceChildren(...actions);
     if (filePreviewNote) {
-      filePreviewNote.textContent = tr(`{0} · {1}{2}`, sizeLabel(file.size), new Date(file.mtime).toLocaleString(), file.truncated ? tr(" · 只显示前 1 MB") : "");
+      filePreviewNote.textContent = tr(`{0} · {1}{2}`, sizeLabel(file.size), new Date(file.mtime).toLocaleString(locale()), file.truncated ? tr(" · 只显示前 1 MB") : "");
     }
   } catch (error) {
     if (request !== previewRequest) return;
@@ -8167,7 +8174,7 @@ async function openMessageFullText(sessionId: string, message: MessageRecord): P
     filePreviewBody?.replaceChildren(body);
     filePreviewActions?.replaceChildren(copyButton(result.text, tr("复制全文")));
     if (filePreviewNote) {
-      filePreviewNote.textContent = tr(`{0} 字{1}`, result.length.toLocaleString(), result.truncated ? tr(` · 只显示前 {0} 字`, result.text.length.toLocaleString()) : "");
+      filePreviewNote.textContent = tr(`{0} 字{1}`, result.length.toLocaleString(locale()), result.truncated ? tr(` · 只显示前 {0} 字`, result.text.length.toLocaleString(locale())) : "");
     }
   } catch (error) {
     if (request !== previewRequest) return;
@@ -8471,7 +8478,7 @@ function assistantTurn(
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: "role assistant", text: tr("助手") }),
     ...(peer ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
-    ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString() })] : []),
+    ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString(locale()) })] : []),
   ]);
   if (session) {
     // 复制/下载整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
@@ -8801,7 +8808,7 @@ async function openShare(source: SessionSummary, message: MessageRecord): Promis
       ]),
       closeButton,
     ]),
-    el("p", { className: "sheet-source", text: tr(`来源：{0} · {1} · {2}`, source.title, message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统"), message.createdAt ? new Date(message.createdAt).toLocaleString() : "") }),
+    el("p", { className: "sheet-source", text: tr(`来源：{0} · {1} · {2}`, source.title, message.role === "user" ? tr("用户") : message.role === "assistant" ? tr("助手") : tr("系统"), message.createdAt ? new Date(message.createdAt).toLocaleString(locale()) : "") }),
     steps,
     body,
     el("footer", { className: "sheet-foot" }, [

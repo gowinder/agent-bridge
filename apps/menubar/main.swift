@@ -853,14 +853,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return TF(T("远程工具：%@ 已开启"), parts.joined(separator: " + "))
     }
 
-    /// 语言一项显示的是「点了会切到哪」，跟着系统语言走时也照实写。
+    /// 语言做成子菜单：每条都用该语言的自称，另有一条「跟随系统」。
     private func languageMenuItem() -> NSMenuItem {
-        let title = L10n.isEnglish ? "Language: English" : T("语言：中文")
-        return item(title, #selector(toggleLanguage), "")
+        let node = NSMenuItem(title: T("语言"), action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        sub.addItem(languageOption(nil))
+        for lang in L10n.Lang.allCases {
+            sub.addItem(languageOption(lang))
+        }
+        node.submenu = sub
+        return node
     }
 
-    @objc private func toggleLanguage() {
-        L10n.set(L10n.isEnglish ? "zh" : "en")
+    private func languageOption(_ lang: L10n.Lang?) -> NSMenuItem {
+        let node = item(lang?.label ?? T("跟随系统"), #selector(pickLanguage(_:)), "")
+        node.representedObject = lang?.rawValue
+        node.state = L10n.stored == lang ? .on : .off
+        return node
+    }
+
+    @objc private func pickLanguage(_ sender: NSMenuItem) {
+        let raw = sender.representedObject as? String
+        L10n.set(raw.flatMap(L10n.Lang.init(rawValue:)))
         refreshNow()
         if settingsWindow?.isVisible == true { renderSettings() }
     }
