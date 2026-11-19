@@ -105,6 +105,7 @@ const BLOCKED_EXTRA_ARGS = new Set([
   "-c",
   "--continue",
   "--resume",
+  "--fork-session",
   "--session-id",
   "--input-format",
   "--output-format",
