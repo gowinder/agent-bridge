@@ -4,6 +4,24 @@
 
 ## [Unreleased]
 
+## [0.11.6] - 2026-11-20
+
+本次发布包含 0.11.6-rc.1、rc.2 的全部改动，相对上一个正式版 0.11.5。另含发版前一轮全套安全审计，未发现 CRITICAL / HIGH。
+
+### Security
+
+- spike 配对成功后不再把 reconnectToken 打进 stdout；`.gitignore` 加 spike 凭据守卫；协议与 GUIDE 钉死 `clientType` 语义——仅展示元数据，授权判定不得依赖该自报字段。
+
+### Added
+
+- 设备配对支持客户端自报类型 `clientType`（`web` / `mcp`，缺省与未知值都按 `web`，老客户端不受影响）：MCP 客户端配对后，菜单栏设备行带 `MCP` 标记且图标改为 `network`，网页「设备」页名称旁带 `MCP` 徽章；`device.list` 与管理接口 `/status` 的设备数据都带该类型。
+- `spikes/mcp-client`：无头配对验证脚本（Node，一次性），实测邀请配对、只读读会话、托管 pi 会话往返与 ik 重连；不进构建与发版产物。
+
+### Fixed
+
+- 菜单栏设定页在深色外观下不再出现白卡白字：卡片颜色按绘制时刻的外观解析，外观切换与挂窗时显式重着色，不再依赖 AppKit 的隐式行为。
+- CI 的 preview/production 部署在 `npm run check` 之后补跑 `node --test apps/bridge/test/*.test.mjs`（含迁移测试）；`node --test` 目录参数只有 node 26 支持，统一用 glob 形式兼容 CI 的 node 24。
+
 ## [0.11.6-rc.2] - 2026-11-19
 
 ### Security
