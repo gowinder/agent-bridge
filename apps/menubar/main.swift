@@ -117,6 +117,12 @@ class DynamicLayerView: NSView {
             applyLayerColors(self)
         }
     }
+    // AppKit 切外观时会自动失效绘制，但头文件没有明文承诺；这里显式补一次
+    // needsDisplay，把「外观变化一定重画」从隐式依赖变成保证。
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
 }
 
 /// 设定页的分组卡片：内容从上往下排（isFlipped），底色按绘制时刻的外观解析。
@@ -127,6 +133,14 @@ final class DynamicCardView: DynamicLayerView {
 /// NSScrollView 自己管理绘制路径，不能改成 updateLayer；改成外观变化时补一次重着色。
 final class DynamicLayerScrollView: NSScrollView {
     var applyLayerColors: ((NSView) -> Void)?
+    // 挂窗时补一次重着色：初写发生在视图尚未入窗、effectiveAppearance 可能还是
+    // 默认值的时候，这里显式保证真正进入窗口后立即用对的颜色。
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window != nil {
+            applyLayerColors?(self)
+        }
+    }
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         applyLayerColors?(self)
