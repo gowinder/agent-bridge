@@ -54,6 +54,7 @@ export const EN: Record<string, string> = {
   "pi 默认": "pi default",
   "上下文已用 {0}%": "{0}% of context used",
   标签: "Tags",
+  "Mac 上的 Bridge 还是旧版本，升级后才能用标签": "The Bridge on your Mac is too old — upgrade to use tags",
   "给这个会话打标签": "Tag this session",
   "按标签筛选": "Filter by tag",
   清除筛选: "Clear filter",

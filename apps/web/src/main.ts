@@ -1946,10 +1946,15 @@ async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot 
   const apps = await call<AppListResult>("app.list");
   // 按客户端分别取会话：共用一个 500 条上限时，会话多的客户端会把另一个客户端的
   // 工程挤掉，表现为「新建的会话刷新不出来」。
+  // 标签是 0.11.5 才有的 RPC。老 Bridge 不认识的方法帧在协议层就被丢掉、不会回错误，
+  // 只能按版本判定；版本还没拿到时试一次，但把超时压短，别让首屏白等 20 秒。
+  const hostVersion = connected?.info.version;
+  tagsSupported = hostVersion === undefined || atLeastVersion(hostVersion, [0, 11, 5]);
   const [projects, tagList, ...sessionPages] = await Promise.all([
     call<ProjectListResult>("project.list"),
-    // 比网页还旧的 Bridge 不认识 tag.list：帧在协议层被丢掉，这里退成空标签库。
-    call<TagListResult>("tag.list").catch(() => ({ tags: [] })),
+    tagsSupported
+      ? call<TagListResult>("tag.list", undefined, 3_000).catch(() => ({ tags: [] }))
+      : Promise.resolve<TagListResult>({ tags: [] }),
     ...apps.apps.map((app) =>
       call<SessionListResult>("session.list", { appId: app.appId, includeArchived: true, limit: 500 }),
     ),
@@ -2288,6 +2293,9 @@ let dockHistoryView: {
 } | null = null;
 
 /** 标签库由 snapshot 带下来，新建/删除后本地同步，不用整份重拉。 */
+/** 老 Bridge 没有标签 RPC：入口要明说，别让人点了等超时。 */
+let tagsSupported = true;
+
 function allTags(): TagDef[] {
   return snapshot?.tags ?? [];
 }
@@ -2422,6 +2430,10 @@ function openTagMenu(sessionId: string, anchor: HTMLElement): void {
     closeTagMenu();
     return;
   }
+  if (!tagsSupported) {
+    flashNotice(tr("Mac 上的 Bridge 还是旧版本，升级后才能用标签"));
+    return;
+  }
   closeTagMenu();
   tagMenu = { sessionId, anchor };
   tagMenuEl = el("div", { className: "tag-menu", attrs: { role: "dialog", "aria-label": tr("标签") } });
@@ -2549,7 +2561,7 @@ async function toggleSessionTag(sessionId: string, tagId: string, on: boolean): 
   if (on) ids.add(tagId);
   else ids.delete(tagId);
   try {
-    const result = await call<SessionTagsResult>("session.tags", { sessionId, tagIds: [...ids] });
+    const result = await call<SessionTagsResult>("session.tags", { sessionId, tagIds: [...ids] }, 5_000);
     tagMenuStatus = "";
     patchSessionTags(sessionId, result.tags);
   } catch (error) {
@@ -2567,11 +2579,15 @@ async function saveTagDraft(): Promise<void> {
   }
   const editing = tagEditing;
   try {
-    const saved = await call<TagDef>("tag.save", {
-      ...(editing && editing !== "new" ? { tagId: editing } : {}),
-      name,
-      color: tagEditDraft.color,
-    });
+    const saved = await call<TagDef>(
+      "tag.save",
+      {
+        ...(editing && editing !== "new" ? { tagId: editing } : {}),
+        name,
+        color: tagEditDraft.color,
+      },
+      5_000,
+    );
     const data = snapshot;
     if (data) {
       const exists = data.tags.some((tag) => tag.tagId === saved.tagId);
@@ -2607,7 +2623,7 @@ async function saveTagDraft(): Promise<void> {
 
 async function deleteTagDef(tagId: string): Promise<void> {
   try {
-    await call("tag.delete", { tagId });
+    await call("tag.delete", { tagId }, 5_000);
   } catch (error) {
     tagMenuStatus = messageOf(error);
     renderTagMenu();
