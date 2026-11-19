@@ -123,6 +123,7 @@ jobs:
       - run: npm run build:wasm -w @craftstead/crypto
 
       - run: npm run check
+      - run: node --test apps/bridge/test
 
       - run: npm run build -w @craftstead/web
 
@@ -162,6 +163,7 @@ jobs:
       - run: npm run build:wasm -w @craftstead/crypto
 
       - run: npm run check
+      - run: node --test apps/bridge/test
 
       - run: npm run build -w @craftstead/web
 

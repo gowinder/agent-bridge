@@ -130,7 +130,9 @@ async function runPair(linkText, name) {
     });
 
     console.log("\nPairResult：");
-    console.log(JSON.stringify(result, null, 2));
+    // reconnectToken 只落 0600 的 device.json，不进 stdout（tee/会话日志会把凭据带出本机）。
+    const { reconnectToken: _secret, ...safeResult } = result;
+    console.log(JSON.stringify(safeResult, null, 2));
     console.log(`\n已保存设备身份到 ${statePaths().identity} 与 ${statePaths().device}（0600）`);
     console.log("PAIR PASS");
   } finally {

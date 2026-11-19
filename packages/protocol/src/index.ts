@@ -242,6 +242,10 @@ export interface PairRequestParams {
   /**
    * 客户端自报类型。缺省按 `web`，未知值也按 `web`：老客户端不传、新 Bridge 不报错。
    * `mcp` 用于菜单栏与网页设备列表上的 MCP 标记。
+   *
+   * 这个字段只做展示区分，是「客户端怎么说」而不是「Bridge 怎么验证」：
+   * 任何授权判定（谁能走 MCP 通道、谁有什么权限）都不得依赖它，准入必须另走
+   * 可验证的身份（邀请、设备公钥白名单等）。
    */
   clientType?: "web" | "mcp";
   /** 6-digit code the user must confirm on both screens. */
