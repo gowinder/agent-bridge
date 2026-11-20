@@ -643,6 +643,7 @@ export const DE: Record<string, string> = {
   "进程已停止，发送时自动恢复": "Der Prozess ist gestoppt; beim Senden wird er fortgesetzt",
   进程运行中: "Prozess läuft",
   进行中: "Läuft",
+  "进行中 · {0} 步": "Läuft · {0} Schritte",
   连接器: "Konnektoren",
   连接已关闭: "Verbindung geschlossen",
   "连接已断开，{0} 秒后重连…": "Verbindung getrennt, Neuverbindung in {0} s…",

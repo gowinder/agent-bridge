@@ -8584,15 +8584,75 @@ function markTurnState(list: HTMLElement, state: ChatState): void {
     list.append(row);
     return;
   }
-  const summary = last.querySelector<HTMLElement>(".turn-steps-summary");
-  if (summary) {
-    summary.append(...badge());
+  const tail = tailContent(last);
+  const tailSummary = tail ? stepsSummary(tail) : null;
+  // 多个步骤折叠块时，状态要挂在最后一个上：第一个可能早就滚出屏幕了。
+  const anySummary = tailSummary ?? last.querySelector<HTMLElement>(".turn-steps-summary");
+  if (tailSummary) {
+    // 折叠块就在卡片末尾：状态灯挂在标题上，和底部输出在同一屏。
+    tailSummary.append(...badge());
+  } else if (anySummary && tone === "busy" && !isPromptTail(tail)) {
+    // 后面还有正文：折叠块被挤到上面去了，底部补一行「进行中 · N 步」，
+    // 让人停在底部也知道还在跑，点一下跳到执行过程。
+    const row = stepsJumpRow(last.querySelector<HTMLDetailsElement>("details.turn-steps"), anySummary);
+    const foot = last.querySelector<HTMLElement>(":scope > .message-foot");
+    if (foot) last.insertBefore(row, foot);
+    else last.append(row);
+  } else if (anySummary) {
+    anySummary.append(...badge());
   } else {
     const row = el("div", { className: "thinking-row" });
     row.append(...badge());
     last.append(row);
   }
   last.classList.add(`is-${tone}`);
+}
+
+/** 卡片里最后一个真正的内容块：跳过底部动作行与状态行，用来看输出停在哪。 */
+function tailContent(card: HTMLElement): Element | null {
+  const children = [...card.children];
+  for (let index = children.length - 1; index >= 0; index -= 1) {
+    const child = children[index]!;
+    if (child.classList.contains("message-foot") || child.classList.contains("thinking-row")) continue;
+    return child;
+  }
+  return null;
+}
+
+/** 这个内容块本身就是执行过程折叠框时，返回它的标题行。 */
+function stepsSummary(node: Element): HTMLElement | null {
+  if (!node.classList.contains("turn-steps")) return null;
+  return node.querySelector<HTMLElement>(".turn-steps-summary");
+}
+
+/** 回合末尾是「等你回答 / 下一步」这类交互块时，不要再拿状态行把注意力引开。 */
+function isPromptTail(node: Element | null): boolean {
+  if (!(node instanceof HTMLElement)) return false;
+  return node.classList.contains("message-ask") || node.classList.contains("next-step");
+}
+
+/** 底部状态行：执行过程被正文挤到上面时，这里显示「进行中 · N 步」，点一下跳回去。 */
+function stepsJumpRow(
+  fold: HTMLDetailsElement | null,
+  summary: HTMLElement,
+): HTMLButtonElement {
+  const steps = fold ? fold.querySelectorAll(".turn-step").length : 0;
+  const row = el("button", {
+    className: "thinking-row thinking-jump",
+    attrs: { type: "button", title: tr("执行过程 · {0} 步", steps) },
+  });
+  row.append(
+    spinner(),
+    el("span", { className: "thinking-label", text: tr("进行中 · {0} 步", steps) }),
+    icon("chevron", "icon thinking-jump-chev"),
+  );
+  row.addEventListener("click", () => {
+    if (!fold) return;
+    fold.open = true;
+    // 展开之后标题可能已经跑出可视区，滚回来落在屏幕中间。
+    summary.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+  return row;
 }
 
 function renderMessages(state: ChatState): void {
