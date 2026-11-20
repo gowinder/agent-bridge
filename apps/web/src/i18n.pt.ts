@@ -644,7 +644,6 @@ export const PT: Record<string, string> = {
   "进程已停止，发送时自动恢复": "O processo foi encerrado; retoma ao enviar",
   进程运行中: "Processo em execução",
   进行中: "Em andamento",
-  "进行中 · {0} 步": "Em andamento · {0} passos",
   连接器: "Conectores",
   连接已关闭: "Conexão fechada",
   "连接已断开，{0} 秒后重连…": "Conexão encerrada, reconectando em {0} s…",

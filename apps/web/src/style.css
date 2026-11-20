@@ -3800,27 +3800,6 @@ body.has-file-preview {
   color: var(--muted);
 }
 
-/* 执行过程被后面的正文挤到上面时，底部这行是「还在跑」的唯一入口：做成按钮，点一下跳回去。 */
-.thinking-row.thinking-jump {
-  width: 100%;
-  margin: 0;
-  border: 0;
-  background: none;
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.thinking-row.thinking-jump:hover {
-  color: var(--text);
-}
-
-.thinking-jump-chev {
-  margin-left: auto;
-  color: var(--muted);
-  transform: rotate(-90deg);
-}
-
 .message.assistant.is-busy {
   border-color: color-mix(in srgb, var(--accent) 28%, var(--line));
 }
