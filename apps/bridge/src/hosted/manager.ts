@@ -95,6 +95,14 @@ const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", 
 /** 托管白名单最多这么多个目录：多到这份上说明是没整理过的清单，容易点错。 */
 const MAX_HOSTED_DIRS = 64;
 
+function PROBED_OK(path: string): string {
+  return `目录已授权可读：${path}`;
+}
+
+function PROBE_TIMEOUT(path: string): string {
+  return `等待系统授权超时（${DIR_PROBE_TIMEOUT_MS / 1000} 秒）：${path}`;
+}
+
 function DENIED_NOTE(path: string): string {
   return `macOS 拒绝访问这个目录：${path}（到「系统设置 → 隐私与安全性 → 文件与文件夹」勾选 AgentBridge，或重新点一次「+」再授权）`;
 }
@@ -409,8 +417,17 @@ export class HostedSessionManager {
    * 探一次：授权提前到用户在设置里点「+」的时候。
    */
   private readonly dirAuth = new Map<string, DirAuth>();
-  /** 正在探的目录 → 取消函数：同一个目录不并发探两次（每次都会弹一次框）。 */
-  private readonly probing = new Map<string, () => void>();
+  /** 正在排队或探测中的目录：同一个目录不并发探两次（每次都会弹一次框）。 */
+  private readonly probing = new Set<string>();
+  /**
+   * 探测排队：一次只放一个弹窗出去。
+   *
+   * 每个探测都可能弹一个系统授权框，同时起五个就是五个框糊在用户脸上。加目录本来就是
+   * 一个一个加的动作，所以这里严格串行：前一个出结果（或超时）才轮到下一个。
+   */
+  private readonly probeQueue: string[] = [];
+  private probeRunning = false;
+  private probeCancel: (() => void) | null = null;
   private readonly probeImpl: ((path: string) => Promise<"ok" | "denied" | "timeout">) | null;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
@@ -529,45 +546,68 @@ export class HostedSessionManager {
    */
   private probeDir(path: string): void {
     if (this.probing.has(path)) return;
+    this.probing.add(path);
     this.dirAuth.set(path, "pending");
+    this.probeQueue.push(path);
+    this.drainProbeQueue();
+  }
+
+  /** 队列里一次只跑一个：一个目录一个弹窗，不并发。 */
+  private drainProbeQueue(): void {
+    if (this.probeRunning) return;
+    const path = this.probeQueue.shift();
+    if (path === undefined) return;
+    this.probeRunning = true;
+    let settled = false;
+    const done = (result: "ok" | "denied" | "timeout", note: string): void => {
+      if (settled) return;
+      settled = true;
+      this.probeRunning = false;
+      this.probeCancel = null;
+      this.probing.delete(path);
+      this.finishProbe(path, result === "timeout" ? "pending" : result, note);
+      this.drainProbeQueue();
+    };
+    this.probeCancel = this.startProbe(path, done);
+  }
+
+  /** 起一次探测，返回取消函数。默认走子进程：弹窗没人点时挂的是它，不是 Bridge 主线程。 */
+  private startProbe(
+    path: string,
+    done: (result: "ok" | "denied" | "timeout", note: string) => void,
+  ): () => void {
     if (this.probeImpl) {
-      this.probing.set(path, () => undefined);
       void this.probeImpl(path).then(
-        (result) => {
-          if (result === "ok") this.finishProbe(path, "ok", `目录已授权可读：${path}`);
-          else if (result === "denied") this.finishProbe(path, "denied", DENIED_NOTE(path));
-          else this.finishProbe(path, "pending", `等待系统授权超时（${DIR_PROBE_TIMEOUT_MS / 1000} 秒）：${path}`);
-        },
-        (error: unknown) => this.finishProbe(path, "denied", `探测目录失败：${path}（${String(error)}）`),
+        (result) => done(result, result === "ok" ? PROBED_OK(path) : result === "denied" ? DENIED_NOTE(path) : PROBE_TIMEOUT(path)),
+        (error: unknown) => done("denied", `探测目录失败：${path}（${String(error)}）`),
       );
-      return;
+      return () => undefined;
     }
     // 目录当 argv 传，不拼进脚本：路径里有引号也不会变成代码。
     const child = nodeSpawn(process.execPath, ["-e", "require('fs').readdirSync(process.argv[1]);", path], {
       stdio: "ignore",
     });
     const cancel = (): void => {
+      clearTimeout(timer);
       child.kill("SIGKILL");
     };
-    this.probing.set(path, cancel);
+    // 弹框没人点：留 pending，进程杀掉。既不当可读（会让会话挂住），也不当拒绝
+    // （用户可能只是还没回来）。
     const timer = setTimeout(() => {
-      // 弹框没人点：留 pending，进程杀掉。既不当可读（会让会话挂住），也不当拒绝
-      // （用户可能只是还没回来）。
-      this.finishProbe(path, "pending", `等待系统授权超时（${DIR_PROBE_TIMEOUT_MS / 1000} 秒）：${path}`);
+      done("timeout", PROBE_TIMEOUT(path));
       cancel();
     }, DIR_PROBE_TIMEOUT_MS);
     timer.unref();
     child.on("error", (error) => {
-      clearTimeout(timer);
-      this.finishProbe(path, "denied", `探测目录失败：${path}（${String(error)}）`);
+      done("denied", `探测目录失败：${path}（${String(error)}）`);
       cancel();
     });
     child.on("exit", (code, signal) => {
-      clearTimeout(timer);
-      if (signal) return; // 超时那条路已经收过尾
-      if (code === 0) this.finishProbe(path, "ok", `目录已授权可读：${path}`);
-      else this.finishProbe(path, "denied", DENIED_NOTE(path));
+      if (signal) return; // 取消那条路已经收过尾
+      done(code === 0 ? "ok" : "denied", code === 0 ? PROBED_OK(path) : DENIED_NOTE(path));
+      cancel();
     });
+    return cancel;
   }
 
   private finishProbe(path: string, auth: DirAuth, note: string): void {
@@ -1721,7 +1761,10 @@ export class HostedSessionManager {
     this.treeTimer = null;
     this.trees.clear();
     this.stopping.clear();
-    for (const cancel of this.probing.values()) cancel();
+    this.probeQueue.length = 0;
+    this.probeRunning = false;
+    this.probeCancel?.();
+    this.probeCancel = null;
     this.probing.clear();
     process.removeListener("exit", this.exitHandler);
     this.stopAll();

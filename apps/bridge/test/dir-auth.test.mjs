@@ -134,6 +134,31 @@ test("超时（弹框没人点）算 pending，不当成可用，也不写进持
   assert.equal(authOf(manager, h.allowed), "unknown");
 });
 
+test("一次加多个目录时弹窗一个一个来，不会同时糊一屏", async (t) => {
+  let inFlight = 0;
+  let peak = 0;
+  const finished = [];
+  const h = harness(t, {
+    probeDir: async (path) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      finished.push(path);
+      return "ok";
+    },
+  });
+  h.manager.setDirs([h.allowed, h.other]);
+  // 两个目录都排上了队，但同一时刻只有一个在跑。
+  assert.equal(authOf(h.manager, h.allowed), "pending");
+  assert.equal(authOf(h.manager, h.other), "pending");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(peak, 1, "同一时刻只能有一个探测在跑");
+  assert.deepEqual(finished, [h.allowed, h.other]);
+  assert.equal(authOf(h.manager, h.allowed), "ok");
+  assert.equal(authOf(h.manager, h.other), "ok");
+});
+
 test("同一个目录并发添加不会同时弹两个框", async (t) => {
   let release;
   const pending = new Promise((resolve) => {

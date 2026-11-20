@@ -470,6 +470,8 @@ that reads the directory once:
   single-threaded);
 - a child process that nobody answers cannot block the bridge: after 20 s it is
   killed and the folder stays `pending`;
+- probes are queued: exactly one at a time, so several folders added in one go
+  produce one prompt after another instead of a stack of prompts;
 - the result is stored in `hosted/dir-auth.json` as `ok` or `denied` —
   `pending` is deliberately **not** stored, so it asks again next time;
 - the menu bar settings row shows `等待授权…` / `未授权`, and the web "new
