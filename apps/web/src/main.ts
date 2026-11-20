@@ -4844,8 +4844,13 @@ function hostedCreatePanel(
       const bypassNote = config.allowBypassPermissions
         ? ""
         : tr("；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）");
+      // 目录加进白名单不等于能读：macOS 的文件访问授权是第一次真读时才生效的。
+      const unauthorized = config.dirs.filter(
+        (dir) => dir.allowed !== false && (dir.auth === "denied" || dir.auth === "pending"),
+      ).length;
+      const authNote = unauthorized > 0 ? tr("；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次", unauthorized) : "";
       status.textContent = config.enabled
-        ? tr(`只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}`, project.cwd ?? "", idle, bypassNote)
+        ? tr(`只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}`, project.cwd ?? "", idle, bypassNote) + authNote
         : (config.note ?? tr("Bridge 还没有配置可托管的目录。"));
       submit.disabled = !config.enabled;
     })

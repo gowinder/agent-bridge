@@ -731,4 +731,5 @@ export const EN: Record<string, string> = {
   "运行中（pid {0}）": "Running (pid {0})",
   "{0} 分钟": "{0} min",
   "允许执行 {0} 吗？": "Allow {0}?",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} folder(s) have no macOS file access yet, so indexing and reads will fail: allow the prompt on the Mac, or re-add them in the menu bar settings",
 };

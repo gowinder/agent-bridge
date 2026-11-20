@@ -737,6 +737,14 @@ export interface HostedDirInfo {
    * 看起来没有目录），但不能再用来新建会话，也不能被菜单栏合并时写回白名单。
    */
   allowed?: boolean;
+  /**
+   * 这个目录到底能不能读。
+   *
+   * `ok` = 已经真读过一次（系统授权已给）；`denied` = 系统拒绝；`pending` = 正在弹框等
+   * 用户点；`unknown` = 还没探过。加目录时会立刻探（把授权提前），所以客户端不该把
+   * `pending` 显示成「可用」。
+   */
+  auth?: "ok" | "denied" | "pending" | "unknown";
 }
 
 export interface HostedDirsResult {

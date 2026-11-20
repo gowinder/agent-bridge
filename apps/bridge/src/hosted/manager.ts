@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -93,6 +94,19 @@ const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", 
 
 /** 托管白名单最多这么多个目录：多到这份上说明是没整理过的清单，容易点错。 */
 const MAX_HOSTED_DIRS = 64;
+
+function DENIED_NOTE(path: string): string {
+  return `macOS 拒绝访问这个目录：${path}（到「系统设置 → 隐私与安全性 → 文件与文件夹」勾选 AgentBridge，或重新点一次「+」再授权）`;
+}
+
+/** 目录授权探测的结果：`unknown` 只表示「还没探过」。 */
+type DirAuth = "ok" | "denied" | "pending" | "unknown";
+
+/**
+ * 探测目录可读性的超时。弹框没人点就一直是 pending：既不当成可读（会让会话卡住），
+ * 也不当成拒绝（用户可能只是还没回来点）。
+ */
+const DIR_PROBE_TIMEOUT_MS = 20_000;
 /** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
 const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
@@ -341,6 +355,8 @@ export interface HostedManagerOptions {
   stallMs?: number;
   /** 卡住检查的间隔（毫秒）；测试用短值。 */
   stallCheckMs?: number;
+  /** 测试用：替换「真的读一次目录」这一步；默认起子进程。 */
+  probeDir?: (path: string) => Promise<"ok" | "denied" | "timeout">;
 }
 
 /**
@@ -384,6 +400,18 @@ export class HostedSessionManager {
    * 符号链接的白名单目录判成越界，会话从此发不出消息。
    */
   private dirsCache: { at: number; list: { raw: string; real: string }[] } | null = null;
+  /**
+   * 每个白名单目录到底能不能读。
+   *
+   * TCC 的授权要等第一次**真读**（`readdir`/`open`）才生效：加目录时只做 `realpath`/`stat`
+   * 不会弹框，于是「目录加好了」和「目录真的能用」中间隔着一层系统授权。人不在 Mac 前时
+   * 那次弹框没人点，读目录的调用就挂在那里，整个会话卡住。所以这里在加目录的那一刻主动
+   * 探一次：授权提前到用户在设置里点「+」的时候。
+   */
+  private readonly dirAuth = new Map<string, DirAuth>();
+  /** 正在探的目录 → 取消函数：同一个目录不并发探两次（每次都会弹一次框）。 */
+  private readonly probing = new Map<string, () => void>();
+  private readonly probeImpl: ((path: string) => Promise<"ok" | "denied" | "timeout">) | null;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
   // Bridge 退出只断开 sessiond 连接：子进程继续由守护进程持有，重启后 attach 接上。
@@ -409,8 +437,10 @@ export class HostedSessionManager {
       roots: () => this.allowDirs().flatMap((dir) => [dir.real, dir.raw]),
       log: this.log,
     });
+    this.probeImpl = options.probeDir ?? null;
     this.stallMs = options.stallMs ?? DEFAULT_STALL_MS;
     this.stallCheckMs = options.stallCheckMs ?? STALL_CHECK_MS;
+    this.loadDirAuth();
     this.loadRecords();
     // 只恢复启动瞬间就存在的未完成轮次：recover 是异步的，期间新建/刚发出的会话不能被重放。
     const interrupted = new Set(
@@ -454,6 +484,7 @@ export class HostedSessionManager {
         sessionCount: [...this.records.values()].filter((record) => record.cwd === path).length,
         exists,
         allowed: true,
+        auth: this.dirAuth.get(path) ?? "unknown",
       });
       seen.add(path);
     }
@@ -487,6 +518,102 @@ export class HostedSessionManager {
   reloadConfig(): void {
     this.config = readConfig(this.stateDir);
     this.dirsCache = null;
+  }
+
+  /**
+   * 主动读一次目录，把 TCC 授权弹框提前到「加目录」这一刻。
+   *
+   * 必须走子进程：弹框没人点的时候，那个 `readdir` 会一直挂着（上一版就是会话里的 `find`
+   * 挂了两小时，把单线程的 Bridge 一起拖死）。子进程挂着不占主线程，超时直接杀掉，主线程
+   * 只拿到一个「还在等授权」的状态。
+   */
+  private probeDir(path: string): void {
+    if (this.probing.has(path)) return;
+    this.dirAuth.set(path, "pending");
+    if (this.probeImpl) {
+      this.probing.set(path, () => undefined);
+      void this.probeImpl(path).then(
+        (result) => {
+          if (result === "ok") this.finishProbe(path, "ok", `目录已授权可读：${path}`);
+          else if (result === "denied") this.finishProbe(path, "denied", DENIED_NOTE(path));
+          else this.finishProbe(path, "pending", `等待系统授权超时（${DIR_PROBE_TIMEOUT_MS / 1000} 秒）：${path}`);
+        },
+        (error: unknown) => this.finishProbe(path, "denied", `探测目录失败：${path}（${String(error)}）`),
+      );
+      return;
+    }
+    // 目录当 argv 传，不拼进脚本：路径里有引号也不会变成代码。
+    const child = nodeSpawn(process.execPath, ["-e", "require('fs').readdirSync(process.argv[1]);", path], {
+      stdio: "ignore",
+    });
+    const cancel = (): void => {
+      child.kill("SIGKILL");
+    };
+    this.probing.set(path, cancel);
+    const timer = setTimeout(() => {
+      // 弹框没人点：留 pending，进程杀掉。既不当可读（会让会话挂住），也不当拒绝
+      // （用户可能只是还没回来）。
+      this.finishProbe(path, "pending", `等待系统授权超时（${DIR_PROBE_TIMEOUT_MS / 1000} 秒）：${path}`);
+      cancel();
+    }, DIR_PROBE_TIMEOUT_MS);
+    timer.unref();
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      this.finishProbe(path, "denied", `探测目录失败：${path}（${String(error)}）`);
+      cancel();
+    });
+    child.on("exit", (code, signal) => {
+      clearTimeout(timer);
+      if (signal) return; // 超时那条路已经收过尾
+      if (code === 0) this.finishProbe(path, "ok", `目录已授权可读：${path}`);
+      else this.finishProbe(path, "denied", DENIED_NOTE(path));
+    });
+  }
+
+  private finishProbe(path: string, auth: DirAuth, note: string): void {
+    this.probing.delete(path);
+    if (this.dirAuth.get(path) !== "pending") return;
+    this.dirAuth.set(path, auth);
+    this.persistDirAuth();
+    this.log(`hosted: ${note}`);
+  }
+
+  private dirAuthPath(): string {
+    return join(this.hostedDir(), "dir-auth.json");
+  }
+
+  private loadDirAuth(): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(this.dirAuthPath(), "utf8"));
+    } catch {
+      return; // 没有这个文件：全部算「还没探过」。
+    }
+    if (!isRecord(parsed)) return;
+    for (const [path, value] of Object.entries(parsed)) {
+      // pending 是「当时没人点框」，不能持久化，否则重启后再也不弹。
+      if (value === "ok" || value === "denied") this.dirAuth.set(path, value);
+    }
+  }
+
+  private persistDirAuth(): void {
+    const payload: Record<string, string> = {};
+    for (const [path, auth] of this.dirAuth) {
+      if (auth === "ok" || auth === "denied") payload[path] = auth;
+    }
+    try {
+      // 一条 ok/denied 都没有时不落文件：pending 不该被持久化成「探过了」。
+      if (Object.keys(payload).length === 0) {
+        rmSync(this.dirAuthPath(), { force: true });
+        return;
+      }
+      mkdirSync(this.hostedDir(), { recursive: true, mode: 0o700 });
+      const tmp = `${this.dirAuthPath()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      renameSync(tmp, this.dirAuthPath());
+    } catch (error) {
+      this.log(`hosted: 记录目录授权状态失败：${String(error)}`);
+    }
   }
 
   /**
@@ -554,6 +681,10 @@ export class HostedSessionManager {
       this.dirsCache = null;
       this.writeConfig();
       this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
+    }
+    // 已经确认可读的不再弹框；其余（新加的、上次被拒的、还没定过的）都当场探一次。
+    for (const target of dirs) {
+      if (this.dirAuth.get(target) !== "ok") this.probeDir(target);
     }
     return this.configForClient();
   }
@@ -1590,6 +1721,8 @@ export class HostedSessionManager {
     this.treeTimer = null;
     this.trees.clear();
     this.stopping.clear();
+    for (const cancel of this.probing.values()) cancel();
+    this.probing.clear();
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
     this.sessiond?.close();

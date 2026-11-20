@@ -458,6 +458,27 @@ accepted them. A path that lands in `~/Downloads` is therefore rejected without
 the bridge touching it at all, which is what keeps a client from triggering a
 macOS folder-access prompt that blocks the process.
 
+Adding a directory is not the same as being able to read it. macOS grants access
+per folder the first time something actually reads it (`readdir`/`open`);
+`realpath` and `stat` — what adding a folder does — do not trigger the prompt. So
+the bridge probes each new allowlist entry right away, in a **child process**
+that reads the directory once:
+
+- the prompt therefore appears while you are sitting in front of the Mac, not in
+  the middle of a turn when nobody can click it (that is what used to hang a
+  whole session — a blocked prompt holds the reading call, and the bridge is
+  single-threaded);
+- a child process that nobody answers cannot block the bridge: after 20 s it is
+  killed and the folder stays `pending`;
+- the result is stored in `hosted/dir-auth.json` as `ok` or `denied` —
+  `pending` is deliberately **not** stored, so it asks again next time;
+- the menu bar settings row shows `等待授权…` / `未授权`, and the web "new
+  session" hint counts folders that are not authorised.
+
+Adding a folder whose state is already `ok` does not prompt again; adding one
+that is `denied` does, which is the way to re-ask after ticking the app in
+System Settings → Privacy & Security → Files and Folders.
+
 Only allowlisted directories appear as hosted projects. Changing the file
 requires restarting the bridge.
 

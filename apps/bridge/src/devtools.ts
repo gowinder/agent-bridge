@@ -119,6 +119,16 @@ function isUnder(path: string, root: string): boolean {
   return path === base || path.startsWith(`${base}${sep}`);
 }
 
+/** 系统拒绝（macOS 的文件夹授权没给）：既不是越界，也不是路径不存在，要对用户说清楚。 */
+export function permissionError(error: unknown): RpcError | null {
+  const code = (error as NodeJS.ErrnoException | null)?.code ?? "";
+  if (code !== "EPERM" && code !== "EACCES") return null;
+  return new RpcError(
+    "unauthorized",
+    "macOS 没有授予这个目录的访问权限：到「系统设置 → 隐私与安全性 → 文件与文件夹」给 AgentBridge 勾上，或者在设置里重新添加这个目录再点一次允许",
+  );
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -448,7 +458,14 @@ export class Devtools {
     }
     if (!stats.isDirectory()) throw new RpcError("invalid_params", "不是目录");
     const entries: FsEntry[] = [];
-    for (const entry of this.fs.readdir(real, "files.list", { extraRoots })) {
+    let dirents: ReturnType<FsScope["readdir"]>;
+    try {
+      dirents = this.fs.readdir(real, "files.list", { extraRoots });
+    } catch (error) {
+      // 闸门放行了，但系统不给（目录在受保护位置且没授权）：说清楚是缺授权，不是路径不存在。
+      throw permissionError(error) ?? new RpcError("not_found", "读不到这个目录");
+    }
+    for (const entry of dirents) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       const child = `${real}${sep}${entry.name}`;
       let childStats;
@@ -505,7 +522,12 @@ export class Devtools {
     // Never read past the limit: a huge file must not be pulled into memory just to be cut.
     const length = Math.min(stats.size, limit);
     const buffer = Buffer.alloc(length);
-    const fd = this.fs.open(real, "files.read", { flags: "r", extraRoots });
+    let fd: number;
+    try {
+      fd = this.fs.open(real, "files.read", { flags: "r", extraRoots });
+    } catch (error) {
+      throw permissionError(error) ?? new RpcError("not_found", "路径不存在");
+    }
     try {
       readSync(fd, buffer, 0, length, 0);
     } finally {

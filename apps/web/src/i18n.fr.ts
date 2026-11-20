@@ -758,4 +758,5 @@ export const FR: Record<string, string> = {
   "提问": "Demander",
   "技能": "Compétence",
   "停止任务": "Arrêter la tâche",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} dossier(s) n'ont pas l'autorisation de fichiers macOS : l'indexation et la lecture échoueront. Autorisez la demande sur le Mac ou rajoutez-les dans les réglages de la barre de menus",
 };
