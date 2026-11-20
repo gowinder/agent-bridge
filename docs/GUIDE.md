@@ -477,9 +477,19 @@ that reads the directory once:
 - the menu bar settings row shows `等待授权…` / `未授权`, and the web "new
   session" hint counts folders that are not authorised.
 
-Adding a folder whose state is already `ok` does not prompt again; adding one
-that is `denied` does, which is the way to re-ask after ticking the app in
-System Settings → Privacy & Security → Files and Folders.
+Adding a folder whose state is already `ok` does not prompt again. Adding a
+folder that is `denied` re-asks, but only through the explicit `probe` list that
+the menu bar sends when you re-add it with `+` — rewriting the whole allowlist
+(removing one folder) does not re-prompt the others, which is the way to re-ask
+after ticking the app in System Settings → Privacy & Security → Files and
+Folders.
+
+Editing `hosted.json` by hand does **not** probe: those folders stay `unknown`
+and the menu bar shows them as not yet authorised, because a probe there would
+pop a prompt at an arbitrary time (including login). Add folders from the menu
+bar settings instead. 30 s after start the bridge re-probes the folders it
+already had as `ok` — that read is free when the permission is still granted and
+downgrades the folder to `denied` when it was revoked in System Settings.
 
 Only allowlisted directories appear as hosted projects. Changing the file
 requires restarting the bridge.

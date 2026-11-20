@@ -385,8 +385,11 @@ final class AdminClient {
     }
 
     /// 整份替换托管白名单：远程设备没有这条通路，只有本机 admin 接口能改。
-    func setHostedDirs(_ dirs: [String]) async throws -> HostedConfig {
-        let data = try await request("POST", "/hosted", body: ["dirs": dirs])
+    func setHostedDirs(_ dirs: [String], probe: [String] = []) async throws -> HostedConfig {
+        var body: [String: Any] = ["dirs": dirs]
+        // 显式要求 Bridge 重新探一次这些目录：已在白名单但没授权时，重新添加是唯一的补救动作。
+        if !probe.isEmpty { body["probe"] = probe }
+        let data = try await request("POST", "/hosted", body: body)
         return try JSONDecoder().decode(HostedConfig.self, from: data)
     }
 }
@@ -2129,17 +2132,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for path in more where !merged.contains(path) { merged.append(path) }
         // 已在白名单里但还没授权（denied / pending / unknown）的目录要放行：重新添加一次
         // 是用户唯一能重新触发系统授权弹窗的动作。
-        let asksAuth = more.contains { path in
+        let reask = more.filter { path in
             guard let dir = hostedConfig?.dirs.first(where: { $0.path == path }) else { return false }
             return dir.auth != nil && dir.auth != "ok"
         }
-        guard merged.count != existing.count || asksAuth else {
+        guard merged.count != existing.count || !reask.isEmpty else {
             alert(T("目录已在白名单里"), TF(T("这 %d 个目录都已经在托管白名单中。"), more.count))
             return
         }
         Task {
             do {
-                hostedConfig = try await client.setHostedDirs(merged)
+                hostedConfig = try await client.setHostedDirs(merged, probe: reask)
                 renderSettings()
                 // 白名单变了，网页的工程列表也得跟着刷新。
                 snapshot = nil

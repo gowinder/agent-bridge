@@ -4846,7 +4846,9 @@ function hostedCreatePanel(
         : tr("；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）");
       // 目录加进白名单不等于能读：macOS 的文件访问授权是第一次真读时才生效的。
       const unauthorized = config.dirs.filter(
-        (dir) => dir.allowed !== false && (dir.auth === "denied" || dir.auth === "pending"),
+        (dir) =>
+          dir.allowed !== false &&
+          (dir.auth === "denied" || dir.auth === "pending" || dir.auth === "unknown"),
       ).length;
       const authNote = unauthorized > 0 ? tr("；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次", unauthorized) : "";
       status.textContent = config.enabled

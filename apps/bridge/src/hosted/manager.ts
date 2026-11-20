@@ -115,6 +115,15 @@ type DirAuth = "ok" | "denied" | "pending" | "unknown";
  * 也不当成拒绝（用户可能只是还没回来点）。
  */
 const DIR_PROBE_TIMEOUT_MS = 20_000;
+
+/**
+ * 启动后重新探一遍「已授权」的目录。
+ *
+ * `dir-auth.json` 里的 ok 不会自己失效：用户在系统设置里撤销授权、外置卷换了名字、
+ * 目录被换成另一个挂载点之后，UI 还显示一切正常，真读时却又弹框/挂住。已授权的 readdir
+ * 不弹框、只要几毫秒，所以启动后补探一次是便宜的。延迟到启动完再做，避免和启动抢 IO。
+ */
+const REPROBE_OK_DELAY_MS = 30_000;
 /** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
 const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
@@ -364,7 +373,9 @@ export interface HostedManagerOptions {
   /** 卡住检查的间隔（毫秒）；测试用短值。 */
   stallCheckMs?: number;
   /** 测试用：替换「真的读一次目录」这一步；默认起子进程。 */
-  probeDir?: (path: string) => Promise<"ok" | "denied" | "timeout">;
+  probeDir?: (path: string) => Promise<"ok" | "denied" | "timeout" | "unknown">;
+  /** 启动后多久复核已授权的目录（毫秒）；测试用短值。 */
+  reprobeDelayMs?: number;
 }
 
 /**
@@ -417,8 +428,14 @@ export class HostedSessionManager {
    * 探一次：授权提前到用户在设置里点「+」的时候。
    */
   private readonly dirAuth = new Map<string, DirAuth>();
-  /** 正在排队或探测中的目录：同一个目录不并发探两次（每次都会弹一次框）。 */
-  private readonly probing = new Set<string>();
+  /**
+   * 正在排队或探测中的目录 → 登记号。
+   *
+   * 用登记号而不是单纯一个集合：路径可能「移除 → 立刻加回」，旧探测的结果回来时不能把
+   * 新登记的探测当成自己收掉（否则新探测永远不跑，队列跟着停）。
+   */
+  private readonly probing = new Map<string, number>();
+  private probeToken = 0;
   /**
    * 探测排队：一次只放一个弹窗出去。
    *
@@ -428,7 +445,10 @@ export class HostedSessionManager {
   private readonly probeQueue: string[] = [];
   private probeRunning = false;
   private probeCancel: (() => void) | null = null;
-  private readonly probeImpl: ((path: string) => Promise<"ok" | "denied" | "timeout">) | null;
+  private reprobeTimer: NodeJS.Timeout | null = null;
+  /** 启动后复核的那些探测：结果 ok 时不改动状态，只有降级才写。 */
+  private readonly silentProbes = new Set<string>();
+  private readonly probeImpl: ((path: string) => Promise<"ok" | "denied" | "timeout" | "unknown">) | null;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
   // Bridge 退出只断开 sessiond 连接：子进程继续由守护进程持有，重启后 attach 接上。
@@ -470,6 +490,8 @@ export class HostedSessionManager {
     this.sweeper.unref();
     this.stallTimer = setInterval(() => this.checkStalls(), this.stallCheckMs);
     this.stallTimer.unref();
+    this.reprobeTimer = setTimeout(() => this.reprobeAllowedDirs(), options.reprobeDelayMs ?? REPROBE_OK_DELAY_MS);
+    this.reprobeTimer.unref();
     process.once("exit", this.exitHandler);
   }
 
@@ -492,6 +514,9 @@ export class HostedSessionManager {
   configForClient(): HostedDirsResult {
     const dirs: HostedDirInfo[] = [];
     const seen = new Set<string>();
+    // 手改 hosted.json 时目录可能写成非 canonical 的写法（`~/link/...`），而授权状态是按
+    // canonical 记的：查表两种写法都试一次，不然会误报「未授权」。
+    const realByRaw = new Map(this.allowDirs().map((dir) => [dir.raw, dir.real]));
     for (const raw of this.config.dirs) {
       const path = expandHome(raw);
       const exists = this.cwdExists(path);
@@ -501,7 +526,7 @@ export class HostedSessionManager {
         sessionCount: [...this.records.values()].filter((record) => record.cwd === path).length,
         exists,
         allowed: true,
-        auth: this.dirAuth.get(path) ?? "unknown",
+        auth: this.dirAuth.get(path) ?? this.dirAuth.get(realByRaw.get(path) ?? "") ?? "unknown",
       });
       seen.add(path);
     }
@@ -544,28 +569,56 @@ export class HostedSessionManager {
    * 挂了两小时，把单线程的 Bridge 一起拖死）。子进程挂着不占主线程，超时直接杀掉，主线程
    * 只拿到一个「还在等授权」的状态。
    */
-  private probeDir(path: string): void {
+  private probeDir(path: string, silent = false): void {
     if (this.probing.has(path)) return;
-    this.probing.add(path);
-    this.dirAuth.set(path, "pending");
+    this.probing.set(path, ++this.probeToken);
+    // silent 用于启动后复核已授权的目录：不把 UI 打回「等待授权」，只在结果变差时降级。
+    if (!silent) this.dirAuth.set(path, "pending");
     this.probeQueue.push(path);
+    if (silent) this.silentProbes.add(path);
     this.drainProbeQueue();
+  }
+
+  /** 启动后复核一遍已授权的目录：授权被撤销时把它们降级成 denied。 */
+  private reprobeAllowedDirs(): void {
+    this.reprobeTimer = null;
+    const seen = new Set<string>();
+    for (const entry of this.config.dirs) {
+      const path = expandHome(entry);
+      if (this.dirAuth.get(path) !== "ok") continue;
+      if (seen.has(path)) continue;
+      seen.add(path);
+      this.probeDir(path, true);
+    }
   }
 
   /** 队列里一次只跑一个：一个目录一个弹窗，不并发。 */
   private drainProbeQueue(): void {
     if (this.probeRunning) return;
-    const path = this.probeQueue.shift();
+    let path: string | undefined;
+    let token = 0;
+    // 排队期间目录可能被移出白名单（probing 里已经删掉）：跳过，别为它弹框。
+    while ((path = this.probeQueue.shift()) !== undefined) {
+      const current = this.probing.get(path);
+      if (current !== undefined) {
+        token = current;
+        break;
+      }
+      path = undefined;
+    }
     if (path === undefined) return;
     this.probeRunning = true;
     let settled = false;
-    const done = (result: "ok" | "denied" | "timeout", note: string): void => {
+    const done = (result: "ok" | "denied" | "timeout" | "unknown", note: string): void => {
       if (settled) return;
       settled = true;
       this.probeRunning = false;
       this.probeCancel = null;
-      this.probing.delete(path);
-      this.finishProbe(path, result === "timeout" ? "pending" : result, note);
+      // 路径被移除后又加回来时登记号已经变了：这个结果作废，别把新的探测收掉。
+      if (this.probing.get(path) === token) {
+        this.probing.delete(path);
+        this.finishProbe(path, result === "timeout" ? "pending" : result, note);
+      }
       this.drainProbeQueue();
     };
     this.probeCancel = this.startProbe(path, done);
@@ -574,7 +627,7 @@ export class HostedSessionManager {
   /** 起一次探测，返回取消函数。默认走子进程：弹窗没人点时挂的是它，不是 Bridge 主线程。 */
   private startProbe(
     path: string,
-    done: (result: "ok" | "denied" | "timeout", note: string) => void,
+    done: (result: "ok" | "denied" | "timeout" | "unknown", note: string) => void,
   ): () => void {
     if (this.probeImpl) {
       void this.probeImpl(path).then(
@@ -584,7 +637,11 @@ export class HostedSessionManager {
       return () => undefined;
     }
     // 目录当 argv 传，不拼进脚本：路径里有引号也不会变成代码。
-    const child = nodeSpawn(process.execPath, ["-e", "require('fs').readdirSync(process.argv[1]);", path], {
+    // 退出码区分「系统不给读」与「其它失败」：把「目录被删了」说成「去系统设置授权」是指错方向。
+    const script =
+      "try{require('fs').readdirSync(process.argv[1]);}" +
+      "catch(e){process.exit(e&&(e.code==='EPERM'||e.code==='EACCES')?2:1)}";
+    const child = nodeSpawn(process.execPath, ["-e", script, path], {
       stdio: "ignore",
     });
     const cancel = (): void => {
@@ -603,18 +660,31 @@ export class HostedSessionManager {
       cancel();
     });
     child.on("exit", (code, signal) => {
-      if (signal) return; // 取消那条路已经收过尾
-      done(code === 0 ? "ok" : "denied", code === 0 ? PROBED_OK(path) : DENIED_NOTE(path));
+      // 外部把探测子进程杀掉（不是我们的取消）：队列不能就此停摆，按超时收尾。
+      if (signal) {
+        done("timeout", PROBE_TIMEOUT(path));
+        return;
+      }
+      if (code === 0) done("ok", PROBED_OK(path));
+      else if (code === 2) done("denied", DENIED_NOTE(path));
+      else done("unknown", `探测目录失败（退出码 ${code}）：${path}`);
       cancel();
     });
     return cancel;
   }
 
   private finishProbe(path: string, auth: DirAuth, note: string): void {
-    this.probing.delete(path);
     // 探测期间目录被移出白名单：结果作废（不能把一个已经删掉的目录写回 dir-auth.json）。
-    if (!this.dirAuth.has(path)) return;
-    if (this.dirAuth.get(path) !== "pending") return;
+    if (!this.dirAuth.has(path)) {
+      this.silentProbes.delete(path);
+      return;
+    }
+    if (this.silentProbes.delete(path)) {
+      // 复核：没变差就当没发生，避免 UI 闪一下「未授权」又变回来。
+      if (auth === "ok" || this.dirAuth.get(path) !== "ok") return;
+    } else if (this.dirAuth.get(path) !== "pending") {
+      return;
+    }
     this.dirAuth.set(path, auth);
     this.persistDirAuth();
     this.log(`hosted: ${note}`);
@@ -696,9 +766,10 @@ export class HostedSessionManager {
    * 整份替换托管白名单。只给本机 admin 接口用：远程设备不能让白名单多出目录，
    * 否则「只有白名单里的目录能建会话」这层限制等于没有。
    */
-  setDirs(input: string[]): HostedDirsResult {
+  setDirs(input: string[], probe: string[] = []): HostedDirsResult {
     const dirs: string[] = [];
-    const current = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
+    const previous = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
+    const current = previous;
     for (const item of input) {
       const raw = String(item ?? "").trim();
       if (!raw) continue;
@@ -736,9 +807,20 @@ export class HostedSessionManager {
       this.writeConfig();
       this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
     }
-    // 已经确认可读的不再弹框；其余（新加的、上次被拒的、还没定过的）都当场探一次。
+    // 只探「这次新加的」和客户端显式要求重探的（菜单栏点「+」重新添加已存在的目录）。
+    // 整份写回时不能把其它未授权目录也排一遍：删一个目录会让剩下的挨个弹框。
+    const asked = new Set<string>();
+    for (const item of probe) {
+      try {
+        asked.add(this.normalizeDir(String(item ?? "")));
+      } catch {
+        // 客户端给了不存在的路径：忽略，别让整份写入失败。
+      }
+    }
     for (const target of dirs) {
-      if (this.dirAuth.get(target) !== "ok") this.probeDir(target);
+      if (this.dirAuth.get(target) === "ok") continue;
+      if (previous.has(this.compareDir(target)) && !asked.has(target)) continue;
+      this.probeDir(target);
     }
     return this.configForClient();
   }
@@ -1775,11 +1857,14 @@ export class HostedSessionManager {
     this.treeTimer = null;
     this.trees.clear();
     this.stopping.clear();
+    if (this.reprobeTimer) clearTimeout(this.reprobeTimer);
+    this.reprobeTimer = null;
     this.probeQueue.length = 0;
     this.probeRunning = false;
     this.probeCancel?.();
     this.probeCancel = null;
     this.probing.clear();
+    this.silentProbes.clear();
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
     this.sessiond?.close();

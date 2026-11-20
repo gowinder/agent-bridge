@@ -128,6 +128,11 @@ export interface AdminHostedDir {
   exists: boolean;
   /** 用这个目录的托管会话数。 */
   sessionCount: number;
+  /**
+   * 目录能不能读：加目录时会主动请系统弹一次授权，结果在这里。
+   * 老 Bridge 没有这个字段，客户端要按「未知」处理。
+   */
+  auth?: "ok" | "denied" | "pending" | "unknown";
 }
 
 /** 设置界面要看的托管配置，对应状态目录里的 hosted.json。 */
@@ -173,7 +178,7 @@ export interface AdminActions {
   purgeRevokedDevices(): Promise<{ purged: number; failed: string[] }>;
   hostedConfig(): AdminHostedConfig;
   /** 只有本机 admin 接口能改白名单与权限策略：远程设备没有这条通路。 */
-  setHostedConfig(patch: { allowBypassPermissions?: boolean; dirs?: string[] }): AdminHostedConfig;
+  setHostedConfig(patch: { allowBypassPermissions?: boolean; dirs?: string[]; probe?: string[] }): AdminHostedConfig;
   /** 这台机器上已有工程的目录（去重、只含仍存在的），用于一键导入白名单。 */
   projectDirs(): Promise<string[]>;
   /** 菜单栏把自己的动作（例如打开远程页面）记进本机操作日志。 */
@@ -325,12 +330,16 @@ export function startAdminServer(options: AdminServerOptions): Promise<Server> {
         }
         if (path === "/hosted" && request.method === "POST") {
           const body = await readBody(request);
-          const patch: { allowBypassPermissions?: boolean; dirs?: string[] } = {};
+          const patch: { allowBypassPermissions?: boolean; dirs?: string[]; probe?: string[] } = {};
           if (typeof body["allowBypassPermissions"] === "boolean") {
             patch.allowBypassPermissions = body["allowBypassPermissions"];
           }
           if (Array.isArray(body["dirs"])) {
             patch.dirs = body["dirs"].filter((item): item is string => typeof item === "string");
+          }
+          // 显式要求重探的目录（菜单栏点「+」重新添加已存在但没授权的目录）。
+          if (Array.isArray(body["probe"])) {
+            patch.probe = body["probe"].filter((item): item is string => typeof item === "string");
           }
           send(response, 200, actions.setHostedConfig(patch));
           return;

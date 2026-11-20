@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { summarizeHostedDirs } from "../dist/adapters/index.js";
 import { permissionError } from "../dist/devtools.js";
 import { HostedSessionManager } from "../dist/hosted/manager.js";
 
@@ -106,12 +107,63 @@ test("被拒绝的目录再添加一次会重新弹框（用户可能刚去系�
   h.manager.setDirs([h.allowed]);
   await settle();
   assert.equal(authOf(h.manager, h.allowed), "denied");
-  // 去系统设置勾上之后，再点一次「+」就该重新探。
-  result = "ok";
+  // 整份写回（没显式要求重探）不该再弹一次。
   h.manager.setDirs([h.allowed]);
+  await settle();
+  assert.equal(probes.length, 1);
+  // 去系统设置勾上之后，点「+」重新添加会带上 probe，才重新探。
+  result = "ok";
+  h.manager.setDirs([h.allowed], [h.allowed]);
   await settle();
   assert.equal(probes.length, 2);
   assert.equal(authOf(h.manager, h.allowed), "ok");
+});
+
+test("整份写回白名单不会把其它未授权目录再弹一遍", async (t) => {
+  const probes = [];
+  const h = harness(t, {
+    probeDir: (path) => {
+      probes.push(path);
+      return Promise.resolve("denied");
+    },
+  });
+  h.manager.setDirs([h.allowed, h.other]);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(probes.length, 2);
+  // 删掉一个目录（整份写回），剩下的那个虽然是 denied，也不该被重新弹框。
+  h.manager.setDirs([h.allowed]);
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(probes.length, 2);
+});
+
+test("移除后立刻加回同一个目录，不会因为旧探测再弹一次", async (t) => {
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const probes = [];
+  const h = harness(t, {
+    probeDir: (path) => {
+      probes.push(path);
+      return pending;
+    },
+  });
+  h.manager.setDirs([h.allowed, h.other]);
+  assert.equal(probes.length, 1);
+  h.manager.setDirs([h.other]);   // 移除 allowed
+  h.manager.setDirs([h.allowed, h.other], [h.allowed]); // 立刻加回
+  release("ok");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  // allowed 只该被探两次（旧的那次 + 加回后的新一次），排队里那条被移除的不能再生效。
+  assert.equal(probes.filter((path) => path === h.allowed).length, 2);
+});
+
+test("探测出错（非 EPERM）算 unknown，不冒充「没授权」", async (t) => {
+  const h = harness(t, { probeDir: () => Promise.resolve("unknown") });
+  h.manager.setDirs([h.allowed]);
+  await settle();
+  assert.equal(authOf(h.manager, h.allowed), "unknown");
+  assert.equal(existsSync(join(h.stateDir, "hosted", "dir-auth.json")), false);
 });
 
 test("超时（弹框没人点）算 pending，不当成可用，也不写进持久化", async (t) => {
@@ -214,4 +266,36 @@ test("目录移出白名单后，授权状态与排队的探测一起清掉", as
   assert.equal(probes.length, 1);
   const stored = JSON.parse(readFileSync(join(h.stateDir, "hosted", "dir-auth.json"), "utf8"));
   assert.deepEqual(stored, { [h.allowed]: "ok" });
+});
+
+test("菜单栏读的 /hosted 管理接口会带上 auth（否则整块状态 UI 是死代码）", async (t) => {
+  const h = harness(t);
+  h.manager.setDirs([h.allowed]);
+  await settle();
+  const summary = summarizeHostedDirs(h.manager.configForClient());
+  assert.equal(summary.dirs[0]?.auth, "ok");
+});
+
+test("启动后复核已授权的目录：授权被系统撤销就降级成 denied", async (t) => {
+  // 先造一份 ok 的记录。
+  const first = harness(t);
+  first.manager.setDirs([first.allowed]);
+  await settle();
+  assert.equal(authOf(first.manager, first.allowed), "ok");
+  first.manager.dispose();
+
+  // 重启：系统那边已经撤销了（探测返回 denied），启动后复核要把它降级。
+  const manager = new HostedSessionManager({
+    stateDir: first.stateDir,
+    log: () => undefined,
+    spawn: () => {
+      throw new Error("不该起会话进程");
+    },
+    probeDir: () => Promise.resolve("denied"),
+    reprobeDelayMs: 10,
+  });
+  t.after(() => manager.dispose());
+  assert.equal(authOf(manager, first.allowed), "ok"); // 复核前还是缓存里的 ok
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(authOf(manager, first.allowed), "denied");
 });

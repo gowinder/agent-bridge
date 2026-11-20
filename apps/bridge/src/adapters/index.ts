@@ -111,9 +111,14 @@ export class SessionAdapters {
     return this.hostedSummary(this.hostedManager.setAllowBypassPermissions(enabled));
   }
 
-  /** 整份替换托管白名单，只给本机 admin 接口用。 */
-  setHostedDirs(dirs: string[]): AdminHostedConfig {
-    return this.hostedSummary(this.hostedManager.setDirs(dirs));
+  /** 整份替换托管白名单，只给本机 admin 接口用。`probe` 是客户端显式要求重探的目录。 */
+  setHostedDirs(dirs: string[], probe: string[] = []): AdminHostedConfig {
+    return this.hostedSummary(this.hostedManager.setDirs(dirs, probe));
+  }
+
+  /** 退出时把托管会话的探测子进程一起收掉，否则 SIGTERM 会留下孤儿。 */
+  dispose(): void {
+    this.hostedManager.dispose();
   }
 
   private hostedSummary(info: HostedDirsResult): AdminHostedConfig {
@@ -554,7 +559,12 @@ export function summarizeHostedDirs(info: HostedDirsResult): AdminHostedConfig {
     allowBypassPermissions: info.allowBypassPermissions,
     dirs: info.dirs
       .filter((dir) => dir.allowed !== false)
-      .map((dir) => ({ path: dir.path, exists: dir.exists, sessionCount: dir.sessionCount })),
+      .map((dir) => ({
+        path: dir.path,
+        exists: dir.exists,
+        sessionCount: dir.sessionCount,
+        ...(dir.auth ? { auth: dir.auth } : {}),
+      })),
     idleTimeoutMs: info.idleTimeoutMs,
   };
 }
