@@ -682,7 +682,6 @@ export const EN: Record<string, string> = {
   "进程已停止，发送时自动恢复": "The process stopped; it resumes when you send",
   进程运行中: "Process running",
   进行中: "In progress",
-  "进行中 · {0} 步": "In progress · {0} steps",
   连接器: "Connectors",
   连接已关闭: "Connection closed",
   "连接已断开，{0} 秒后重连…": "Disconnected, reconnecting in {0}s…",
