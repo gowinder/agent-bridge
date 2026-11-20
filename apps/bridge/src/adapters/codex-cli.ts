@@ -145,8 +145,9 @@ export class CodexCliAdapter extends CodexAdapter {
 
   /** 线程没有运行中的 CLI 进程时，用一个 exec resume 进程接续同一 thread id。 */
   private resumeTurn(thread: ThreadRow, text: string): void {
+    if (!thread.cwd) throw new RpcError("invalid_params", "这个会话没有工作目录，无法发送");
     const child = spawn(binary(), ["exec", "resume", thread.id, "-"], {
-      cwd: thread.cwd || process.cwd(),
+      cwd: thread.cwd,
       env: process.env,
       stdio: ["pipe", "ignore", "ignore"],
     });

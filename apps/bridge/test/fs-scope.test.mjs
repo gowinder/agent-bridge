@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { FS_SCOPE_LOG_PREFIX, FsScope, FsScopeError, scopeCheck } from "../dist/fs-scope.js";
@@ -89,6 +89,69 @@ test("拒绝的路径不会被真正枚举，也不会抛出系统错误", (t) =
   assert.throws(() => scope.open(join(home, "Downloads", "invoice", "a.txt"), "files.read", { flags: "r" }), FsScopeError);
 });
 
+test("主目录外的符号链接指向受保护目录时，闸门不许跟着链接走进去", (t) => {
+  const home = fakeHome(t);
+  // 链接必须建在主目录之外：主目录内的路径无论如何都会按前缀规则判，测不出这条后门。
+  const outside = mkdtempSync(join(tmpdir(), "fs-scope-link-"));
+  t.after(() => rmSync(outside, { recursive: true, force: true }));
+  const link = join(outside, "link");
+  symlinkSync(join(home, "Downloads"), link);
+  const scope = new FsScope({ home, roots: () => [], log: () => undefined });
+  // 纯字符串看是「主目录外」，但解析链接后落在 ~/Downloads。
+  const check = scope.check(link);
+  assert.equal(check.ok, false);
+  assert.match(check.because, /受保护目录 ~\/Downloads/);
+  assert.throws(() => scope.readdir(link, "files.list"), FsScopeError);
+  assert.throws(() => scope.stat(join(link, "invoice"), "files.list"), FsScopeError);
+  // 链接指向允许的目录时照旧能用。
+  const okLink = join(outside, "ok-link");
+  symlinkSync(join(home, ".pi", "agent"), okLink);
+  assert.equal(scope.check(okLink).ok, true);
+});
+
+test("闸门在文件系统调用之前：不存在的越界路径报 FsScopeError 而不是 ENOENT", (t) => {
+  const home = fakeHome(t);
+  const scope = new FsScope({ home, roots: () => [], log: () => undefined });
+  const ghost = join(home, "Downloads", `ghost-${process.pid}-${Date.now()}`, "file.txt");
+  // 闸门在后的话这里会是 ENOENT（普通 Error），足以把「先判后碰」钉住。
+  assert.throws(() => scope.stat(ghost, "files.read"), (error) => error instanceof FsScopeError);
+  assert.throws(() => scope.readdir(join(home, "Music"), "files.list"), (error) => error instanceof FsScopeError);
+});
+
+test("同一条越界的日志每分钟最多一条，记录也只留一份", (t) => {
+  const home = fakeHome(t);
+  let clock = 1_000_000;
+  const logs = [];
+  const scope = new FsScope({ home, roots: () => [], now: () => clock, log: (line) => logs.push(line) });
+  const target = join(home, "Downloads");
+  for (let index = 0; index < 5; index += 1) {
+    assert.throws(() => scope.stat(target, "hosted.cwd"), FsScopeError);
+  }
+  assert.equal(logs.length, 1);
+  assert.equal(scope.recentRefusals.length, 1);
+  // 过了静默窗口才允许再记一条。
+  clock += 61_000;
+  assert.throws(() => scope.stat(target, "hosted.cwd"), FsScopeError);
+  assert.equal(logs.length, 2);
+  assert.equal(scope.recentRefusals.length, 1);
+});
+
+test("白名单目录用符号链接写法时，realpath 写法也必须是授权根", (t) => {
+  const home = fakeHome(t);
+  const real = join(home, "real-project");
+  mkdirSync(real, { recursive: true });
+  const link = join(home, "linked-project");
+  symlinkSync(real, link);
+  // 只登记原样写法：record.cwd 存的是 realpath 后的值，会被判成越界（历史 bug）。
+  const onlyLink = new FsScope({ home, roots: () => [link], log: () => undefined });
+  assert.equal(onlyLink.check(link).ok, true);
+  assert.equal(onlyLink.check(real).ok, false);
+  // 两种写法都登记（Bridge 的做法）才两边都认。
+  const both = new FsScope({ home, roots: () => [link, real], log: () => undefined });
+  assert.equal(both.check(link).ok, true);
+  assert.equal(both.check(real).ok, true);
+});
+
 class FakeChild extends EventEmitter {
   constructor() {
     super();
@@ -103,6 +166,69 @@ class FakeChild extends EventEmitter {
     return true;
   }
 }
+
+test("Bridge 重启的自动续跑不会按越界的工作目录拉起进程", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "hosted-resume-"));
+  const allowed = join(root, "allowed");
+  const stateDir = join(root, "state");
+  mkdirSync(allowed);
+  mkdirSync(join(stateDir, "hosted"), { recursive: true });
+  writeFileSync(join(stateDir, "hosted.json"), JSON.stringify({ dirs: [allowed], idleTimeoutMs: 60_000 }));
+  // 白名单收紧之后，旧记录还指着受保护目录，且上一轮没跑完（pendingText）。
+  writeFileSync(
+    join(stateDir, "hosted", "sessions.json"),
+    JSON.stringify({
+      sessions: [
+        {
+          id: "leftover",
+          cwd: join(homedir(), "Downloads"),
+          title: "旧会话",
+          permissionMode: "manual",
+          pendingText: "继续",
+          createdAt: 1,
+          updatedAt: 2,
+          lastActiveAt: 2,
+        },
+      ],
+    }),
+  );
+  const spawns = [];
+  const logs = [];
+  const manager = new HostedSessionManager({
+    stateDir,
+    log: (line) => logs.push(line),
+    spawn: () => {
+      spawns.push("spawned");
+      throw new Error("不应该启动进程");
+    },
+  });
+  t.after(() => {
+    manager.dispose();
+    rmSync(root, { recursive: true, force: true });
+  });
+  // recover() 在构造里同步跑完（没有 sessiond 时走 resumeInterrupted）。
+  assert.deepEqual(spawns, []);
+  assert.ok(logs.some((line) => line.includes("auto-resume skipped")));
+  const session = manager.sessions().find((item) => item.title === "旧会话");
+  assert.equal(session?.canSend, false);
+  assert.match(session?.sendBlockedReason ?? "", /不在托管白名单里|已不存在/);
+});
+
+test("等网页回答权限的轮次不算「疑似卡住」", async (t) => {
+  const { manager, repo, children } = hostedHarness(t, { stallMs: 40, stallCheckMs: 10 });
+  const session = manager.create({ path: repo });
+  await manager.send(session.sessionId, "你好");
+  const live = manager["live"].get(session.sessionId.replace("hosted:", ""));
+  assert.ok(live);
+  live.pending = { requestId: "r1", toolName: "Bash", input: {} };
+  await sleep(140);
+  assert.equal(manager.session(session.sessionId)?.stalledSince, undefined);
+  // 人答完之后继续无输出，才重新算卡住。
+  live.pending = null;
+  await sleep(140);
+  assert.equal(typeof manager.session(session.sessionId)?.stalledSince, "number");
+  void children;
+});
 
 function hostedHarness(t, options = {}) {
   const root = mkdtempSync(join(tmpdir(), "hosted-stall-"));

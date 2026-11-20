@@ -4,7 +4,7 @@
 // `agent-bridge devtools`. File browsing never leaves the chat's own project directory.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, readSync } from "node:fs";
+import { closeSync, existsSync, readSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import {
   DEVTOOLS_CAPABILITIES,
@@ -148,14 +148,20 @@ export class Devtools {
   /** 托管白名单是用户自己点过头的根；状态目录里的 uploads 属于 Bridge 自己的数据。 */
   private currentBaseRoots(): string[] {
     if (Date.now() - this.baseRootsAt < 5_000) return this.baseRoots;
-    this.baseRoots = [
-      ...this.adapters
-        .hostedDirs()
-        .dirs.filter((dir) => dir.allowed)
-        .map((dir) => dir.path),
-      this.store.dir,
-      join(this.store.dir, "uploads"),
-    ];
+    const roots: string[] = [];
+    for (const dir of this.adapters.hostedDirs().dirs) {
+      if (!dir.allowed) continue;
+      roots.push(dir.path);
+      // 白名单是用户点过头的根，对它 realpath 是安全的。两种写法都登记：
+      // 会话记录里的 cwd 存的是 realpath 后的值，只认原样写法会把符号链接的白名单目录判成越界。
+      try {
+        const real = realpathSync(dir.path);
+        if (real !== dir.path) roots.push(real);
+      } catch {
+        // 目录已经不在了：保留原样写法，交给使用方报「不存在」。
+      }
+    }
+    this.baseRoots = [...roots, this.store.dir, join(this.store.dir, "uploads")];
     this.baseRootsAt = Date.now();
     return this.baseRoots;
   }

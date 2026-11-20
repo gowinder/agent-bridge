@@ -16,9 +16,27 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { FsScope } from "../fs-scope.js";
 import { toolSummaryOf } from "../tool-summary.js";
 
 const ANTIGRAVITY_DIR = join(homedir(), ".gemini", "antigravity-cli");
+
+/**
+ * 会话 cwd 可能来自转录：落在 `~/下载`、`~/文档` 这类受保护目录时，一次 stat 就是一次
+ * 系统授权弹窗。适配器没有白名单，只按主目录规则过闸门（CLI 自己的点目录照旧放行）。
+ */
+const cwdScope = new FsScope({ roots: () => [], log: (line) => console.log(line) });
+
+/** cwd 是否既在允许范围内、又真的存在。 */
+function cwdUsable(cwd: string | null | undefined): cwd is string {
+  if (!cwd) return false;
+  try {
+    cwdScope.assert(cwd, "adapter.cwd");
+  } catch {
+    return false;
+  }
+  return existsSync(cwd);
+}
 const SUMMARIES_DB = join(ANTIGRAVITY_DIR, "conversation_summaries.db");
 const CONVERSATIONS_DIR = join(ANTIGRAVITY_DIR, "conversations");
 const MAX_BLOCK_CHARS = 4_000;
@@ -462,7 +480,7 @@ export class AntigravityAdapter implements SessionAdapter {
   ): Promise<MessageSendResult> {
     return new Promise<MessageSendResult>((resolve, reject) => {
       // 同 dsh：工作目录不在了就报错，绝不退回主目录当工程根。
-      if (!cwd || !existsSync(cwd)) {
+      if (!cwdUsable(cwd)) {
         reject(new RpcError("not_found", `这个会话的工作目录已不存在：${cwd || "未知"}（不会退回到用户主目录）`));
         return;
       }

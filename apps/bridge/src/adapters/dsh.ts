@@ -26,9 +26,27 @@ import type {
   SessionSummary,
 } from "@craftstead/protocol";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { FsScope } from "../fs-scope.js";
 import { toolSummaryOf } from "../tool-summary.js";
 
 const DSH_HOME = join(homedir(), ".dsh");
+
+/**
+ * 会话 cwd 可能来自转录：落在 `~/下载`、`~/文档` 这类受保护目录时，一次 stat 就是一次
+ * 系统授权弹窗。适配器没有白名单，只按主目录规则过闸门（CLI 自己的点目录照旧放行）。
+ */
+const cwdScope = new FsScope({ roots: () => [], log: (line) => console.log(line) });
+
+/** cwd 是否既在允许范围内、又真的存在。 */
+function cwdUsable(cwd: string | null | undefined): cwd is string {
+  if (!cwd) return false;
+  try {
+    cwdScope.assert(cwd, "adapter.cwd");
+  } catch {
+    return false;
+  }
+  return existsSync(cwd);
+}
 const SESSIONS_DIR = join(DSH_HOME, "sessions");
 const SESSION_FILE = /^session\.v\d+\.jsonl\.zstd$/;
 const MAX_BLOCK_CHARS = 4_000;
@@ -533,7 +551,7 @@ export class DshAdapter implements SessionAdapter {
     if (!binary) throw new RpcError("adapter_unavailable", "未找到 dsh 可执行文件");
     const cwd = this.cwdOf(params.projectId);
     if (!cwd) throw new RpcError("invalid_params", "这个工程没有目录，无法新建 dsh 会话");
-    if (!existsSync(cwd)) throw new RpcError("invalid_params", `目录不存在：${cwd}`);
+    if (!cwdUsable(cwd)) throw new RpcError("invalid_params", `目录不存在或不在允许范围内：${cwd}`);
     const text = params.text.trim();
     if (!text) throw new RpcError("invalid_params", "第一条消息不能为空");
     // 只允许在已有会话的工程目录里新建，避免网页端指定任意目录启动 dsh。
@@ -682,7 +700,7 @@ export class DshAdapter implements SessionAdapter {
     return new Promise<MessageSendResult>((resolve, reject) => {
       // 工作目录不在了不能退回主目录：那等于让 CLI 把整个 ~ 当成工程根，
       // 而 ~/下载、~/音乐、~/照片都在 TCC 后面，一碰就弹授权，弹窗不点掉进程就一直挂着。
-      if (!entry.cwd || !existsSync(entry.cwd)) {
+      if (!cwdUsable(entry.cwd)) {
         reject(
           new RpcError(
             "not_found",

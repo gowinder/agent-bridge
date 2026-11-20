@@ -363,6 +363,12 @@ export class HostedSessionManager {
   private readonly stallCheckMs: number;
   /** 枚举收口：记录里的 cwd 可能早就从白名单里删了，不能直接 stat。 */
   private readonly fs: FsScope;
+  /**
+   * 白名单目录的两种写法：`~` 展开后的原样值，以及 realpath 之后的值。
+   * `record.cwd` 存的是 realpath 后的（`allowedPath` 的 canonical），只认原样值会把
+   * 符号链接的白名单目录判成越界，会话从此发不出消息。
+   */
+  private dirsCache: { at: number; list: { raw: string; real: string }[] } | null = null;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
   // Bridge 退出只断开 sessiond 连接：子进程继续由守护进程持有，重启后 attach 接上。
@@ -384,7 +390,10 @@ export class HostedSessionManager {
             spawnLocal(command, args, { cwd: spawnOptions.cwd, env: process.env }),
         });
     this.config = readConfig(this.stateDir);
-    this.fs = new FsScope({ roots: () => this.config.dirs.map(expandHome), log: this.log });
+    this.fs = new FsScope({
+      roots: () => this.allowDirs().flatMap((dir) => [dir.real, dir.raw]),
+      log: this.log,
+    });
     this.stallMs = options.stallMs ?? DEFAULT_STALL_MS;
     this.stallCheckMs = options.stallCheckMs ?? STALL_CHECK_MS;
     this.loadRecords();
@@ -400,6 +409,22 @@ export class HostedSessionManager {
     this.stallTimer = setInterval(() => this.checkStalls(), this.stallCheckMs);
     this.stallTimer.unref();
     process.once("exit", this.exitHandler);
+  }
+
+  /**
+   * 白名单目录的 raw / realpath 两种写法（缓存 5 秒）。
+   *
+   * 白名单是用户自己点过头的根，对它 realpath 是安全的；客户端的路径永远不 realpath，
+   * 见 `allowedPath()`。
+   */
+  private allowDirs(): { raw: string; real: string }[] {
+    if (this.dirsCache && Date.now() - this.dirsCache.at < 5_000) return this.dirsCache.list;
+    const list = this.config.dirs.map((entry) => {
+      const raw = expandHome(entry);
+      return { raw, real: canonical(raw) ?? raw };
+    });
+    this.dirsCache = { at: Date.now(), list };
+    return list;
   }
 
   configForClient(): HostedDirsResult {
@@ -446,6 +471,7 @@ export class HostedSessionManager {
   /** 设置界面改完 hosted.json 后重新读一次，不用重启 Bridge。 */
   reloadConfig(): void {
     this.config = readConfig(this.stateDir);
+    this.dirsCache = null;
   }
 
   /**
@@ -509,6 +535,8 @@ export class HostedSessionManager {
     }
     if (dirs.join("\n") !== this.config.dirs.join("\n")) {
       this.config = { ...this.config, dirs };
+      // 白名单换了，授权根缓存与闸门里的工程根立刻作废：否则刚被移除的目录还能建会话。
+      this.dirsCache = null;
       this.writeConfig();
       this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
     }
@@ -1466,6 +1494,21 @@ export class HostedSessionManager {
         this.log(`hosted: auto-resume gave up for ${record.id} after ${attempts} attempts`);
         continue;
       }
+      // 白名单改掉之后旧会话可能指着受保护目录：自动续跑不能绕过闸门起进程。
+      if (!this.cwdExists(record.cwd)) {
+        record.pendingText = undefined;
+        record.interrupted = true;
+        this.appendRecord(record, {
+          messageId: randomUUID(),
+          sessionId: record.id,
+          role: "system",
+          createdAt: Date.now(),
+          blocks: [{ type: "text", text: `工作目录不可用，没有自动续跑：${record.cwd}` }],
+        });
+        this.persistRecords();
+        this.log(`hosted: auto-resume skipped ${record.id}: 工作目录不可用 ${record.cwd}`);
+        continue;
+      }
       record.resumeAttempts = attempts + 1;
       this.persistRecords();
       try {
@@ -1667,6 +1710,10 @@ export class HostedSessionManager {
         /no conversation found/i.test(live.stderrTail)
       ) {
         this.log(`hosted ${record.id}: 会话记录不存在，改为新建`);
+        if (!this.cwdExists(record.cwd)) {
+          this.log(`hosted ${record.id}: 工作目录不可用，不再新建进程 ${record.cwd}`);
+          return;
+        }
         try {
           this.start(record, false);
           return;
@@ -2359,23 +2406,31 @@ export class HostedSessionManager {
   }
 
   /**
-   * 记录里的 cwd 还在不在。先过枚举闸门再 stat：白名单改掉之后，旧记录可能指着
+   * 记录里的 cwd 的状态。先过枚举闸门再 stat：白名单改掉之后，旧记录可能指着
    * `~/下载`、`~/文档` 这类受保护目录，直接 stat 就是一次系统授权弹窗。
+   *
+   * 越界与不存在要分开：前者是「白名单里没有它」，后者是「目录被删了」，
+   * 界面上引向的排查动作完全不同。
    */
-  private cwdExists(path: string): boolean {
+  private cwdState(path: string): "ok" | "missing" | "out-of-scope" {
     try {
       this.fs.assert(path, "hosted.cwd");
     } catch (error) {
-      // 越界：记过日志了，这里只是回答「不能往这个目录里调用」。
-      if (error instanceof FsScopeError) return false;
+      // 越界：日志已经在闸门里记过，这里只回答状态。
+      if (error instanceof FsScopeError) return "out-of-scope";
       throw error;
     }
-    return isDirectory(path);
+    return isDirectory(path) ? "ok" : "missing";
+  }
+
+  private cwdExists(path: string): boolean {
+    return this.cwdState(path) === "ok";
   }
 
   private summary(record: HostedRecord): SessionSummary {
     const live = this.live.get(record.id);
-    const dirExists = this.cwdExists(record.cwd);
+    const cwdState = this.cwdState(record.cwd);
+    const dirExists = cwdState === "ok";
     // 进程里真正生效的压缩预留量；和记录里的设置不一致说明还没重启。
     const effectiveReserve = live ? this.liveCompactionReserve(record) : undefined;
     const summary: SessionSummary = {
@@ -2409,7 +2464,12 @@ export class HostedSessionManager {
       ...(effectiveReserve !== undefined ? { compactionEffectiveReserveTokens: effectiveReserve } : {}),
       cwd: record.cwd,
     };
-    if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
+    if (!dirExists) {
+      summary.sendBlockedReason =
+        cwdState === "out-of-scope"
+          ? `工作目录已不在托管白名单里：${record.cwd}`
+          : `工作目录已不存在：${record.cwd}`;
+    }
     return summary;
   }
 
@@ -2420,10 +2480,16 @@ export class HostedSessionManager {
         `没有配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`,
       );
     }
-    const target = canonical(expandHome(input.trim()));
-    const allowed = this.config.dirs
-      .map((dir) => canonical(expandHome(dir)))
-      .filter((dir): dir is string => dir !== null);
+    const dirs = this.allowDirs();
+    const given = expandHome(input.trim());
+    // 先按字符串比（白名单的两种写法都认）：客户端可以把路径指到 `~/下载`、`~/音乐`，
+    // 对客户端路径做 realpath 就是一次系统授权弹窗 —— 不在白名单里就直接拒绝，
+    // 根本不需要碰文件系统。
+    const hit = dirs.find((dir) => dir.raw === given || dir.real === given);
+    const allowed = dirs.map((dir) => dir.real);
+    // 写法不一致（客户端给 `/var/...`、白名单里存 `/private/var/...`）时才解析一次。
+    // 解析前先过闸门：`~/下载` 这类路径在这一步就被拒，不会走到 realpath。
+    const target = hit ? hit.real : this.fs.check(given).ok ? canonical(given) : null;
     if (!target || !allowed.includes(target)) {
       throw new RpcError("unauthorized", `目录不在允许列表中：${input}（允许：${allowed.join("、") || "无"}）`);
     }
@@ -2561,8 +2627,12 @@ export class HostedSessionManager {
     const now = Date.now();
     for (const [id, live] of this.live) {
       if (live.finished) continue;
+      const record = this.records.get(id);
+      // 侧栏的「运行中」用的是 busyOf（含 pi 后台子代理），这里必须同一个口径，
+      // 否则子代理卡住时会话看起来在跑、却永远不会被判成卡住。
+      const busy = record ? this.busyOf(record) : live.busy;
       // 正在等网页回答权限问题不算卡住：那是人没回，不是进程不动。
-      if (!live.busy || live.pending || live.piPending) {
+      if (!busy || live.pending || live.piPending) {
         live.stalledSince = undefined;
         continue;
       }
