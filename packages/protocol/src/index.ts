@@ -806,6 +806,13 @@ export interface HostedSessionParams {
 export interface HostedStopResult {
   stopped: boolean;
   session?: SessionSummary;
+  /**
+   * 这台会话派生、但停止后仍未退出的进程 pid。
+   *
+   * 宿主进程的孙进程可能 setsid 逃出进程组（pi-subagents 的后台 runner 就是），
+   * 停不干净时不能默默返回成功，把 pid 报给调用方。
+   */
+  leftover?: number[];
 }
 
 export interface HostedInterruptResult {
