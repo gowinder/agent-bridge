@@ -763,4 +763,5 @@ export const DE: Record<string, string> = {
   "提问": "Fragen",
   "技能": "Skill",
   "停止任务": "Aufgabe stoppen",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} Ordner haben keinen macOS-Dateizugriff, daher schlagen Indexierung und Lesen fehl: erlaube die Abfrage am Mac oder füge sie in den Einstellungen der Menüleiste erneut hinzu",
 };

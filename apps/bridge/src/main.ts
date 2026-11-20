@@ -671,7 +671,7 @@ async function commandServe(): Promise<void> {
     setHostedConfig(patch) {
       if (Array.isArray(patch.dirs)) {
         const before = adapters.hostedConfig().dirs.length;
-        const info = adapters.setHostedDirs(patch.dirs);
+        const info = adapters.setHostedDirs(patch.dirs, patch.probe ?? []);
         recordHostEvent(`托管白名单：${before} 个目录 → ${info.dirs.length} 个目录`);
       }
       if (typeof patch.allowBypassPermissions === "boolean") {
@@ -833,6 +833,8 @@ async function commandServe(): Promise<void> {
     notifier.stop();
     for (const entry of sessions.values()) entry.session.dispose();
     sessions.clear();
+    // 托管会话的探测子进程也在这里收：SIGTERM 之后不该留下等人的 node -e。
+    adapters.dispose();
     relay?.close(1000, "shutdown");
     adminServer?.close();
     adminServer?.closeAllConnections();

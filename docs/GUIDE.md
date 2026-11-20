@@ -458,6 +458,39 @@ accepted them. A path that lands in `~/Downloads` is therefore rejected without
 the bridge touching it at all, which is what keeps a client from triggering a
 macOS folder-access prompt that blocks the process.
 
+Adding a directory is not the same as being able to read it. macOS grants access
+per folder the first time something actually reads it (`readdir`/`open`);
+`realpath` and `stat` — what adding a folder does — do not trigger the prompt. So
+the bridge probes each new allowlist entry right away, in a **child process**
+that reads the directory once:
+
+- the prompt therefore appears while you are sitting in front of the Mac, not in
+  the middle of a turn when nobody can click it (that is what used to hang a
+  whole session — a blocked prompt holds the reading call, and the bridge is
+  single-threaded);
+- a child process that nobody answers cannot block the bridge: after 20 s it is
+  killed and the folder stays `pending`;
+- probes are queued: exactly one at a time, so several folders added in one go
+  produce one prompt after another instead of a stack of prompts;
+- the result is stored in `hosted/dir-auth.json` as `ok` or `denied` —
+  `pending` is deliberately **not** stored, so it asks again next time;
+- the menu bar settings row shows `等待授权…` / `未授权`, and the web "new
+  session" hint counts folders that are not authorised.
+
+Adding a folder whose state is already `ok` does not prompt again. Adding a
+folder that is `denied` re-asks, but only through the explicit `probe` list that
+the menu bar sends when you re-add it with `+` — rewriting the whole allowlist
+(removing one folder) does not re-prompt the others, which is the way to re-ask
+after ticking the app in System Settings → Privacy & Security → Files and
+Folders.
+
+Editing `hosted.json` by hand does **not** probe: those folders stay `unknown`
+and the menu bar shows them as not yet authorised, because a probe there would
+pop a prompt at an arbitrary time (including login). Add folders from the menu
+bar settings instead. 30 s after start the bridge re-probes the folders it
+already had as `ok` — that read is free when the permission is still granted and
+downgrades the folder to `denied` when it was revoked in System Settings.
+
 Only allowlisted directories appear as hosted projects. Changing the file
 requires restarting the bridge.
 
@@ -587,6 +620,7 @@ Default state directory:
 | `hosted.json` | Hosted allowlist and policy (you create this) |
 | `hosted/<id>.jsonl` | Hosted transcripts |
 | `hosted/sessions.json` | Hosted session registry |
+| `hosted/dir-auth.json` | Per-allowlist-folder macOS file-access result (`ok` / `denied`); `pending` is never stored |
 | `admin-port` | Admin port for this state directory |
 | `admin-token` | Admin bearer token, mode 0600 |
 

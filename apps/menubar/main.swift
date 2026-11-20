@@ -65,6 +65,8 @@ struct HostedDir: Decodable {
     let exists: Bool
     /// 用这个目录的托管会话数。
     let sessionCount: Int
+    /// 目录到底能不能读：ok / denied / pending / unknown（老 Bridge 没有这个字段）。
+    let auth: String?
 
     /// 老 Bridge 的 `/hosted` 给的是路径字符串数组，读出来当「存在、0 个会话」，设定页不至于空掉。
     init(from decoder: Decoder) throws {
@@ -76,18 +78,20 @@ struct HostedDir: Decodable {
         self.init(
             path: try keyed.decode(String.self, forKey: .path),
             exists: try keyed.decodeIfPresent(Bool.self, forKey: .exists) ?? true,
-            sessionCount: try keyed.decodeIfPresent(Int.self, forKey: .sessionCount) ?? 0
+            sessionCount: try keyed.decodeIfPresent(Int.self, forKey: .sessionCount) ?? 0,
+            auth: try keyed.decodeIfPresent(String.self, forKey: .auth)
         )
     }
 
-    init(path: String, exists: Bool, sessionCount: Int) {
+    init(path: String, exists: Bool, sessionCount: Int, auth: String? = nil) {
         self.path = path
         self.exists = exists
         self.sessionCount = sessionCount
+        self.auth = auth
     }
 
     private enum CodingKeys: String, CodingKey {
-        case path, exists, sessionCount
+        case path, exists, sessionCount, auth
     }
 }
 
@@ -381,8 +385,11 @@ final class AdminClient {
     }
 
     /// 整份替换托管白名单：远程设备没有这条通路，只有本机 admin 接口能改。
-    func setHostedDirs(_ dirs: [String]) async throws -> HostedConfig {
-        let data = try await request("POST", "/hosted", body: ["dirs": dirs])
+    func setHostedDirs(_ dirs: [String], probe: [String] = []) async throws -> HostedConfig {
+        var body: [String: Any] = ["dirs": dirs]
+        // 显式要求 Bridge 重新探一次这些目录：已在白名单但没授权时，重新添加是唯一的补救动作。
+        if !probe.isEmpty { body["probe"] = probe }
+        let data = try await request("POST", "/hosted", body: body)
         return try JSONDecoder().decode(HostedConfig.self, from: data)
     }
 }
@@ -1983,17 +1990,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             name.font = .monospacedSystemFont(ofSize: 12, weight: .regular)
             name.lineBreakMode = .byTruncatingMiddle
             name.toolTip = dir.path
-            name.frame = NSRect(x: 14, y: 7, width: width - 176, height: 16)
+            name.frame = NSRect(x: 14, y: 7, width: width - 250, height: 16)
             row.addSubview(name)
 
-            let facts = NSTextField(labelWithString: dir.exists
-                ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
-                : T("目录已删除"))
+            // 授权状态比会话数重要：目录在系统层面读不了时，会话数量对用户没有意义。
+            let factsText: String
+            let factsColor: NSColor
+            var factsTip: String?
+            switch dir.auth {
+            case "denied":
+                factsText = T("未授权")
+                factsColor = .systemRed
+                factsTip = T("系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。")
+            case "pending":
+                factsText = T("等待授权…")
+                factsColor = .systemOrange
+                factsTip = T("已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。")
+            case .some("unknown"):
+                // 手改 hosted.json 加进来的目录不会被探测，读到 unknown：不能显示成一切正常。
+                factsText = T("未授权")
+                factsColor = .systemOrange
+                factsTip = T("这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。")
+            case .some("ok"), nil:
+                factsText = dir.exists
+                    ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
+                    : T("目录已删除")
+                factsColor = dir.exists ? .tertiaryLabelColor : .systemOrange
+            default:
+                factsText = dir.exists
+                    ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
+                    : T("目录已删除")
+                factsColor = dir.exists ? .tertiaryLabelColor : .systemOrange
+            }
+            let facts = NSTextField(labelWithString: factsText)
             facts.font = .systemFont(ofSize: 11)
-            facts.textColor = dir.exists ? .tertiaryLabelColor : .systemOrange
+            facts.textColor = factsColor
+            facts.toolTip = factsTip
             facts.alignment = .right
             facts.lineBreakMode = .byTruncatingTail
-            facts.frame = NSRect(x: width - 166, y: 7, width: 96, height: 16)
+            facts.frame = NSRect(x: width - 236, y: 7, width: 166, height: 16)
             row.addSubview(facts)
 
             // 用系统设置里那种红色减号，比一个小方块按钮轻。
@@ -2017,6 +2052,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             doc.addSubview(row)
         }
         doc.frame.size.height = max(CGFloat(dirs.count) * rowHeight + 2, 96)
+    }
+
+    /// 目录授权探测在 Bridge 侧异步进行（弹窗要等人点），这里补几次延迟刷新把结果读回来。
+    private func watchDirAuth() {
+        for delay in [3.0, 10.0, 25.0] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                guard (self.hostedConfig?.dirs ?? []).contains(where: { $0.auth == "pending" }) else { return }
+                Task {
+                    await self.loadHostedConfig()
+                    self.renderSettings()
+                }
+            }
+        }
     }
 
     /// 把一个目录移出白名单；已有会话保留，只是不能再从这里新建。
@@ -2081,17 +2130,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let existing = (hostedConfig?.dirs ?? []).map(\.path)
         var merged = existing
         for path in more where !merged.contains(path) { merged.append(path) }
-        guard merged.count != existing.count else {
+        // 已在白名单里但还没授权（denied / pending / unknown）的目录要放行：重新添加一次
+        // 是用户唯一能重新触发系统授权弹窗的动作。
+        let reask = more.filter { path in
+            guard let dir = hostedConfig?.dirs.first(where: { $0.path == path }) else { return false }
+            return dir.auth != nil && dir.auth != "ok"
+        }
+        guard merged.count != existing.count || !reask.isEmpty else {
             alert(T("目录已在白名单里"), TF(T("这 %d 个目录都已经在托管白名单中。"), more.count))
             return
         }
         Task {
             do {
-                hostedConfig = try await client.setHostedDirs(merged)
+                hostedConfig = try await client.setHostedDirs(merged, probe: reask)
                 renderSettings()
                 // 白名单变了，网页的工程列表也得跟着刷新。
                 snapshot = nil
                 await refresh()
+                // 授权探测是异步的：弹窗要等用户点过才有结果，隔一会儿再拉一次状态。
+                watchDirAuth()
             } catch {
                 alert(T("保存白名单失败"), error.localizedDescription)
                 renderSettings()

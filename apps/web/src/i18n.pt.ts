@@ -764,4 +764,5 @@ export const PT: Record<string, string> = {
   "提问": "Perguntar",
   "技能": "Habilidade",
   "停止任务": "Parar a tarefa",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} pasta(s) não têm autorização de ficheiros do macOS, por isso a indexação e a leitura falham: permita o pedido no Mac ou adicione-as de novo nas definições da barra de menus",
 };

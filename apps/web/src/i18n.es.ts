@@ -750,4 +750,5 @@ export const ES: Record<string, string> = {
   "提问": "Preguntar",
   "技能": "Habilidad",
   "停止任务": "Detener la tarea",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} carpeta(s) no tienen permiso de archivos de macOS, así que la indexación y la lectura fallarán: permite el aviso en el Mac o vuelve a añadirlas en los ajustes de la barra de menús",
 };
