@@ -146,6 +146,24 @@ export function piSubagentRunning(piSessionId: string | undefined, root = piSuba
   );
 }
 
+/**
+ * 这个 pi 会话派生的、还在跑的后台子代理 runner 的 pid。
+ *
+ * 停止会话时用来点名：async runner 是 detached 起的，不在会话的进程组里，
+ * 光按进程组杀收不到它，得按 pid 单独收。
+ */
+export function piSubagentRunnerPids(piSessionId: string | undefined, root = piSubagentRoot()): number[] {
+  if (!piSessionId) return [];
+  const pids: number[] = [];
+  for (const run of scanRuns(root)) {
+    if (!sameSession(run.status.sessionId, piSessionId)) continue;
+    if (!isRunning(run.status, run.dirMtimeMs)) continue;
+    const pid = run.status.pid;
+    if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 1) pids.push(pid);
+  }
+  return pids;
+}
+
 /** 这个 pi 会话派生的某次 run 的目录；runId 不合法、或 run 属于别的会话时返回 null。 */
 export function piRunDir(piSessionId: string, runId: string, root = piSubagentRoot()): string | null {
   // runId 会拼进路径：只收 UUID 这类普通标识符，挡掉 `../`。

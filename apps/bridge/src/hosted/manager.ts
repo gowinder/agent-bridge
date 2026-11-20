@@ -59,9 +59,10 @@ import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
 import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
-import { MAX_PI_TASKS, piSubagentRunning, piSubagentTasks } from "./pi-subagents.js";
+import { MAX_PI_TASKS, piSubagentRunning, piSubagentRunnerPids, piSubagentTasks } from "./pi-subagents.js";
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
+import { SessionTrees, killTree, snapshotProcesses, subtree } from "./process-tree.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
 import { FsScope, FsScopeError } from "../fs-scope.js";
 
@@ -76,6 +77,10 @@ const STALL_CHECK_MS = 15_000;
 const MAX_BLOCK_CHARS = 4_000;
 export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
+/** 每隔这么久把在跑会话的后代登进内存：detached 出去的孙进程停止时只能靠这份表找回。 */
+const TREE_SCAN_MS = 1_000;
+/** 进程自己退出（不是被停）时，给登记表里的残留后代下 SIGTERM 到 SIGKILL 的宽限。 */
+const ORPHAN_GRACE_MS = 500;
 /** 补算老会话的上下文用量时只读转录尾部这么多字节。 */
 const TRANSCRIPT_TAIL_BYTES = 262_144;
 /**
@@ -356,6 +361,16 @@ export class HostedSessionManager {
   private readonly records = new Map<string, HostedRecord>();
   private readonly messages = new Map<string, MessageRecord[]>();
   private readonly live = new Map<string, LiveProcess>();
+  /**
+   * 每个会话的后代 pid 登记表。
+   *
+   * 托管进程派生的子代理 runner 是 detached 起的（自成一个进程组），停会话时按组杀
+   * 收不到它们，所以跑着的时候就把后代 pid 记下来，停的时候按 pid 点名。
+   */
+  private readonly trees = new SessionTrees();
+  /** 正在被我们主动收尾的会话：退出事件不必再扫一遍（停止流程自己会核对）。 */
+  private readonly stopping = new Set<string>();
+  private treeTimer: NodeJS.Timeout | null = null;
   private sweeper: NodeJS.Timeout | null = null;
   /** 无输出检查：只负责把「疑似卡住」标出来，从不替用户点掉系统弹窗。 */
   private stallTimer: NodeJS.Timeout | null = null;
@@ -841,8 +856,9 @@ export class HostedSessionManager {
   async remove(sessionId: string): Promise<void> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
-    this.kill(record.id);
-    await this.stopInSessiond(record.id);
+    // 删记录前把后代收干净：记录一删，子代理 runner 的归属就查不到了。
+    const { leftover } = await this.teardown(record.id);
+    if (leftover.length > 0) this.log(`hosted: remove ${record.id} 仍有后代没停掉：${leftover.join(", ")}`);
     this.messages.delete(record.id);
     try {
       rmSync(this.transcriptPath(record.id), { force: true });
@@ -850,6 +866,8 @@ export class HostedSessionManager {
       this.log(`hosted: remove transcript failed: ${String(error)}`);
     }
     removePiAgentDir(this.piAgentDirOf(record.id));
+    this.trees.forget(record.id);
+    this.stopping.delete(record.id);
     this.records.delete(record.id);
     this.persistRecords();
     this.log(`hosted: removed ${record.id}`);
@@ -896,10 +914,16 @@ export class HostedSessionManager {
     // 用户主动关掉的会话不该在 Bridge 重启后被自动续跑；kill 本身不写注册表。
     record.pendingText = undefined;
     this.persistRecords();
-    const tracked = this.kill(record.id);
-    // Bridge 没跟踪到、但守护进程里还跑着的进程同样要停。
-    const orphan = await this.stopInSessiond(record.id);
-    return { stopped: tracked || orphan, session: this.summary(record) };
+    // 进程组收不到 setsid 出去的后台子代理（pi-subagents 的后台 runner 就是），
+    // teardown 会按 pid 逐个收，并把收不掉的 pid 带出来。
+    const { leftover, stopped } = await this.teardown(record.id);
+    const result: HostedStopResult = { stopped, session: this.summary(record) };
+    if (leftover.length > 0) {
+      // 停不干净不能默默返回成功：把 pid 交出去，日志里也留一条。
+      this.log(`hosted: stop ${record.id} 还有 ${leftover.length} 个后代进程没杀掉：${leftover.join(", ")}`);
+      result.leftover = leftover;
+    }
+    return result;
   }
 
   /** 网页上的模型选择：托管会话可以从网页换模型，换完下一条消息按新模型 resume。 */
@@ -960,10 +984,15 @@ export class HostedSessionManager {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
     }
     // 先停进程再改记录：停不掉就报错，别让界面显示新模型而进程还跑着旧的。
-    if (live) this.kill(record.id);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
     // 换模型必须让旧进程真的退出，否则下一条消息会接回还在跑的那一个，模型没换。
     // 守护进程里没有跟踪到的旧进程（上一代 Bridge 留下的）也只能由它杀掉。
-    await this.stopInSessiond(record.id, true);
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     if (model) record.model = model;
     else delete record.model;
     // 实际模型是上一轮 init 报的，换了模型旧值就作废，下次运行重新记录。
@@ -1018,8 +1047,13 @@ export class HostedSessionManager {
     } else {
       removePiAgentDir(agentDir);
     }
-    if (live) this.kill(record.id);
-    await this.stopInSessiond(record.id, true);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     if (model) record.subagentModel = model;
     else delete record.subagentModel;
     if (thinking) record.subagentThinking = thinking;
@@ -1054,8 +1088,13 @@ export class HostedSessionManager {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换思考等级");
     }
     // 进程不在、或者要改回跟随 pi 设置：停掉旧进程，下一条消息按新参数启动。
-    if (live) this.kill(record.id);
-    await this.stopInSessiond(record.id, true);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     if (level) record.thinking = level;
     else delete record.thinking;
     this.touch(record);
@@ -1101,8 +1140,13 @@ export class HostedSessionManager {
     }
     // 窗口还未知（还没跑过一轮、配置里也查不到）时先不建目录，等下次启动再算。
     if (!prepared) removePiAgentDir(agentDir);
-    if (live) this.kill(record.id);
-    await this.stopInSessiond(record.id, true);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     delete record.compactionReserveTokens;
     if (value !== null) record.compactionTriggerPercent = value;
     else delete record.compactionTriggerPercent;
@@ -1295,8 +1339,7 @@ export class HostedSessionManager {
     if (record.agent === "pi") {
       // 后台子代理跑在 pi 进程内部，abort 停不掉，只能把进程停掉。
       if (background) {
-        this.kill(record.id);
-        void this.stopInSessiond(record.id);
+        void this.teardown(record.id);
         // 那一轮是正常收尾的，不置 interrupted：否则网页会把最后一条回复画成「已停止」。
         record.pendingText = undefined;
         this.appendRecord(record, {
@@ -1543,6 +1586,10 @@ export class HostedSessionManager {
     this.sweeper = null;
     if (this.stallTimer) clearInterval(this.stallTimer);
     this.stallTimer = null;
+    if (this.treeTimer) clearInterval(this.treeTimer);
+    this.treeTimer = null;
+    this.trees.clear();
+    this.stopping.clear();
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
     this.sessiond?.close();
@@ -1659,6 +1706,10 @@ export class HostedSessionManager {
       resumed: resume,
     };
     this.live.set(record.id, live);
+    // 立刻登记根进程并开始盯后代：托管进程派生的子代理 runner 是 detached 起的，
+    // 停会话时只能按 pid 点名，晚一步它就 re-parent 到 pid 1 了。
+    this.rememberTrees();
+    this.watchTrees();
     if (record.agent === "pi") this.attachPi(record, live);
     child.stdout?.setEncoding?.("utf8");
     // RemoteChild 会把 sessiond 的 seq 作为第二个参数带上，用来推进 ack。
@@ -1699,6 +1750,10 @@ export class HostedSessionManager {
       if (current === live) this.live.delete(record.id);
       if (live.finished) return;
       live.finished = true;
+      // 进程自己退了（正常收尾、崩溃、换模型重启）：登记表里可能还留着 setsid 出去的
+      // 后台子代理，一并收掉。用此刻的快照，后面重启的新进程不能被算进来。
+      // 主动停止时停止流程自己会核对，这里不用重复扫。
+      if (!this.stopping.has(record.id)) void this.reapOrphans(record.id, this.trees.known(record.id));
       // 会话记录从来没生成过（例如上次 spawn 直接失败）时，--resume 会立刻退出；
       // 这种会话改走 --session-id 新建一次，用户不必手动删掉重来。
       if (
@@ -2596,6 +2651,7 @@ export class HostedSessionManager {
     return record ?? null;
   }
 
+  /** 同步兜底：只发进程组信号，给进程退出前的收尾用；真正收整棵树走 teardown。 */
   private kill(id: string): boolean {
     const live = this.live.get(id);
     if (!live) return false;
@@ -2615,8 +2671,176 @@ export class HostedSessionManager {
     return true;
   }
 
+  /**
+   * 停一个会话的进程，以及它派生的整棵树。
+   *
+   * 顺序有讲究：先登记后代、再把整棵树冻住杀掉（killTree 里做），守护进程那层放最后。
+   * 反过来先杀主进程的话，它临死前派生的子代理会 re-parent 到 pid 1，ppid 线索断掉，
+   * 之后就再也找不回来了 —— 这正是「停掉会话后子代理还在跑」的成因。
+   */
+  private async teardown(
+    id: string,
+    options: { tree?: boolean; strict?: boolean } = {},
+  ): Promise<{ leftover: number[]; stopped: boolean }> {
+    this.stopping.add(id);
+    const live = this.live.get(id);
+    const rootPid = live?.child.pid;
+    let stopped = live !== undefined;
+    const leftover: number[] = [];
+    try {
+      if (live) {
+        live.killed = true;
+        // 根进程还活着时 ppid 链才完整：先登记再动手。
+        this.rememberTrees();
+        this.live.delete(id);
+        try {
+          live.child.stdin?.end();
+        } catch {
+          // ignore
+        }
+      }
+      const roots = typeof rootPid === "number" && rootPid > 1 ? [rootPid] : [];
+      // 不 await：endTree 的同步段就把整棵树 SIGSTOP 冻住了，冻结之后根进程不可能再
+      // 派生新进程，所以下面的进程组信号可以立刻发，不会留出赛跑窗口。
+      const tree = options.tree === false ? null : this.endTree(id, roots);
+      // 进程组级别的兜底：万一还有没登记到的后代。冻住的进程会先挂住这个信号，
+      // 等 killTree 放行（SIGCONT）后才真正退出。
+      if (live) {
+        killProcess(live.child, "SIGTERM");
+        const timer = setTimeout(() => {
+          killProcess(live.child, "SIGKILL");
+        }, KILL_GRACE_MS);
+        timer.unref();
+      }
+      if (tree) {
+        const result = await tree;
+        leftover.push(...result.leftover);
+        if (result.killed > 0) stopped = true;
+      }
+      if (await this.stopInSessiond(id, options.strict === true)) stopped = true;
+      if (options.tree !== false) {
+        // 守护进程里那份可能带着我们没见过的后代：按它的 pid 再收一遍。
+        const again = await this.endTree(id);
+        for (const pid of again.leftover) if (!leftover.includes(pid)) leftover.push(pid);
+      }
+      return { leftover, stopped };
+    } finally {
+      this.stopping.delete(id);
+    }
+  }
+
+  /**
+   * 收掉一个会话的整棵树：登记表里的后代 + 会话根 + 子代理 runner。
+   *
+   * SIGTERM → 宽限 → SIGKILL → 核对都由 killTree 负责；杀不掉的 pid 会带出去，
+   * 调用方必须显式报出去，不能当成停成功。
+   */
+  private async endTree(id: string, roots: number[] = []): Promise<{ leftover: number[]; killed: number }> {
+    const registered = this.trees.known(id);
+    const rootPid = this.live.get(id)?.child.pid;
+    if (typeof rootPid === "number" && rootPid > 1) roots = [...roots, rootPid];
+    else if (roots.length === 0) {
+      // Bridge 没有 live 条目（重启后还没 attach 回来）：pid 只有守护进程知道。
+      const daemon = await this.daemonPid(id);
+      if (daemon) roots = [...roots, daemon];
+    }
+    const extra = this.subagentRunnerPids(id);
+    // 先按副本干活再清表：清理期间重启的新进程不会被算进来。
+    this.trees.forget(id);
+    if (registered.size === 0 && roots.length === 0 && extra.length === 0) return { leftover: [], killed: 0 };
+    const result = await killTree(registered, roots, extra, {
+      graceMs: KILL_GRACE_MS,
+      forbidden: this.foreignPids(id),
+      log: (line) => this.log(`hosted ${id}: ${line}`),
+    });
+    if (result.terminated.length > 0) this.log(`hosted ${id}: 收掉 ${result.terminated.length} 个后代进程`);
+    return { leftover: result.leftover, killed: result.terminated.length };
+  }
+
+  /**
+   * 会话进程自己退出（正常收尾、崩溃、换模型重启）时收掉它还留着的后代。
+   *
+   * 用退出那一刻的登记表快照：随后可能立刻按新参数重启，不能把新进程的子孙算进来。
+   */
+  private async reapOrphans(id: string, registered: Map<number, string>): Promise<void> {
+    const extra = this.subagentRunnerPids(id);
+    this.trees.forget(id);
+    if (registered.size === 0 && extra.length === 0) return;
+    const result = await killTree(registered, [], extra, {
+      graceMs: ORPHAN_GRACE_MS,
+      forbidden: this.foreignPids(id),
+      log: (line) => this.log(`hosted ${id}: ${line}`),
+    });
+    if (result.terminated.length > 0) {
+      this.log(`hosted ${id}: 进程已退出，收掉 ${result.terminated.length} 个残留后代`);
+    }
+    if (result.leftover.length > 0) {
+      this.log(`hosted ${id}: 进程已退出，仍有后代没停掉：${result.leftover.join(", ")}`);
+    }
+  }
+
+  /** 这个会话派生的、还在跑的后台子代理 runner 的 pid（它们不在会话进程组里）。 */
+  private subagentRunnerPids(id: string): number[] {
+    const record = this.records.get(id);
+    if (!record || record.agent !== "pi") return [];
+    return this.piSessionIds(record).flatMap((piId) => piSubagentRunnerPids(piId));
+  }
+
+  /** 别的会话的进程：收自己的时候绝不能误伤。 */
+  private foreignPids(id: string): number[] {
+    const pids: number[] = [];
+    for (const [other, live] of this.live) {
+      if (other === id) continue;
+      if (typeof live.child.pid === "number") pids.push(live.child.pid);
+      for (const pid of this.trees.known(other).keys()) pids.push(pid);
+    }
+    return pids;
+  }
+
+  /** 守护进程里记着的会话 pid：Bridge 重启后还没 attach 回来时，只能问它。 */
+  private async daemonPid(id: string): Promise<number | undefined> {
+    if (!this.sessiond) return undefined;
+    try {
+      const infos = await this.sessiond.list();
+      const info = infos.find((item) => stripPrefix(item.sessionId) === id);
+      return info?.running ? info.pid ?? undefined : undefined;
+    } catch (error) {
+      this.log(`hosted: 查守护进程里的 ${id} 失败：${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /** 把在跑会话的后代登记进内存表：停止时按 pid 点名，不能只靠进程组。 */
+  private rememberTrees(): void {
+    const roots = new Map<string, number>();
+    for (const [id, live] of this.live) {
+      const pid = live.child.pid;
+      if (typeof pid === "number" && pid > 1) roots.set(id, pid);
+    }
+    if (roots.size === 0) return;
+    const nodes = snapshotProcesses();
+    for (const [id, pid] of roots) this.trees.remember(id, [pid], nodes);
+  }
+
+  private watchTrees(): void {
+    if (this.treeTimer) return;
+    this.treeTimer = setInterval(() => {
+      if (this.live.size === 0) {
+        if (this.treeTimer) clearInterval(this.treeTimer);
+        this.treeTimer = null;
+        return;
+      }
+      this.rememberTrees();
+    }, TREE_SCAN_MS);
+    this.treeTimer.unref();
+  }
+
   private stopAll(): void {
-    for (const id of [...this.live.keys()]) this.kill(id);
+    for (const id of [...this.live.keys()]) {
+      // 同步兜底先发进程组信号，再异步收整棵树（能跑完就收干净）。
+      this.kill(id);
+      void this.teardown(id);
+    }
   }
 
   /**
@@ -2663,9 +2887,8 @@ export class HostedSessionManager {
       if (record.agent === "pi" && this.piSessionIds(record).some((sid) => piSubagentRunning(sid))) continue;
       if (now - record.lastActiveAt <= this.config.idleTimeoutMs) continue;
       this.log(`hosted: idle timeout, stopping ${id}`);
-      this.kill(id);
-      // 接回过的子进程万一没停掉，守护进程里还会留着：下次发消息就会接回旧进程。
-      void this.stopInSessiond(id);
+      // 接回过的子进程、以及它派生的子代理，都要一起收掉。
+      void this.teardown(id);
     }
   }
 
