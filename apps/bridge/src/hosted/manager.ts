@@ -612,6 +612,8 @@ export class HostedSessionManager {
 
   private finishProbe(path: string, auth: DirAuth, note: string): void {
     this.probing.delete(path);
+    // 探测期间目录被移出白名单：结果作废（不能把一个已经删掉的目录写回 dir-auth.json）。
+    if (!this.dirAuth.has(path)) return;
     if (this.dirAuth.get(path) !== "pending") return;
     this.dirAuth.set(path, auth);
     this.persistDirAuth();
@@ -716,6 +718,18 @@ export class HostedSessionManager {
       throw new RpcError("invalid_params", `托管目录最多 ${MAX_HOSTED_DIRS} 个`);
     }
     if (dirs.join("\n") !== this.config.dirs.join("\n")) {
+      // 被移出白名单的目录：授权状态与排队的探测一起清掉，免得「已经删掉的目录」还在
+      // 等授权、还在写 dir-auth.json。正在跑的那个不硬杀（弹窗已经弹出去了，杀掉只是
+      // 让它闪一下），结果回来时由 finishProbe 的守卫丢弃。
+      const kept = new Set(dirs);
+      for (const path of [...this.dirAuth.keys()]) {
+        if (kept.has(path)) continue;
+        this.dirAuth.delete(path);
+        this.probing.delete(path);
+        const queued = this.probeQueue.indexOf(path);
+        if (queued >= 0) this.probeQueue.splice(queued, 1);
+      }
+      this.persistDirAuth();
       this.config = { ...this.config, dirs };
       // 白名单换了，授权根缓存与闸门里的工程根立刻作废：否则刚被移除的目录还能建会话。
       this.dirsCache = null;

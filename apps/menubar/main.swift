@@ -1993,14 +1993,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             // 授权状态比会话数重要：目录在系统层面读不了时，会话数量对用户没有意义。
             let factsText: String
             let factsColor: NSColor
+            var factsTip: String?
             switch dir.auth {
             case "denied":
                 factsText = T("未授权")
                 factsColor = .systemRed
+                factsTip = T("系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。")
             case "pending":
                 factsText = T("等待授权…")
                 factsColor = .systemOrange
-            case .some("ok"), .some("unknown"), nil:
+                factsTip = T("已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。")
+            case .some("unknown"):
+                // 手改 hosted.json 加进来的目录不会被探测，读到 unknown：不能显示成一切正常。
+                factsText = T("未授权")
+                factsColor = .systemOrange
+                factsTip = T("这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。")
+            case .some("ok"), nil:
                 factsText = dir.exists
                     ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
                     : T("目录已删除")
@@ -2014,9 +2022,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let facts = NSTextField(labelWithString: factsText)
             facts.font = .systemFont(ofSize: 11)
             facts.textColor = factsColor
-            if dir.auth == "denied" {
-                facts.toolTip = T("系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。")
-            }
+            facts.toolTip = factsTip
             facts.alignment = .right
             facts.lineBreakMode = .byTruncatingTail
             facts.frame = NSRect(x: width - 236, y: 7, width: 166, height: 16)

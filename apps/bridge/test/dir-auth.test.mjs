@@ -189,3 +189,29 @@ test("系统拒绝（EPERM/EACCES）报「缺授权」，别的错误不冒充",
   assert.equal(permissionError(Object.assign(new Error("gone"), { code: "ENOENT" })), null);
   assert.equal(permissionError(new Error("boom")), null);
 });
+
+test("目录移出白名单后，授权状态与排队的探测一起清掉", async (t) => {
+  let release;
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const probes = [];
+  const h = harness(t, {
+    probeDir: (path) => {
+      probes.push(path);
+      return pending;
+    },
+  });
+  h.manager.setDirs([h.allowed, h.other]);
+  // 串行：第一个在跑，第二个在排队。
+  assert.equal(probes.length, 1);
+  h.manager.setDirs([h.allowed]);
+  assert.equal(authOf(h.manager, h.other), undefined);
+  release("ok");
+  await settle();
+  assert.equal(authOf(h.manager, h.allowed), "ok");
+  // 被移除的目录不该再弹一次框。
+  assert.equal(probes.length, 1);
+  const stored = JSON.parse(readFileSync(join(h.stateDir, "hosted", "dir-auth.json"), "utf8"));
+  assert.deepEqual(stored, { [h.allowed]: "ok" });
+});

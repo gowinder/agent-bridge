@@ -610,6 +610,7 @@ Default state directory:
 | `hosted.json` | Hosted allowlist and policy (you create this) |
 | `hosted/<id>.jsonl` | Hosted transcripts |
 | `hosted/sessions.json` | Hosted session registry |
+| `hosted/dir-auth.json` | Per-allowlist-folder macOS file-access result (`ok` / `denied`); `pending` is never stored |
 | `admin-port` | Admin port for this state directory |
 | `admin-token` | Admin bearer token, mode 0600 |
 
