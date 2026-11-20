@@ -212,8 +212,10 @@ export class PiAdapter implements SessionAdapter {
     if (!text.trim()) throw new RpcError("invalid_params", "消息不能为空");
     const binary = this.binary();
     if (!binary) throw new RpcError("adapter_unavailable", "未找到 pi 可执行文件");
+    // 没有工作目录就别起进程：静默退回 Bridge 自己的 cwd 会把会话塞进错误的工程根。
+    if (!record.cwd) throw new RpcError("invalid_params", "这个会话没有工作目录，无法发送");
     const child = spawn(binary, ["-p", "--session", record.path], {
-      cwd: record.cwd || process.cwd(),
+      cwd: record.cwd,
       env: process.env,
       stdio: ["pipe", "ignore", "ignore"],
     });

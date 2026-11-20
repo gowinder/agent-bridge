@@ -495,6 +495,12 @@ export interface SessionSummary {
   /** The client is blocked on a question only the user can answer (AskUserQuestion). */
   needsDecision?: boolean;
   /**
+   * 托管会话忙着一轮但已经很久没有输出了（毫秒时间戳，卡住判定成立的那一刻）。
+   * 最常见的原因就是某个子进程正挂在 macOS 的「文件与文件夹」授权弹窗上；
+   * Bridge 只把它标出来，不会替用户点掉弹窗。
+   */
+  stalledSince?: number;
+  /**
    * 终端会话停在一个提问上，但 Bridge 能通过 herdr 面板按键替你选中：
    * 网页的选项按钮可点，点击走 `message.send`，由 Bridge 换算成 ↓/Enter。
    */

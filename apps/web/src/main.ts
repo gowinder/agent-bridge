@@ -2132,6 +2132,9 @@ function dockStatePills(session: SessionSummary): HTMLElement[] {
     pills.push(
       el("span", { className: "pill tiny busy" }, [el("span", { className: "spinner" }), document.createTextNode(tr("运行中"))]),
     );
+    // 忙着一轮但很久没有输出：多半是子进程挂在系统授权弹窗上，界面必须说出来，
+    // 否则用户看到的就是「在跑」却永远不动。
+    if (session.stalledSince) pills.push(el("span", { className: "pill tiny warn", text: tr("疑似卡住") }));
   } else if (session.needsDecision) {
     pills.push(el("span", { className: "pill tiny warn", text: tr("待回答") }));
   }
@@ -2148,6 +2151,7 @@ function dockStateKey(session: SessionSummary): string {
     session.live ? 1 : 0,
     unreadAt(session.sessionId) !== undefined ? 1 : 0,
     session.needsDecision ? 1 : 0,
+    session.stalledSince ? 1 : 0,
     // 历史行右侧写着「· 3 分钟前」：只看状态会让这串时间停在上次整页重绘那一刻。
     Math.floor(session.updatedAt / 60_000),
   ].join(":");

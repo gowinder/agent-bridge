@@ -242,8 +242,9 @@ export class ClaudeCodeCliAdapter extends ClaudeCodeAdapter {
     if (record.permissionMode && !RESUME_UNSAFE_MODES.has(record.permissionMode)) {
       args.push("--permission-mode", record.permissionMode);
     }
+    if (!record.cwd) throw new RpcError("invalid_params", "这个会话没有工作目录，无法发送");
     const child = spawn(cli, args, {
-      cwd: record.cwd || process.cwd(),
+      cwd: record.cwd,
       env: process.env,
       stdio: ["pipe", "ignore", "ignore"],
     });

@@ -447,10 +447,44 @@ claude -p
 
 ### 8.4 Directory allowlist
 
-`hosted.json` `dirs` are absolute paths, `~`-expanded and `realpath`ed before
-comparison, so a symlink cannot escape the allowlist. Only allowlisted
-directories appear as hosted projects. Changing the file requires restarting the
-bridge.
+`hosted.json` `dirs` are absolute paths and `~`-expanded. Each entry is
+canonicalised (`realpath`) **and** kept in its expanded form, because
+`HostedRecord.cwd` stores the canonical form; both spellings count as the same
+root, so a symlinked allowlist entry does not turn into a "directory is gone"
+session. Paths supplied by clients (`hosted.create`, `message.send`) are matched on the
+string first and only `realpath`ed when the spelling differs (`/var/...` vs
+`/private/var/...`), and only after the filesystem-scope check in §8.5 has
+accepted them. A path that lands in `~/Downloads` is therefore rejected without
+the bridge touching it at all, which is what keeps a client from triggering a
+macOS folder-access prompt that blocks the process.
+
+Only allowlisted directories appear as hosted projects. Changing the file
+requires restarting the bridge.
+
+### 8.5 Filesystem enumeration
+
+Every directory enumeration in the bridge goes through `apps/bridge/src/fs-scope.ts`.
+A path is enumerable only when it is inside an authorised root (allowlisted
+directory, project directory, state directory) or inside one of the CLI data
+directories under the home directory (`~/.pi`, `~/.claude`, `~/Library/Application Support`,
+`~/Library/Caches`, ...), which are not protected by TCC. `~/Desktop`,
+`~/Documents`, `~/Downloads`, `~/Music`, `~/Movies`, `~/Pictures`, `~/Public`,
+`~/Library/Mobile Documents`, `~/Library/CloudStorage` and `/Volumes/*` are
+refused, as is the home directory itself — discovery starts at an authorised
+root, never at home with the results filtered afterwards.
+
+The check happens before any `readdir`/`stat`/`realpath`/`open`, so a refused
+path produces **zero** filesystem access (touching a protected folder is what
+raises the macOS prompt, and a prompt nobody clicks blocks the calling thread).
+Symlinks are inspected with `lstat` + `readlink` — the link itself is read,
+never its target — so `/tmp/link -> ~/Downloads` is refused without following it.
+Each refusal logs one line:
+
+```
+fs-scope: 拒绝越界访问（受保护目录 ~/Downloads）：/Users/<you>/Downloads <- hosted.cwd
+```
+
+Repeated refusals of the same path are logged at most once a minute.
 
 ## 9. Remote devtools
 
@@ -466,6 +500,8 @@ agent-bridge devtools [files|terminal] [on|off|status] [--ttl 60..86400]
 - Confined to the session's project directory; a worktree at `session.cwd` is
   allowed.
 - Read-only. Symlinks are resolved and must remain inside the root.
+- A path outside the project root is rejected as `unauthorized` **before** the
+  bridge touches the filesystem; the refusal is logged as `fs-scope: 拒绝越界访问`.
 - `node_modules` and `.git` are hidden.
 - At most 2,000 entries per listing; text files up to 1 MB; images up to ~3 MB
   (headroom under the 4 MiB message limit).
