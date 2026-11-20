@@ -78,6 +78,7 @@ import {
   type DeviceMeta,
   type DeviceSecrets,
 } from "./credentials.js";
+import { isPreviewDeployment } from "./deployment.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
 import { stepView } from "./tool-steps.js";
@@ -3702,10 +3703,7 @@ function agentSwitcher(route: Route): HTMLElement | null {
  * 所以回链用非敏感的 ?ab_paired=1 标记让落地页切到已配对状态；生产仍只靠 cookie。
  */
 function craftsteadLanding(paired: boolean): string {
-  const preview =
-    location.hostname === "agent-bridge-preview.craftstead.app" ||
-    location.hostname.endsWith(".workers.dev");
-  if (!preview) return "https://craftstead.app/agent-bridge";
+  if (!isPreviewDeployment()) return "https://craftstead.app/agent-bridge";
   const base = "https://develop.craftstead.pages.dev/agent-bridge";
   return paired ? base + "?ab_paired=1" : base;
 }
@@ -9095,6 +9093,14 @@ function skeletonView(route: Route): HTMLElement {
     el("div", { className: "skeleton-title" }),
     rows,
   ]);
+}
+
+/**
+ * 预览和生产客户端常常并排在两个标签页里，图标默认一模一样。预览换成带 P 角标的那份，
+ * 生产、本地开发保持 index.html 里的原图标；PWA 安装图标（manifest）也照旧，只动标签页图标。
+ */
+if (isPreviewDeployment()) {
+  document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.setAttribute("href", "/icon-preview.svg");
 }
 
 const bootUrl = new URL(location.href);
