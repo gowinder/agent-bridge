@@ -63,9 +63,16 @@ import { MAX_PI_TASKS, piSubagentRunning, piSubagentTasks } from "./pi-subagents
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
+import { FsScope, FsScopeError } from "../fs-scope.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const IDLE_SWEEP_MS = 60_000;
+/**
+ * 一轮忙着的会话多久没有输出就标记成「疑似卡住」，多久检查一次。
+ * 选 2 分钟：正常一轮里的工具调用间隔远小于它，而等系统授权弹窗／等网络会一直挂着。
+ */
+const DEFAULT_STALL_MS = 120_000;
+const STALL_CHECK_MS = 15_000;
 const MAX_BLOCK_CHARS = 4_000;
 export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
@@ -287,6 +294,10 @@ interface LiveProcess {
   /** pi 扩展正在等网页回答的提问。 */
   piPending?: PiPending;
   startedAt: number;
+  /** 最近一次收到子进程输出的时刻：没有输出的空转就是这里在涨。 */
+  lastOutputAt: number;
+  /** 无输出超过阈值时置位（取值为「开始算卡住」的时刻），恢复输出就清掉。 */
+  stalledSince?: number;
   /** 最后一条 stderr，进程非零退出时拼进系统消息，避免只剩一个光秃秃的退出码。 */
   stderrTail: string;
   /** 最后一次启动是否为 --resume，用来识别「会话记录不存在」并自动改走新建。 */
@@ -321,6 +332,10 @@ export interface HostedManagerOptions {
   stateDir?: string;
   spawn?: HostedSpawn;
   log?: (line: string) => void;
+  /** 无输出多久判为卡住（毫秒）；测试用短值。 */
+  stallMs?: number;
+  /** 卡住检查的间隔（毫秒）；测试用短值。 */
+  stallCheckMs?: number;
 }
 
 /**
@@ -342,6 +357,12 @@ export class HostedSessionManager {
   private readonly messages = new Map<string, MessageRecord[]>();
   private readonly live = new Map<string, LiveProcess>();
   private sweeper: NodeJS.Timeout | null = null;
+  /** 无输出检查：只负责把「疑似卡住」标出来，从不替用户点掉系统弹窗。 */
+  private stallTimer: NodeJS.Timeout | null = null;
+  private readonly stallMs: number;
+  private readonly stallCheckMs: number;
+  /** 枚举收口：记录里的 cwd 可能早就从白名单里删了，不能直接 stat。 */
+  private readonly fs: FsScope;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
   // Bridge 退出只断开 sessiond 连接：子进程继续由守护进程持有，重启后 attach 接上。
@@ -363,6 +384,9 @@ export class HostedSessionManager {
             spawnLocal(command, args, { cwd: spawnOptions.cwd, env: process.env }),
         });
     this.config = readConfig(this.stateDir);
+    this.fs = new FsScope({ roots: () => this.config.dirs.map(expandHome), log: this.log });
+    this.stallMs = options.stallMs ?? DEFAULT_STALL_MS;
+    this.stallCheckMs = options.stallCheckMs ?? STALL_CHECK_MS;
     this.loadRecords();
     // 只恢复启动瞬间就存在的未完成轮次：recover 是异步的，期间新建/刚发出的会话不能被重放。
     const interrupted = new Set(
@@ -373,6 +397,8 @@ export class HostedSessionManager {
     void this.recover(interrupted);
     this.sweeper = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
     this.sweeper.unref();
+    this.stallTimer = setInterval(() => this.checkStalls(), this.stallCheckMs);
+    this.stallTimer.unref();
     process.once("exit", this.exitHandler);
   }
 
@@ -381,7 +407,7 @@ export class HostedSessionManager {
     const seen = new Set<string>();
     for (const raw of this.config.dirs) {
       const path = expandHome(raw);
-      const exists = isDirectory(path);
+      const exists = this.cwdExists(path);
       dirs.push({
         path,
         name: basename(path) || path,
@@ -554,7 +580,7 @@ export class HostedSessionManager {
     };
     for (const raw of this.config.dirs) {
       const path = expandHome(raw);
-      if (isDirectory(path)) push(path);
+      if (this.cwdExists(path)) push(path);
     }
     for (const record of this.records.values()) push(record.cwd);
     return projects;
@@ -816,7 +842,7 @@ export class HostedSessionManager {
   resume(sessionId: string): SessionSummary {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
-    if (!isDirectory(record.cwd)) {
+    if (!this.cwdExists(record.cwd)) {
       throw new RpcError("adapter_unavailable", `工作目录已不存在：${record.cwd}`);
     }
     if (!this.live.has(record.id)) {
@@ -1304,7 +1330,7 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     if (!text.trim()) throw new RpcError("invalid_params", "消息不能为空");
-    if (!isDirectory(record.cwd)) {
+    if (!this.cwdExists(record.cwd)) {
       throw new RpcError("adapter_unavailable", `工作目录已不存在：${record.cwd}`);
     }
     if (!this.live.has(record.id)) this.start(record, true);
@@ -1472,6 +1498,8 @@ export class HostedSessionManager {
   dispose(): void {
     if (this.sweeper) clearInterval(this.sweeper);
     this.sweeper = null;
+    if (this.stallTimer) clearInterval(this.stallTimer);
+    this.stallTimer = null;
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
     this.sessiond?.close();
@@ -1583,6 +1611,7 @@ export class HostedSessionManager {
       busy: false,
       pending: null,
       startedAt: Date.now(),
+      lastOutputAt: Date.now(),
       stderrTail: "",
       resumed: resume,
     };
@@ -1683,6 +1712,12 @@ export class HostedSessionManager {
 
   /** 子进程输出进哪条解析路径：pi 走协议客户端，Claude Code 走 stream-json 解析。 */
   private feedChild(record: HostedRecord, live: LiveProcess, chunk: string, seq?: number): void {
+    // 任何一段输出都算「这一轮还在动」：卡住标记靠它清掉。
+    live.lastOutputAt = Date.now();
+    if (live.stalledSince) {
+      live.stalledSince = undefined;
+      this.log(`hosted ${record.id} 恢复输出`);
+    }
     if (live.pi) {
       live.pi.feed(chunk);
       if (seq !== undefined) this.advanceSeq(record, seq);
@@ -2159,7 +2194,7 @@ export class HostedSessionManager {
       record.pendingText = undefined;
       record.resumeAttempts = 0;
       // 走代理的模型在 assistant 事件里可能报 0 用量；回合结束时按 CLI 转录里的真实用量兜底。
-      const context = contextFromTranscript(record);
+      const context = contextFromTranscript(record, this.fs);
       if (context) record.context = context;
       const isError = event["is_error"] === true;
       const text = typeof event["result"] === "string" ? event["result"].trim() : "";
@@ -2323,9 +2358,24 @@ export class HostedSessionManager {
     return this.piSessionIds(record).some((id) => piSubagentRunning(id));
   }
 
+  /**
+   * 记录里的 cwd 还在不在。先过枚举闸门再 stat：白名单改掉之后，旧记录可能指着
+   * `~/下载`、`~/文档` 这类受保护目录，直接 stat 就是一次系统授权弹窗。
+   */
+  private cwdExists(path: string): boolean {
+    try {
+      this.fs.assert(path, "hosted.cwd");
+    } catch (error) {
+      // 越界：记过日志了，这里只是回答「不能往这个目录里调用」。
+      if (error instanceof FsScopeError) return false;
+      throw error;
+    }
+    return isDirectory(path);
+  }
+
   private summary(record: HostedRecord): SessionSummary {
     const live = this.live.get(record.id);
-    const dirExists = isDirectory(record.cwd);
+    const dirExists = this.cwdExists(record.cwd);
     // 进程里真正生效的压缩预留量；和记录里的设置不一致说明还没重启。
     const effectiveReserve = live ? this.liveCompactionReserve(record) : undefined;
     const summary: SessionSummary = {
@@ -2339,6 +2389,7 @@ export class HostedSessionManager {
       archived: record.archived === true,
       live: Boolean(live),
       busy: this.busyOf(record),
+      ...(live?.stalledSince ? { stalledSince: live.stalledSince } : {}),
       needsDecision: Boolean(live?.pending || live?.piPending),
       canSend: dirExists,
       hosted: true,
@@ -2502,6 +2553,35 @@ export class HostedSessionManager {
     for (const id of [...this.live.keys()]) this.kill(id);
   }
 
+  /**
+   * 忙着的会话长时间没有输出就标成「疑似卡住」。只做检测与状态上报：
+   * 系统授权弹窗由用户自己点，Bridge 绝不代劳。
+   */
+  private checkStalls(): void {
+    const now = Date.now();
+    for (const [id, live] of this.live) {
+      if (live.finished) continue;
+      // 正在等网页回答权限问题不算卡住：那是人没回，不是进程不动。
+      if (!live.busy || live.pending || live.piPending) {
+        live.stalledSince = undefined;
+        continue;
+      }
+      const idle = now - live.lastOutputAt;
+      if (idle < this.stallMs) {
+        if (live.stalledSince) {
+          live.stalledSince = undefined;
+          this.log(`hosted ${id} 恢复输出`);
+        }
+        continue;
+      }
+      if (live.stalledSince) continue;
+      live.stalledSince = live.lastOutputAt + this.stallMs;
+      this.log(
+        `hosted: 会话 ${id} 已经 ${Math.round(idle / 1000)} 秒没有输出，可能卡在系统授权弹窗或外部等待里`,
+      );
+    }
+  }
+
   private sweepIdle(): void {
     const now = Date.now();
     for (const [id, live] of this.live) {
@@ -2612,7 +2692,7 @@ export class HostedSessionManager {
     let changed = false;
     for (const record of this.records.values()) {
       if (record.context) continue;
-      const context = contextFromTranscript(record);
+      const context = contextFromTranscript(record, this.fs);
       if (!context) continue;
       record.context = context;
       changed = true;
@@ -2673,11 +2753,11 @@ export class HostedSessionManager {
 }
 
 /** CLI 把每个会话的转录写在 ~/.claude/projects/<cwd>/<id>.jsonl，末尾那条 assistant 带着用量。 */
-function contextFromTranscript(record: HostedRecord): ContextUsage | undefined {
+function contextFromTranscript(record: HostedRecord, fs: FsScope): ContextUsage | undefined {
   const root = join(homedir(), ".claude", "projects");
   let dirs: string[];
   try {
-    dirs = readdirSync(root);
+    dirs = fs.readdirNames(root, "hosted.transcript");
   } catch {
     return undefined;
   }
@@ -2686,7 +2766,7 @@ function contextFromTranscript(record: HostedRecord): ContextUsage | undefined {
   let text: string;
   let truncated = false;
   try {
-    truncated = statSync(file).size > TRANSCRIPT_TAIL_BYTES;
+    truncated = fs.stat(file, "hosted.transcript").size > TRANSCRIPT_TAIL_BYTES;
     text = readTail(file, TRANSCRIPT_TAIL_BYTES);
   } catch {
     return undefined;

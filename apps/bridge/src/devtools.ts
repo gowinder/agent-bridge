@@ -4,7 +4,7 @@
 // `agent-bridge devtools`. File browsing never leaves the chat's own project directory.
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, lstatSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
+import { closeSync, existsSync, readSync } from "node:fs";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import {
   DEVTOOLS_CAPABILITIES,
@@ -22,6 +22,7 @@ import {
   type ShellExecResult,
 } from "@craftstead/protocol";
 import type { SessionAdapters } from "./adapters/index.js";
+import { FsScope, FsScopeError } from "./fs-scope.js";
 import { RpcError } from "./adapters/types.js";
 import type { Store } from "./store.js";
 
@@ -112,6 +113,12 @@ interface ExpiryState {
   for: number | null;
 }
 
+/** 纯字符串判断 `path` 是否落在 `root` 里（两者都是已归一化的绝对路径）。 */
+function isUnder(path: string, root: string): boolean {
+  const base = root.replace(/\/+$/, "");
+  return path === base || path.startsWith(`${base}${sep}`);
+}
+
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
@@ -124,12 +131,34 @@ export class Devtools {
   private readonly expiry = new Map<Capability, ExpiryState>();
   /** uploads 根的真实路径；undefined 表示还没算过，null 表示目录不存在。 */
   private uploadsReal: string | null | undefined;
+  /** 枚举收口：工程白名单之外的路径一律拒绝，见 fs-scope.ts。 */
+  private readonly fs: FsScope;
+  /** 基础授权根（托管白名单 + 状态目录）的缓存：枚举每个子项都要判一次，不能每次都去 stat 白名单。 */
+  private baseRoots: string[] = [];
+  private baseRootsAt = 0;
 
   constructor(
     private readonly store: Store,
     private readonly adapters: SessionAdapters,
     private readonly log: (line: string) => void,
-  ) {}
+  ) {
+    this.fs = new FsScope({ roots: () => this.currentBaseRoots(), log });
+  }
+
+  /** 托管白名单是用户自己点过头的根；状态目录里的 uploads 属于 Bridge 自己的数据。 */
+  private currentBaseRoots(): string[] {
+    if (Date.now() - this.baseRootsAt < 5_000) return this.baseRoots;
+    this.baseRoots = [
+      ...this.adapters
+        .hostedDirs()
+        .dirs.filter((dir) => dir.allowed)
+        .map((dir) => dir.path),
+      this.store.dir,
+      join(this.store.dir, "uploads"),
+    ];
+    this.baseRootsAt = Date.now();
+    return this.baseRoots;
+  }
 
   status(): DevtoolsStatus {
     return { files: this.readCapability("files"), terminal: this.readCapability("terminal") };
@@ -256,6 +285,8 @@ export class Devtools {
       seen.set(real, root);
       roots.push(root);
     }
+    // 工程目录就是这一份索引里的根：登记进枚举闸门，以后往这些目录里走就不算越界。
+    this.fs.setExtraRoots(roots.map((root) => root.real));
     this.rootsCache = { at: Date.now(), roots };
     return roots;
   }
@@ -274,10 +305,11 @@ export class Devtools {
     const exact = roots.find((item) => item.real === wanted && item.projectIds.has(session.projectId));
     if (exact) return exact;
     // 走到这里说明请求的路径和索引里的写法不一致（符号链接、大小写），
-    // 只有这种少见情况才解析一次真实路径。
+    // 只有这种少见情况才解析一次真实路径。这一步也可能被客户端指向受保护目录，
+    // 所以同样走闸门：越界就在碰文件系统之前断掉，不给它换一个授权弹窗的机会。
     let want: string | null = null;
     try {
-      want = realpathSync(wanted);
+      want = this.fs.realpath(wanted, "files.scope");
     } catch {
       want = null;
     }
@@ -290,7 +322,7 @@ export class Devtools {
         if (!item.projectIds.has(session.projectId)) continue;
         let itemReal: string | null = null;
         try {
-          itemReal = realpathSync(item.real);
+          itemReal = this.fs.realpath(item.real, "files.scope");
         } catch {
           continue;
         }
@@ -302,7 +334,7 @@ export class Devtools {
     if (want !== null && session.cwd) {
       let own: string | null = null;
       try {
-        own = realpathSync(resolve(session.cwd));
+        own = this.fs.realpath(resolve(session.cwd), "files.scope");
       } catch {
         own = null;
       }
@@ -313,17 +345,32 @@ export class Devtools {
     throw new RpcError("unauthorized", "只能访问当前会话所属的项目目录");
   }
 
-  /** Resolves a client path and refuses anything outside the scoped project root. */
+  /**
+   * Resolves a client path and refuses anything outside the scoped project root.
+   *
+   * 先用纯字符串判越界再 realpath：客户端可以把路径指到 `~/下载`、`~/音乐`，
+   * 而 realpath 一次就是一次 macOS 授权弹窗（弹窗不点掉会一直挂着）。
+   */
   private resolveInside(root: ScopedRoot, path: string, allowUploads = false): string {
+    const base = this.rootReal(root);
+    const uploads = join(this.store.dir, "uploads");
+    const target = resolve(root.real, path);
+    const within =
+      isUnder(target, base) ||
+      isUnder(target, root.real) ||
+      isUnder(target, root.path) ||
+      (allowUploads && isUnder(target, uploads));
+    if (!within) throw new RpcError("unauthorized", "路径不在该项目目录内");
     let real: string;
     try {
-      real = realpathSync(resolve(root.real, path));
-    } catch {
+      real = this.fs.realpath(target, "files.resolve", { extraRoots: [base, root.real, root.path, uploads] });
+    } catch (error) {
+      // 越界与不存在对外区别不开，免得可以拿它探测文件是否存在。
+      if (error instanceof FsScopeError) throw new RpcError("unauthorized", "路径不在该项目目录内");
       throw new RpcError("not_found", "路径不存在");
     }
-    const base = this.rootReal(root);
-    const inside = real === base || real.startsWith(base + sep);
-    if (!inside && !(allowUploads && this.insideUploads(real))) {
+    // 解析后还要再比一次：符号链接可以把「工程里的路径」引到工程外。
+    if (!isUnder(real, base) && !(allowUploads && this.insideUploads(real))) {
       throw new RpcError("unauthorized", "路径不在该项目目录内");
     }
     return real;
@@ -337,7 +384,7 @@ export class Devtools {
   private rootReal(root: ScopedRoot): string {
     if (root.realResolved === undefined) {
       try {
-        root.realResolved = realpathSync(root.real);
+        root.realResolved = this.fs.realpath(root.real, "files.root");
       } catch {
         root.realResolved = root.real;
       }
@@ -352,7 +399,7 @@ export class Devtools {
   private insideUploads(real: string): boolean {
     if (this.uploadsReal === undefined) {
       try {
-        this.uploadsReal = realpathSync(join(this.store.dir, "uploads"));
+        this.uploadsReal = this.fs.realpath(join(this.store.dir, "uploads"), "files.uploads");
       } catch {
         this.uploadsReal = null;
       }
@@ -360,10 +407,10 @@ export class Devtools {
     return this.uploadsReal !== null && real.startsWith(this.uploadsReal + sep);
   }
 
-  /** 路径是否指向 uploads 里的附件；不存在或解析失败一律按「不是附件」处理。 */
+  /** 路径是否指向 uploads 里的附件；不存在、或闸门拒绝解析，一律按「不是附件」处理。 */
   private insideUploadsPath(path: string): boolean {
     try {
-      return this.insideUploads(realpathSync(path));
+      return this.insideUploads(this.fs.realpath(path, "files.uploads", { extraRoots: [join(this.store.dir, "uploads")] }));
     } catch {
       return false;
     }
@@ -385,21 +432,23 @@ export class Devtools {
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     this.requireCapability("files");
     const real = path ? this.resolveInside(scoped, path) : this.rootReal(scoped);
+    const extraRoots = [this.rootReal(scoped), scoped.path];
     let stats;
     try {
-      stats = statSync(real);
-    } catch {
+      stats = this.fs.stat(real, "files.list", { extraRoots });
+    } catch (error) {
+      if (error instanceof FsScopeError) throw new RpcError("unauthorized", "这个目录不在允许访问的范围内");
       throw new RpcError("not_found", "路径不存在");
     }
     if (!stats.isDirectory()) throw new RpcError("invalid_params", "不是目录");
     const entries: FsEntry[] = [];
-    for (const entry of readdirSync(real, { withFileTypes: true })) {
+    for (const entry of this.fs.readdir(real, "files.list", { extraRoots })) {
       if (entry.name === "node_modules" || entry.name === ".git") continue;
       const child = `${real}${sep}${entry.name}`;
       let childStats;
       try {
         // lstat: a symlink pointing outside the project must not leak its target's size or mtime.
-        childStats = lstatSync(child);
+        childStats = this.fs.lstat(child, "files.list", { extraRoots });
       } catch {
         continue;
       }
@@ -434,9 +483,10 @@ export class Devtools {
     const real = this.resolveInside(scoped, path, true);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.
     if (!attachment || !this.insideUploads(real)) this.requireCapability("files");
+    const extraRoots = [this.rootReal(scoped), scoped.path, join(this.store.dir, "uploads")];
     let stats;
     try {
-      stats = statSync(real);
+      stats = this.fs.stat(real, "files.read", { extraRoots });
     } catch {
       throw new RpcError("not_found", "路径不存在");
     }
@@ -449,7 +499,7 @@ export class Devtools {
     // Never read past the limit: a huge file must not be pulled into memory just to be cut.
     const length = Math.min(stats.size, limit);
     const buffer = Buffer.alloc(length);
-    const fd = openSync(real, "r");
+    const fd = this.fs.open(real, "files.read", { flags: "r", extraRoots });
     try {
       readSync(fd, buffer, 0, length, 0);
     } finally {

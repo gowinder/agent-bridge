@@ -397,6 +397,7 @@ export const DE: Record<string, string> = {
     "Aufgaben liegen in der Datenbank von Bridge: Browserwechsel oder Cache leeren verlieren sie nicht; ein anderer Host ist eine andere Datenbank.",
   "待发送内容，可直接编辑": "Zu sendender Inhalt — direkt bearbeitbar",
   待回答: "Wartet auf deine Antwort",
+  疑似卡住: "Möglicherweise hängt",
   忘记密码: "\u0050asswort vergessen",
   "思考中…": "Denkt nach…",
   "思考程度越高，回答更细致，但更慢也更费额度。":

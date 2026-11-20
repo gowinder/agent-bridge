@@ -680,9 +680,20 @@ export class DshAdapter implements SessionAdapter {
 
   private spawnTurn(binary: string, entry: Entry, text: string): Promise<MessageSendResult> {
     return new Promise<MessageSendResult>((resolve, reject) => {
+      // 工作目录不在了不能退回主目录：那等于让 CLI 把整个 ~ 当成工程根，
+      // 而 ~/下载、~/音乐、~/照片都在 TCC 后面，一碰就弹授权，弹窗不点掉进程就一直挂着。
+      if (!entry.cwd || !existsSync(entry.cwd)) {
+        reject(
+          new RpcError(
+            "not_found",
+            `这个会话的工作目录已不存在：${entry.cwd ?? "未知"}（不会退回到用户主目录）`,
+          ),
+        );
+        return;
+      }
       // The task goes through stdin so a message starting with "-" is never read as a flag.
       const child = spawn(binary, ["--profile", "headless", "--session-id", entry.id, "--json", "-"], {
-        cwd: entry.cwd && existsSync(entry.cwd) ? entry.cwd : homedir(),
+        cwd: entry.cwd,
         env: process.env,
         stdio: ["pipe", "pipe", "pipe"],
       });

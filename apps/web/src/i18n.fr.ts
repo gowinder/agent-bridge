@@ -393,6 +393,7 @@ export const FR: Record<string, string> = {
     "Les tâches vivent dans la base de Bridge : changer de navigateur ou vider le cache ne les perd pas ; un autre hôte, c'est une autre base.",
   "待发送内容，可直接编辑": "Contenu à envoyer — modifiable directement",
   待回答: "En attente de votre réponse",
+  疑似卡住: "Possible blocage",
   忘记密码: "Mot de passe oublié",
   "思考中…": "Réflexion…",
   "思考程度越高，回答更细致，但更慢也更费额度。":

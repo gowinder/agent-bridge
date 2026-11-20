@@ -461,11 +461,16 @@ export class AntigravityAdapter implements SessionAdapter {
     cwd: string,
   ): Promise<MessageSendResult> {
     return new Promise<MessageSendResult>((resolve, reject) => {
+      // 同 dsh：工作目录不在了就报错，绝不退回主目录当工程根。
+      if (!cwd || !existsSync(cwd)) {
+        reject(new RpcError("not_found", `这个会话的工作目录已不存在：${cwd || "未知"}（不会退回到用户主目录）`));
+        return;
+      }
       const child = spawn(
         binary,
         ["--conversation", conversationId, "--output-format", "stream-json", "--print", text],
         {
-          cwd: cwd && existsSync(cwd) ? cwd : homedir(),
+          cwd,
           env: process.env,
           stdio: ["ignore", "pipe", "pipe"],
         },

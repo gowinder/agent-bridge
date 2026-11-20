@@ -436,6 +436,7 @@ export const EN: Record<string, string> = {
     "Todos live in Bridge's own database, so switching browsers or clearing the cache won't lose them; a different host is a different database.",
   "待发送内容，可直接编辑": "Content to send — edit it directly",
   待回答: "Awaiting your answer",
+  疑似卡住: "Possibly stuck",
   忘记密码: "\u0046orgot \u0050assword",
   "思考中…": "Thinking…",
   "思考程度越高，回答更细致，但更慢也更费额度。":
