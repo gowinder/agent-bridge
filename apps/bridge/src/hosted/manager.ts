@@ -643,6 +643,10 @@ export class HostedSessionManager {
       "catch(e){process.exit(e&&(e.code==='EPERM'||e.code==='EACCES')?2:1)}";
     const child = nodeSpawn(process.execPath, ["-e", script, path], {
       stdio: "ignore",
+      // 不继承环境变量、也不继承 Bridge 的 cwd：子进程只需要读一个目录，
+      // 多余的环境（token）与 cwd（可能正好在受保护目录里）都不该传下去。
+      env: {},
+      cwd: "/",
     });
     const cancel = (): void => {
       clearTimeout(timer);
@@ -768,6 +772,8 @@ export class HostedSessionManager {
    */
   setDirs(input: string[], probe: string[] = []): HostedDirsResult {
     const dirs: string[] = [];
+    /** 归一化后的目录 → 客户端当初给的写法（probe 按字符串匹配要用）。 */
+    const rawByTarget = new Map<string, string>();
     const previous = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
     const current = previous;
     for (const item of input) {
@@ -783,7 +789,10 @@ export class HostedSessionManager {
         }
         throw new RpcError("invalid_params", `目录不存在：${target}`);
       }
-      if (!dirs.includes(target)) dirs.push(target);
+      if (!dirs.includes(target)) {
+        dirs.push(target);
+        rawByTarget.set(target, raw);
+      }
     }
     if (dirs.length > MAX_HOSTED_DIRS) {
       throw new RpcError("invalid_params", `托管目录最多 ${MAX_HOSTED_DIRS} 个`);
@@ -809,17 +818,16 @@ export class HostedSessionManager {
     }
     // 只探「这次新加的」和客户端显式要求重探的（菜单栏点「+」重新添加已存在的目录）。
     // 整份写回时不能把其它未授权目录也排一遍：删一个目录会让剩下的挨个弹框。
+    // 客户端给的 probe 只用来「标记哪些要重探」，一律按字符串比对，绝不 realpath：
+    // 那是客户端可控的路径，越界时连一次 `realpath` 都不该发生（同 fs-scope 的原则）。
     const asked = new Set<string>();
-    for (const item of probe) {
-      try {
-        asked.add(this.normalizeDir(String(item ?? "")));
-      } catch {
-        // 客户端给了不存在的路径：忽略，别让整份写入失败。
-      }
+    for (const item of probe.slice(0, MAX_HOSTED_DIRS)) {
+      const raw = String(item ?? "").trim();
+      if (raw) asked.add(raw);
     }
     for (const target of dirs) {
       if (this.dirAuth.get(target) === "ok") continue;
-      if (previous.has(this.compareDir(target)) && !asked.has(target)) continue;
+      if (previous.has(this.compareDir(target)) && !asked.has(rawByTarget.get(target) ?? target)) continue;
       this.probeDir(target);
     }
     return this.configForClient();
