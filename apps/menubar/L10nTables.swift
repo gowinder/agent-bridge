@@ -127,10 +127,12 @@ enum L10nTables {
         "%d 个会话": "%d sessions",
         "目录已删除": "Folder deleted",
         "未授权": "Not authorised",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "System has already asked: click Allow on the Mac and this turns into authorised.",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "This folder has not been checked yet: add it again with + to ask macOS for access.",
+        "确认中…": "Checking…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "Reading the folder once to confirm access. If macOS asks for permission, click Allow.",
+        "待确认": "Not checked",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "The bridge has not read this folder yet. It confirms 30 s after start, or add it again with + to check now.",
 
-        "等待授权…": "Waiting for permission…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "macOS denied this folder. Tick AgentBridge under System Settings → Privacy & Security → Files and Folders, or remove it and add it again with + to ask once more.",
 
         "读取中…": "Reading…",
@@ -361,10 +363,12 @@ enum L10nTables {
         "%d 个会话": "%d 件のセッション",
         "目录已删除": "フォルダーが削除されました",
         "未授权": "未許可",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "システムに許可を要求済みです。Mac で「許可」を押すと「許可済み」になります。",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "このフォルダーはまだ読み取りを確認していません。「+」で追加し直して許可を申請してください。",
+        "确认中…": "確認中…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "アクセスできるか確認するため、このフォルダーを一度読み取ります。システムが許可を求めたら「許可」を押してください。",
+        "待确认": "未確認",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "Bridge はまだこのフォルダーを読んでいません。起動 30 秒後に自動で確認します。「+」で追加し直すとすぐ確認します。",
 
-        "等待授权…": "許可を待っています…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "macOS がこのフォルダーを拒否しました。システム設定 → プライバシーとセキュリティ → ファイルとフォルダで AgentBridge を有効にするか、「+」で追加し直して許可してください。",
 
         "读取中…": "読み込み中…",
@@ -595,10 +599,12 @@ enum L10nTables {
         "%d 个会话": "세션 %d개",
         "目录已删除": "폴더가 삭제되었습니다",
         "未授权": "권한 없음",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "시스템에 이미 권한을 요청했습니다. Mac에서 「허용」을 누르면 권한 있음으로 바뀝니다.",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "이 폴더는 아직 읽기 확인을 하지 않았습니다. +로 다시 추가해 권한을 요청하세요.",
+        "确认中…": "확인 중…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "접근 가능 여부를 확인하려고 이 폴더를 한 번 읽습니다. 시스템이 권한을 요청하면 「허용」을 누르세요.",
+        "待确认": "미확인",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "Bridge가 아직 이 폴더를 읽지 않았습니다. 시작 30초 후 자동으로 확인하며, +로 다시 추가하면 즉시 확인합니다.",
 
-        "等待授权…": "권한을 기다리는 중…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "macOS가 이 폴더를 거부했습니다. 시스템 설정 → 개인정보 보호 및 보안 → 파일 및 폴더에서 AgentBridge를 켜거나 +로 다시 추가해 권한을 요청하세요.",
 
         "读取中…": "읽는 중…",
@@ -829,10 +835,12 @@ enum L10nTables {
         "%d 个会话": "%d sesiones",
         "目录已删除": "Carpeta eliminada",
         "未授权": "Sin autorización",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "El sistema ya pidió permiso: pulsa Permitir en el Mac y pasará a autorizado.",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "Esta carpeta aún no se ha comprobado: vuelve a añadirla con + para pedir acceso a macOS.",
+        "确认中…": "Comprobando…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "Se lee la carpeta una vez para confirmar el acceso. Si macOS pide permiso, pulsa Permitir.",
+        "待确认": "Sin comprobar",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "El bridge aún no ha leído esta carpeta. La comprueba 30 s después de arrancar, o vuelve a añadirla con + para comprobarla ahora.",
 
-        "等待授权…": "Esperando autorización…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "macOS denegó esta carpeta. Activa AgentBridge en Ajustes del Sistema → Privacidad y seguridad → Archivos y carpetas, o vuelve a añadirla con + para pedir permiso otra vez.",
 
         "读取中…": "Cargando…",
@@ -1063,10 +1071,12 @@ enum L10nTables {
         "%d 个会话": "%d sessions",
         "目录已删除": "Dossier supprimé",
         "未授权": "Non autorisé",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "Le système a déjà demandé : cliquez sur Autoriser sur le Mac pour passer à autorisé.",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "Ce dossier n'a pas encore été vérifié : rajoutez-le avec + pour demander l'accès à macOS.",
+        "确认中…": "Vérification…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "Le dossier est lu une fois pour confirmer l'accès. Si macOS demande l'autorisation, cliquez sur Autoriser.",
+        "待确认": "Non vérifié",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "Le bridge n'a pas encore lu ce dossier. Il le vérifie 30 s après le démarrage, ou rajoutez-le avec + pour vérifier maintenant.",
 
-        "等待授权…": "En attente d'autorisation…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "macOS a refusé ce dossier. Cochez AgentBridge dans Réglages Système → Confidentialité et sécurité → Fichiers et dossiers, ou retirez puis rajoutez le dossier avec + pour redemander.",
 
         "读取中…": "Lecture…",
@@ -1297,10 +1307,12 @@ enum L10nTables {
         "%d 个会话": "%d Sitzungen",
         "目录已删除": "Ordner gelöscht",
         "未授权": "Nicht autorisiert",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "Das System hat bereits gefragt: klicke am Mac auf Erlauben, dann gilt der Ordner als autorisiert.",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "Dieser Ordner wurde noch nicht geprüft: füge ihn mit + erneut hinzu, um macOS um Zugriff zu bitten.",
+        "确认中…": "Wird geprüft…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "Der Ordner wird einmal gelesen, um den Zugriff zu prüfen. Fragt macOS nach der Berechtigung, klicke auf Erlauben.",
+        "待确认": "Ungeprüft",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "Die Bridge hat diesen Ordner noch nicht gelesen. Sie prüft ihn 30 s nach dem Start, oder füge ihn mit + erneut hinzu.",
 
-        "等待授权…": "Warte auf Berechtigung…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "macOS hat diesen Ordner verweigert. Aktiviere AgentBridge unter Systemeinstellungen → Datenschutz & Sicherheit → Dateien und Ordner oder füge den Ordner mit + erneut hinzu.",
 
         "读取中…": "Wird gelesen…",
@@ -1531,10 +1543,12 @@ enum L10nTables {
         "%d 个会话": "%d sessões",
         "目录已删除": "Pasta excluída",
         "未授权": "Sem autorização",
-        "已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。": "O sistema já pediu: clique em Permitir no Mac e passa a autorizado.",
-        "这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。": "Esta pasta ainda não foi verificada: adicione-a de novo com + para pedir acesso ao macOS.",
+        "确认中…": "A verificar…",
+        "正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。": "A pasta é lida uma vez para confirmar o acesso. Se o macOS pedir autorização, clique em Permitir.",
+        "待确认": "Por confirmar",
+        "Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。": "O bridge ainda não leu esta pasta. Verifica 30 s após o arranque, ou adicione-a de novo com + para verificar agora.",
 
-        "等待授权…": "À espera de autorização…",
+
         "系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。": "O macOS recusou esta pasta. Ative o AgentBridge em Ajustes do Sistema → Privacidade e Segurança → Ficheiros e pastas, ou remova e adicione a pasta outra vez com + para pedir permissão.",
 
         "读取中…": "Lendo…",
