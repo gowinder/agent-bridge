@@ -1026,6 +1026,20 @@ test("thinking levels are pi only", async (t) => {
   assert.equal(info.thinkingLevels, undefined);
 });
 
+test("user's own global context file wins, guard falls back to the CLI flag", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  writeFileSync(join(source, "AGENTS.md"), "用户自己的规则\n");
+  withAgentDir(t, source);
+  h.manager.create({ path: h.repo, agent: "pi" });
+  const { args } = h.spawns[0];
+  // 用户文件不能被盖掉，但准则也不能因此丢掉：改用命令行旗标（只覆盖主会话）。
+  const guard = args.indexOf("--append-system-prompt");
+  assert.ok(guard >= 0);
+  assert.match(args[guard + 1], /不要递归扫描用户主目录/);
+});
+
 test("changing the subagent model restarts the idle pi process with the new setting", async (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());

@@ -58,7 +58,7 @@ import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
-import { HOSTED_GUARD_CONTEXT_FILE, HOSTED_GUARD_PROMPT } from "./hosted-prompt.js";
+import { HOSTED_GUARD_PROMPT, hostedGuardWritten } from "./hosted-prompt.js";
 import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
 import { MAX_PI_TASKS, piSubagentRunning, piSubagentRunnerPids, piSubagentTasks } from "./pi-subagents.js";
@@ -1925,7 +1925,7 @@ export class HostedSessionManager {
       reserveTokens: this.compactionReserveFor(record),
       guardPrompt: HOSTED_GUARD_PROMPT,
     });
-    if (!agentDir || !existsSync(join(agentDir, HOSTED_GUARD_CONTEXT_FILE))) {
+    if (!agentDir || !hostedGuardWritten(agentDir)) {
       args.push("--append-system-prompt", HOSTED_GUARD_PROMPT);
     }
     const child = this.spawnProcess(

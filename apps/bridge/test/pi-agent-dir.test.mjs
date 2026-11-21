@@ -91,6 +91,9 @@ test("the user's own context file is not overwritten by the guard prompt", () =>
   writeFileSync(join(source, "AGENTS.md"), "用户自己的规则\n");
   preparePiAgentDir(target, { guardPrompt: "guard" }, source);
   assert.equal(readFileSync(join(target, "AGENTS.md"), "utf8"), "用户自己的规则\n");
+  // 准则没写进去，就别顺手把用户自己的上下文改成「子代理也继承」。
+  const settings = JSON.parse(readFileSync(join(target, "settings.json"), "utf8"));
+  assert.equal(settings.subagents?.defaultInheritGlobalContext, undefined);
 });
 
 test("an explicit subagent inheritGlobalContext=false is respected", () => {

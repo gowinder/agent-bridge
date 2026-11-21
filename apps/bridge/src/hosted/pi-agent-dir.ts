@@ -144,12 +144,14 @@ export function preparePiAgentDir(
     // 建不出来就让 pi 自己用默认目录，至少不挡启动。
   }
   const settings = readSettings(join(source, "settings.json"));
+  let wroteGuard = false;
   if (options.guardPrompt) {
     // 用户自己的上下文文件优先：已经链进来的那份不能被我们的准则盖掉。
     const hasContextFile = CONTEXT_FILE_NAMES.some((name) => existsSync(join(target, name)));
     if (!hasContextFile) {
       try {
         writeFileSync(join(target, HOSTED_GUARD_CONTEXT_FILE), `${options.guardPrompt}\n`);
+        wroteGuard = true;
       } catch {
         // 写不进去就交给调用方退回到 CLI 旗标。
       }
@@ -162,7 +164,8 @@ export function preparePiAgentDir(
   if (options.model) subagents["defaultModel"] = options.model;
   if (options.thinking) subagents["defaultThinking"] = options.thinking;
   // 准则放在全局上下文里，子代理默认不继承：这里只补默认值，用户显式设过就尊重原值。
-  if (options.guardPrompt && subagents["defaultInheritGlobalContext"] === undefined) {
+  // 只在准则真的写进去时补：用户自己的上下文文件不归我们决定要不要外传给子代理。
+  if (wroteGuard && subagents["defaultInheritGlobalContext"] === undefined) {
     subagents["defaultInheritGlobalContext"] = true;
   }
   if (Object.keys(subagents).length > 0) settings["subagents"] = subagents;
