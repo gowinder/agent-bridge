@@ -436,6 +436,7 @@ export const EN: Record<string, string> = {
     "Todos live in Bridge's own database, so switching browsers or clearing the cache won't lose them; a different host is a different database.",
   "待发送内容，可直接编辑": "Content to send — edit it directly",
   待回答: "Awaiting your answer",
+  疑似卡住: "Possibly stuck",
   忘记密码: "\u0046orgot \u0050assword",
   "思考中…": "Thinking…",
   "思考程度越高，回答更细致，但更慢也更费额度。":
@@ -730,4 +731,5 @@ export const EN: Record<string, string> = {
   "运行中（pid {0}）": "Running (pid {0})",
   "{0} 分钟": "{0} min",
   "允许执行 {0} 吗？": "Allow {0}?",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} folder(s) have no macOS file access yet, so indexing and reads will fail: allow the prompt on the Mac, or re-add them in the menu bar settings",
 };

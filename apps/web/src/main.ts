@@ -78,6 +78,7 @@ import {
   type DeviceMeta,
   type DeviceSecrets,
 } from "./credentials.js";
+import { isPreviewDeployment } from "./deployment.js";
 import { parsePairingInput, takeInviteLink, type PairingLink } from "./link.js";
 import { renderMarkdown } from "./markdown.js";
 import { stepView } from "./tool-steps.js";
@@ -2131,6 +2132,9 @@ function dockStatePills(session: SessionSummary): HTMLElement[] {
     pills.push(
       el("span", { className: "pill tiny busy" }, [el("span", { className: "spinner" }), document.createTextNode(tr("运行中"))]),
     );
+    // 忙着一轮但很久没有输出：多半是子进程挂在系统授权弹窗上，界面必须说出来，
+    // 否则用户看到的就是「在跑」却永远不动。
+    if (session.stalledSince) pills.push(el("span", { className: "pill tiny warn", text: tr("疑似卡住") }));
   } else if (session.needsDecision) {
     pills.push(el("span", { className: "pill tiny warn", text: tr("待回答") }));
   }
@@ -2147,6 +2151,7 @@ function dockStateKey(session: SessionSummary): string {
     session.live ? 1 : 0,
     unreadAt(session.sessionId) !== undefined ? 1 : 0,
     session.needsDecision ? 1 : 0,
+    session.stalledSince ? 1 : 0,
     // 历史行右侧写着「· 3 分钟前」：只看状态会让这串时间停在上次整页重绘那一刻。
     Math.floor(session.updatedAt / 60_000),
   ].join(":");
@@ -3702,10 +3707,7 @@ function agentSwitcher(route: Route): HTMLElement | null {
  * 所以回链用非敏感的 ?ab_paired=1 标记让落地页切到已配对状态；生产仍只靠 cookie。
  */
 function craftsteadLanding(paired: boolean): string {
-  const preview =
-    location.hostname === "agent-bridge-preview.craftstead.app" ||
-    location.hostname.endsWith(".workers.dev");
-  if (!preview) return "https://craftstead.app/agent-bridge";
+  if (!isPreviewDeployment()) return "https://craftstead.app/agent-bridge";
   const base = "https://develop.craftstead.pages.dev/agent-bridge";
   return paired ? base + "?ab_paired=1" : base;
 }
@@ -4842,8 +4844,15 @@ function hostedCreatePanel(
       const bypassNote = config.allowBypassPermissions
         ? ""
         : tr("；bypassPermissions 未开放（Mac 侧 hosted.json 的 allowBypassPermissions）");
+      // 目录加进白名单不等于能读：macOS 的文件访问授权是第一次真读时才生效的。
+      const unauthorized = config.dirs.filter(
+        (dir) =>
+          dir.allowed !== false &&
+          (dir.auth === "denied" || dir.auth === "pending" || dir.auth === "unknown"),
+      ).length;
+      const authNote = unauthorized > 0 ? tr("；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次", unauthorized) : "";
       status.textContent = config.enabled
-        ? tr(`只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}`, project.cwd ?? "", idle, bypassNote)
+        ? tr(`只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}`, project.cwd ?? "", idle, bypassNote) + authNote
         : (config.note ?? tr("Bridge 还没有配置可托管的目录。"));
       submit.disabled = !config.enabled;
     })
@@ -8510,7 +8519,6 @@ function assistantTurn(
     const toggle = foldButton(bubble, folded, foldKey, textBlocks(messages));
     if (toggle) meta.append(toggle);
   }
-  let foldedSteps = steps.length === 0;
   for (const message of messages) {
     for (const block of message.blocks) {
       if (block.type === "text") {
@@ -8525,13 +8533,13 @@ function assistantTurn(
         continue;
       } else if (block.type === "ask") {
         bubble.append(askBox(block, askState));
-      } else if (!foldedSteps) {
-        bubble.append(processFold(steps));
-        foldedSteps = true;
       }
     }
   }
-  if (!foldedSteps) bubble.append(processFold(steps));
+  // 执行过程一律放在回合末尾：上一版按第一个工具调用插在中间，长回合里它被后面的正文
+  // 顶到上面，停在最新输出上既看不到到底跑没跑，也得先滚回去才能展开。现在就在底部，
+  // 原地展开。
+  if (steps.length > 0) bubble.append(processFold(steps));
   // 只有最新一回合的盒子可以点；历史回合保留文字说明。
   const latest = nextSteps[nextSteps.length - 1];
   if (latest) bubble.append(nextStepBox(latest, latest.pending ? (askState ?? state) : state));
@@ -8584,7 +8592,10 @@ function markTurnState(list: HTMLElement, state: ChatState): void {
     list.append(row);
     return;
   }
-  const summary = last.querySelector<HTMLElement>(".turn-steps-summary");
+  // 执行过程固定排在回合末尾，状态灯就挂在它的标题上：底部输出、折叠标题、展开后的
+  // 步骤都在同一屏，展开也是原地展开，不用再往上跳。
+  const summaries = last.querySelectorAll<HTMLElement>(".turn-steps-summary");
+  const summary = summaries[summaries.length - 1];
   if (summary) {
     summary.append(...badge());
   } else {
@@ -9095,6 +9106,14 @@ function skeletonView(route: Route): HTMLElement {
     el("div", { className: "skeleton-title" }),
     rows,
   ]);
+}
+
+/**
+ * 预览和生产客户端常常并排在两个标签页里，图标默认一模一样。预览换成带 P 角标的那份，
+ * 生产、本地开发保持 index.html 里的原图标；PWA 安装图标（manifest）也照旧，只动标签页图标。
+ */
+if (isPreviewDeployment()) {
+  document.querySelector<HTMLLinkElement>('link[rel="icon"]')?.setAttribute("href", "/icon-preview.svg");
 }
 
 const bootUrl = new URL(location.href);

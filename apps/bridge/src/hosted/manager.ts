@@ -1,4 +1,5 @@
 import { spawn as nodeSpawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
@@ -59,16 +60,28 @@ import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
 import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
-import { MAX_PI_TASKS, piSubagentRunning, piSubagentTasks } from "./pi-subagents.js";
+import { MAX_PI_TASKS, piSubagentRunning, piSubagentRunnerPids, piSubagentTasks } from "./pi-subagents.js";
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
+import { SessionTrees, killTree, snapshotProcesses, subtree } from "./process-tree.js";
 import { SessiondBridge } from "./sessiond/bridge.js";
+import { FsScope, FsScopeError } from "../fs-scope.js";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const IDLE_SWEEP_MS = 60_000;
+/**
+ * 一轮忙着的会话多久没有输出就标记成「疑似卡住」，多久检查一次。
+ * 选 2 分钟：正常一轮里的工具调用间隔远小于它，而等系统授权弹窗／等网络会一直挂着。
+ */
+const DEFAULT_STALL_MS = 120_000;
+const STALL_CHECK_MS = 15_000;
 const MAX_BLOCK_CHARS = 4_000;
 export const MAX_TITLE_CHARS = 60;
 const KILL_GRACE_MS = 2_000;
+/** 每隔这么久把在跑会话的后代登进内存：detached 出去的孙进程停止时只能靠这份表找回。 */
+const TREE_SCAN_MS = 1_000;
+/** 进程自己退出（不是被停）时，给登记表里的残留后代下 SIGTERM 到 SIGKILL 的宽限。 */
+const ORPHAN_GRACE_MS = 500;
 /** 补算老会话的上下文用量时只读转录尾部这么多字节。 */
 const TRANSCRIPT_TAIL_BYTES = 262_144;
 /**
@@ -81,6 +94,36 @@ const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", 
 
 /** 托管白名单最多这么多个目录：多到这份上说明是没整理过的清单，容易点错。 */
 const MAX_HOSTED_DIRS = 64;
+
+function PROBED_OK(path: string): string {
+  return `目录已授权可读：${path}`;
+}
+
+function PROBE_TIMEOUT(path: string): string {
+  return `等待系统授权超时（${DIR_PROBE_TIMEOUT_MS / 1000} 秒）：${path}`;
+}
+
+function DENIED_NOTE(path: string): string {
+  return `macOS 拒绝访问这个目录：${path}（到「系统设置 → 隐私与安全性 → 文件与文件夹」勾选 AgentBridge，或重新点一次「+」再授权）`;
+}
+
+/** 目录授权探测的结果：`unknown` 只表示「还没探过」。 */
+type DirAuth = "ok" | "denied" | "pending" | "unknown";
+
+/**
+ * 探测目录可读性的超时。弹框没人点就一直是 pending：既不当成可读（会让会话卡住），
+ * 也不当成拒绝（用户可能只是还没回来点）。
+ */
+const DIR_PROBE_TIMEOUT_MS = 20_000;
+
+/**
+ * 启动后重新探一遍「已授权」的目录。
+ *
+ * `dir-auth.json` 里的 ok 不会自己失效：用户在系统设置里撤销授权、外置卷换了名字、
+ * 目录被换成另一个挂载点之后，UI 还显示一切正常，真读时却又弹框/挂住。已授权的 readdir
+ * 不弹框、只要几毫秒，所以启动后补探一次是便宜的。延迟到启动完再做，避免和启动抢 IO。
+ */
+const REPROBE_OK_DELAY_MS = 30_000;
 /** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
 const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
@@ -287,6 +330,10 @@ interface LiveProcess {
   /** pi 扩展正在等网页回答的提问。 */
   piPending?: PiPending;
   startedAt: number;
+  /** 最近一次收到子进程输出的时刻：没有输出的空转就是这里在涨。 */
+  lastOutputAt: number;
+  /** 无输出超过阈值时置位（取值为「开始算卡住」的时刻），恢复输出就清掉。 */
+  stalledSince?: number;
   /** 最后一条 stderr，进程非零退出时拼进系统消息，避免只剩一个光秃秃的退出码。 */
   stderrTail: string;
   /** 最后一次启动是否为 --resume，用来识别「会话记录不存在」并自动改走新建。 */
@@ -321,6 +368,14 @@ export interface HostedManagerOptions {
   stateDir?: string;
   spawn?: HostedSpawn;
   log?: (line: string) => void;
+  /** 无输出多久判为卡住（毫秒）；测试用短值。 */
+  stallMs?: number;
+  /** 卡住检查的间隔（毫秒）；测试用短值。 */
+  stallCheckMs?: number;
+  /** 测试用：替换「真的读一次目录」这一步；默认起子进程。 */
+  probeDir?: (path: string) => Promise<"ok" | "denied" | "timeout" | "unknown">;
+  /** 启动后多久复核已授权的目录（毫秒）；测试用短值。 */
+  reprobeDelayMs?: number;
 }
 
 /**
@@ -341,7 +396,59 @@ export class HostedSessionManager {
   private readonly records = new Map<string, HostedRecord>();
   private readonly messages = new Map<string, MessageRecord[]>();
   private readonly live = new Map<string, LiveProcess>();
+  /**
+   * 每个会话的后代 pid 登记表。
+   *
+   * 托管进程派生的子代理 runner 是 detached 起的（自成一个进程组），停会话时按组杀
+   * 收不到它们，所以跑着的时候就把后代 pid 记下来，停的时候按 pid 点名。
+   */
+  private readonly trees = new SessionTrees();
+  /** 正在被我们主动收尾的会话：退出事件不必再扫一遍（停止流程自己会核对）。 */
+  private readonly stopping = new Set<string>();
+  private treeTimer: NodeJS.Timeout | null = null;
   private sweeper: NodeJS.Timeout | null = null;
+  /** 无输出检查：只负责把「疑似卡住」标出来，从不替用户点掉系统弹窗。 */
+  private stallTimer: NodeJS.Timeout | null = null;
+  private readonly stallMs: number;
+  private readonly stallCheckMs: number;
+  /** 枚举收口：记录里的 cwd 可能早就从白名单里删了，不能直接 stat。 */
+  private readonly fs: FsScope;
+  /**
+   * 白名单目录的两种写法：`~` 展开后的原样值，以及 realpath 之后的值。
+   * `record.cwd` 存的是 realpath 后的（`allowedPath` 的 canonical），只认原样值会把
+   * 符号链接的白名单目录判成越界，会话从此发不出消息。
+   */
+  private dirsCache: { at: number; list: { raw: string; real: string }[] } | null = null;
+  /**
+   * 每个白名单目录到底能不能读。
+   *
+   * TCC 的授权要等第一次**真读**（`readdir`/`open`）才生效：加目录时只做 `realpath`/`stat`
+   * 不会弹框，于是「目录加好了」和「目录真的能用」中间隔着一层系统授权。人不在 Mac 前时
+   * 那次弹框没人点，读目录的调用就挂在那里，整个会话卡住。所以这里在加目录的那一刻主动
+   * 探一次：授权提前到用户在设置里点「+」的时候。
+   */
+  private readonly dirAuth = new Map<string, DirAuth>();
+  /**
+   * 正在排队或探测中的目录 → 登记号。
+   *
+   * 用登记号而不是单纯一个集合：路径可能「移除 → 立刻加回」，旧探测的结果回来时不能把
+   * 新登记的探测当成自己收掉（否则新探测永远不跑，队列跟着停）。
+   */
+  private readonly probing = new Map<string, number>();
+  private probeToken = 0;
+  /**
+   * 探测排队：一次只放一个弹窗出去。
+   *
+   * 每个探测都可能弹一个系统授权框，同时起五个就是五个框糊在用户脸上。加目录本来就是
+   * 一个一个加的动作，所以这里严格串行：前一个出结果（或超时）才轮到下一个。
+   */
+  private readonly probeQueue: string[] = [];
+  private probeRunning = false;
+  private probeCancel: (() => void) | null = null;
+  private reprobeTimer: NodeJS.Timeout | null = null;
+  /** 启动后复核的那些探测：结果 ok 时不改动状态，只有降级才写。 */
+  private readonly silentProbes = new Set<string>();
+  private readonly probeImpl: ((path: string) => Promise<"ok" | "denied" | "timeout" | "unknown">) | null;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
   // Bridge 退出只断开 sessiond 连接：子进程继续由守护进程持有，重启后 attach 接上。
@@ -363,6 +470,14 @@ export class HostedSessionManager {
             spawnLocal(command, args, { cwd: spawnOptions.cwd, env: process.env }),
         });
     this.config = readConfig(this.stateDir);
+    this.fs = new FsScope({
+      roots: () => this.allowDirs().flatMap((dir) => [dir.real, dir.raw]),
+      log: this.log,
+    });
+    this.probeImpl = options.probeDir ?? null;
+    this.stallMs = options.stallMs ?? DEFAULT_STALL_MS;
+    this.stallCheckMs = options.stallCheckMs ?? STALL_CHECK_MS;
+    this.loadDirAuth();
     this.loadRecords();
     // 只恢复启动瞬间就存在的未完成轮次：recover 是异步的，期间新建/刚发出的会话不能被重放。
     const interrupted = new Set(
@@ -373,21 +488,45 @@ export class HostedSessionManager {
     void this.recover(interrupted);
     this.sweeper = setInterval(() => this.sweepIdle(), IDLE_SWEEP_MS);
     this.sweeper.unref();
+    this.stallTimer = setInterval(() => this.checkStalls(), this.stallCheckMs);
+    this.stallTimer.unref();
+    this.reprobeTimer = setTimeout(() => this.reprobeAllowedDirs(), options.reprobeDelayMs ?? REPROBE_OK_DELAY_MS);
+    this.reprobeTimer.unref();
     process.once("exit", this.exitHandler);
+  }
+
+  /**
+   * 白名单目录的 raw / realpath 两种写法（缓存 5 秒）。
+   *
+   * 白名单是用户自己点过头的根，对它 realpath 是安全的；客户端的路径永远不 realpath，
+   * 见 `allowedPath()`。
+   */
+  private allowDirs(): { raw: string; real: string }[] {
+    if (this.dirsCache && Date.now() - this.dirsCache.at < 5_000) return this.dirsCache.list;
+    const list = this.config.dirs.map((entry) => {
+      const raw = expandHome(entry);
+      return { raw, real: canonical(raw) ?? raw };
+    });
+    this.dirsCache = { at: Date.now(), list };
+    return list;
   }
 
   configForClient(): HostedDirsResult {
     const dirs: HostedDirInfo[] = [];
     const seen = new Set<string>();
+    // 手改 hosted.json 时目录可能写成非 canonical 的写法（`~/link/...`），而授权状态是按
+    // canonical 记的：查表两种写法都试一次，不然会误报「未授权」。
+    const realByRaw = new Map(this.allowDirs().map((dir) => [dir.raw, dir.real]));
     for (const raw of this.config.dirs) {
       const path = expandHome(raw);
-      const exists = isDirectory(path);
+      const exists = this.cwdExists(path);
       dirs.push({
         path,
         name: basename(path) || path,
         sessionCount: [...this.records.values()].filter((record) => record.cwd === path).length,
         exists,
         allowed: true,
+        auth: this.dirAuth.get(path) ?? this.dirAuth.get(realByRaw.get(path) ?? "") ?? "unknown",
       });
       seen.add(path);
     }
@@ -420,6 +559,177 @@ export class HostedSessionManager {
   /** 设置界面改完 hosted.json 后重新读一次，不用重启 Bridge。 */
   reloadConfig(): void {
     this.config = readConfig(this.stateDir);
+    this.dirsCache = null;
+  }
+
+  /**
+   * 主动读一次目录，把 TCC 授权弹框提前到「加目录」这一刻。
+   *
+   * 必须走子进程：弹框没人点的时候，那个 `readdir` 会一直挂着（上一版就是会话里的 `find`
+   * 挂了两小时，把单线程的 Bridge 一起拖死）。子进程挂着不占主线程，超时直接杀掉，主线程
+   * 只拿到一个「还在等授权」的状态。
+   */
+  private probeDir(path: string, silent = false): void {
+    if (this.probing.has(path)) return;
+    this.probing.set(path, ++this.probeToken);
+    // silent 用于启动后复核已授权的目录：不把 UI 打回「等待授权」，只在结果变差时降级。
+    if (!silent) this.dirAuth.set(path, "pending");
+    this.probeQueue.push(path);
+    if (silent) this.silentProbes.add(path);
+    this.drainProbeQueue();
+  }
+
+  /** 启动后复核一遍已授权的目录：授权被撤销时把它们降级成 denied。 */
+  private reprobeAllowedDirs(): void {
+    this.reprobeTimer = null;
+    const seen = new Set<string>();
+    for (const entry of this.config.dirs) {
+      const path = expandHome(entry);
+      if (this.dirAuth.get(path) !== "ok") continue;
+      if (seen.has(path)) continue;
+      seen.add(path);
+      this.probeDir(path, true);
+    }
+  }
+
+  /** 队列里一次只跑一个：一个目录一个弹窗，不并发。 */
+  private drainProbeQueue(): void {
+    if (this.probeRunning) return;
+    let path: string | undefined;
+    let token = 0;
+    // 排队期间目录可能被移出白名单（probing 里已经删掉）：跳过，别为它弹框。
+    while ((path = this.probeQueue.shift()) !== undefined) {
+      const current = this.probing.get(path);
+      if (current !== undefined) {
+        token = current;
+        break;
+      }
+      path = undefined;
+    }
+    if (path === undefined) return;
+    this.probeRunning = true;
+    let settled = false;
+    const done = (result: "ok" | "denied" | "timeout" | "unknown", note: string): void => {
+      if (settled) return;
+      settled = true;
+      this.probeRunning = false;
+      this.probeCancel = null;
+      // 路径被移除后又加回来时登记号已经变了：这个结果作废，别把新的探测收掉。
+      if (this.probing.get(path) === token) {
+        this.probing.delete(path);
+        this.finishProbe(path, result === "timeout" ? "pending" : result, note);
+      }
+      this.drainProbeQueue();
+    };
+    this.probeCancel = this.startProbe(path, done);
+  }
+
+  /** 起一次探测，返回取消函数。默认走子进程：弹窗没人点时挂的是它，不是 Bridge 主线程。 */
+  private startProbe(
+    path: string,
+    done: (result: "ok" | "denied" | "timeout" | "unknown", note: string) => void,
+  ): () => void {
+    if (this.probeImpl) {
+      void this.probeImpl(path).then(
+        (result) => done(result, result === "ok" ? PROBED_OK(path) : result === "denied" ? DENIED_NOTE(path) : PROBE_TIMEOUT(path)),
+        (error: unknown) => done("denied", `探测目录失败：${path}（${String(error)}）`),
+      );
+      return () => undefined;
+    }
+    // 目录当 argv 传，不拼进脚本：路径里有引号也不会变成代码。
+    // 退出码区分「系统不给读」与「其它失败」：把「目录被删了」说成「去系统设置授权」是指错方向。
+    const script =
+      "try{require('fs').readdirSync(process.argv[1]);}" +
+      "catch(e){process.exit(e&&(e.code==='EPERM'||e.code==='EACCES')?2:1)}";
+    const child = nodeSpawn(process.execPath, ["-e", script, path], {
+      stdio: "ignore",
+      // 不继承环境变量、也不继承 Bridge 的 cwd：子进程只需要读一个目录，
+      // 多余的环境（token）与 cwd（可能正好在受保护目录里）都不该传下去。
+      env: {},
+      cwd: "/",
+    });
+    const cancel = (): void => {
+      clearTimeout(timer);
+      child.kill("SIGKILL");
+    };
+    // 弹框没人点：留 pending，进程杀掉。既不当可读（会让会话挂住），也不当拒绝
+    // （用户可能只是还没回来）。
+    const timer = setTimeout(() => {
+      done("timeout", PROBE_TIMEOUT(path));
+      cancel();
+    }, DIR_PROBE_TIMEOUT_MS);
+    timer.unref();
+    child.on("error", (error) => {
+      done("denied", `探测目录失败：${path}（${String(error)}）`);
+      cancel();
+    });
+    child.on("exit", (code, signal) => {
+      // 外部把探测子进程杀掉（不是我们的取消）：队列不能就此停摆，按超时收尾。
+      if (signal) {
+        done("timeout", PROBE_TIMEOUT(path));
+        return;
+      }
+      if (code === 0) done("ok", PROBED_OK(path));
+      else if (code === 2) done("denied", DENIED_NOTE(path));
+      else done("unknown", `探测目录失败（退出码 ${code}）：${path}`);
+      cancel();
+    });
+    return cancel;
+  }
+
+  private finishProbe(path: string, auth: DirAuth, note: string): void {
+    // 探测期间目录被移出白名单：结果作废（不能把一个已经删掉的目录写回 dir-auth.json）。
+    if (!this.dirAuth.has(path)) {
+      this.silentProbes.delete(path);
+      return;
+    }
+    if (this.silentProbes.delete(path)) {
+      // 复核：没变差就当没发生，避免 UI 闪一下「未授权」又变回来。
+      if (auth === "ok" || this.dirAuth.get(path) !== "ok") return;
+    } else if (this.dirAuth.get(path) !== "pending") {
+      return;
+    }
+    this.dirAuth.set(path, auth);
+    this.persistDirAuth();
+    this.log(`hosted: ${note}`);
+  }
+
+  private dirAuthPath(): string {
+    return join(this.hostedDir(), "dir-auth.json");
+  }
+
+  private loadDirAuth(): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(readFileSync(this.dirAuthPath(), "utf8"));
+    } catch {
+      return; // 没有这个文件：全部算「还没探过」。
+    }
+    if (!isRecord(parsed)) return;
+    for (const [path, value] of Object.entries(parsed)) {
+      // pending 是「当时没人点框」，不能持久化，否则重启后再也不弹。
+      if (value === "ok" || value === "denied") this.dirAuth.set(path, value);
+    }
+  }
+
+  private persistDirAuth(): void {
+    const payload: Record<string, string> = {};
+    for (const [path, auth] of this.dirAuth) {
+      if (auth === "ok" || auth === "denied") payload[path] = auth;
+    }
+    try {
+      // 一条 ok/denied 都没有时不落文件：pending 不该被持久化成「探过了」。
+      if (Object.keys(payload).length === 0) {
+        rmSync(this.dirAuthPath(), { force: true });
+        return;
+      }
+      mkdirSync(this.hostedDir(), { recursive: true, mode: 0o700 });
+      const tmp = `${this.dirAuthPath()}.tmp`;
+      writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 });
+      renameSync(tmp, this.dirAuthPath());
+    } catch (error) {
+      this.log(`hosted: 记录目录授权状态失败：${String(error)}`);
+    }
   }
 
   /**
@@ -460,9 +770,12 @@ export class HostedSessionManager {
    * 整份替换托管白名单。只给本机 admin 接口用：远程设备不能让白名单多出目录，
    * 否则「只有白名单里的目录能建会话」这层限制等于没有。
    */
-  setDirs(input: string[]): HostedDirsResult {
+  setDirs(input: string[], probe: string[] = []): HostedDirsResult {
     const dirs: string[] = [];
-    const current = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
+    /** 归一化后的目录 → 客户端当初给的写法（probe 按字符串匹配要用）。 */
+    const rawByTarget = new Map<string, string>();
+    const previous = new Set(this.config.dirs.map((dir) => this.compareDir(dir)));
+    const current = previous;
     for (const item of input) {
       const raw = String(item ?? "").trim();
       if (!raw) continue;
@@ -476,15 +789,46 @@ export class HostedSessionManager {
         }
         throw new RpcError("invalid_params", `目录不存在：${target}`);
       }
-      if (!dirs.includes(target)) dirs.push(target);
+      if (!dirs.includes(target)) {
+        dirs.push(target);
+        rawByTarget.set(target, raw);
+      }
     }
     if (dirs.length > MAX_HOSTED_DIRS) {
       throw new RpcError("invalid_params", `托管目录最多 ${MAX_HOSTED_DIRS} 个`);
     }
     if (dirs.join("\n") !== this.config.dirs.join("\n")) {
+      // 被移出白名单的目录：授权状态与排队的探测一起清掉，免得「已经删掉的目录」还在
+      // 等授权、还在写 dir-auth.json。正在跑的那个不硬杀（弹窗已经弹出去了，杀掉只是
+      // 让它闪一下），结果回来时由 finishProbe 的守卫丢弃。
+      const kept = new Set(dirs);
+      for (const path of [...this.dirAuth.keys()]) {
+        if (kept.has(path)) continue;
+        this.dirAuth.delete(path);
+        this.probing.delete(path);
+        const queued = this.probeQueue.indexOf(path);
+        if (queued >= 0) this.probeQueue.splice(queued, 1);
+      }
+      this.persistDirAuth();
       this.config = { ...this.config, dirs };
+      // 白名单换了，授权根缓存与闸门里的工程根立刻作废：否则刚被移除的目录还能建会话。
+      this.dirsCache = null;
       this.writeConfig();
       this.log(`hosted: 白名单改为 ${dirs.length} 个目录`);
+    }
+    // 只探「这次新加的」和客户端显式要求重探的（菜单栏点「+」重新添加已存在的目录）。
+    // 整份写回时不能把其它未授权目录也排一遍：删一个目录会让剩下的挨个弹框。
+    // 客户端给的 probe 只用来「标记哪些要重探」，一律按字符串比对，绝不 realpath：
+    // 那是客户端可控的路径，越界时连一次 `realpath` 都不该发生（同 fs-scope 的原则）。
+    const asked = new Set<string>();
+    for (const item of probe.slice(0, MAX_HOSTED_DIRS)) {
+      const raw = String(item ?? "").trim();
+      if (raw) asked.add(raw);
+    }
+    for (const target of dirs) {
+      if (this.dirAuth.get(target) === "ok") continue;
+      if (previous.has(this.compareDir(target)) && !asked.has(rawByTarget.get(target) ?? target)) continue;
+      this.probeDir(target);
     }
     return this.configForClient();
   }
@@ -554,7 +898,7 @@ export class HostedSessionManager {
     };
     for (const raw of this.config.dirs) {
       const path = expandHome(raw);
-      if (isDirectory(path)) push(path);
+      if (this.cwdExists(path)) push(path);
     }
     for (const record of this.records.values()) push(record.cwd);
     return projects;
@@ -787,8 +1131,9 @@ export class HostedSessionManager {
   async remove(sessionId: string): Promise<void> {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
-    this.kill(record.id);
-    await this.stopInSessiond(record.id);
+    // 删记录前把后代收干净：记录一删，子代理 runner 的归属就查不到了。
+    const { leftover } = await this.teardown(record.id);
+    if (leftover.length > 0) this.log(`hosted: remove ${record.id} 仍有后代没停掉：${leftover.join(", ")}`);
     this.messages.delete(record.id);
     try {
       rmSync(this.transcriptPath(record.id), { force: true });
@@ -796,6 +1141,8 @@ export class HostedSessionManager {
       this.log(`hosted: remove transcript failed: ${String(error)}`);
     }
     removePiAgentDir(this.piAgentDirOf(record.id));
+    this.trees.forget(record.id);
+    this.stopping.delete(record.id);
     this.records.delete(record.id);
     this.persistRecords();
     this.log(`hosted: removed ${record.id}`);
@@ -816,7 +1163,7 @@ export class HostedSessionManager {
   resume(sessionId: string): SessionSummary {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
-    if (!isDirectory(record.cwd)) {
+    if (!this.cwdExists(record.cwd)) {
       throw new RpcError("adapter_unavailable", `工作目录已不存在：${record.cwd}`);
     }
     if (!this.live.has(record.id)) {
@@ -842,10 +1189,16 @@ export class HostedSessionManager {
     // 用户主动关掉的会话不该在 Bridge 重启后被自动续跑；kill 本身不写注册表。
     record.pendingText = undefined;
     this.persistRecords();
-    const tracked = this.kill(record.id);
-    // Bridge 没跟踪到、但守护进程里还跑着的进程同样要停。
-    const orphan = await this.stopInSessiond(record.id);
-    return { stopped: tracked || orphan, session: this.summary(record) };
+    // 进程组收不到 setsid 出去的后台子代理（pi-subagents 的后台 runner 就是），
+    // teardown 会按 pid 逐个收，并把收不掉的 pid 带出来。
+    const { leftover, stopped } = await this.teardown(record.id);
+    const result: HostedStopResult = { stopped, session: this.summary(record) };
+    if (leftover.length > 0) {
+      // 停不干净不能默默返回成功：把 pid 交出去，日志里也留一条。
+      this.log(`hosted: stop ${record.id} 还有 ${leftover.length} 个后代进程没杀掉：${leftover.join(", ")}`);
+      result.leftover = leftover;
+    }
+    return result;
   }
 
   /** 网页上的模型选择：托管会话可以从网页换模型，换完下一条消息按新模型 resume。 */
@@ -906,10 +1259,15 @@ export class HostedSessionManager {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换模型");
     }
     // 先停进程再改记录：停不掉就报错，别让界面显示新模型而进程还跑着旧的。
-    if (live) this.kill(record.id);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
     // 换模型必须让旧进程真的退出，否则下一条消息会接回还在跑的那一个，模型没换。
     // 守护进程里没有跟踪到的旧进程（上一代 Bridge 留下的）也只能由它杀掉。
-    await this.stopInSessiond(record.id, true);
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     if (model) record.model = model;
     else delete record.model;
     // 实际模型是上一轮 init 报的，换了模型旧值就作废，下次运行重新记录。
@@ -964,8 +1322,13 @@ export class HostedSessionManager {
     } else {
       removePiAgentDir(agentDir);
     }
-    if (live) this.kill(record.id);
-    await this.stopInSessiond(record.id, true);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     if (model) record.subagentModel = model;
     else delete record.subagentModel;
     if (thinking) record.subagentThinking = thinking;
@@ -1000,8 +1363,13 @@ export class HostedSessionManager {
       throw new RpcError("conflict", "这一轮还在跑，等它结束再换思考等级");
     }
     // 进程不在、或者要改回跟随 pi 设置：停掉旧进程，下一条消息按新参数启动。
-    if (live) this.kill(record.id);
-    await this.stopInSessiond(record.id, true);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     if (level) record.thinking = level;
     else delete record.thinking;
     this.touch(record);
@@ -1047,8 +1415,13 @@ export class HostedSessionManager {
     }
     // 窗口还未知（还没跑过一轮、配置里也查不到）时先不建目录，等下次启动再算。
     if (!prepared) removePiAgentDir(agentDir);
-    if (live) this.kill(record.id);
-    await this.stopInSessiond(record.id, true);
+    // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
+    // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
+    // 收不干净就不能装作切换成功。
+    const { leftover } = await this.teardown(record.id, { strict: true });
+    if (leftover.length > 0) {
+      throw new RpcError("conflict", `旧进程派生的进程没停掉，设置没有切换：${leftover.join(", ")}`);
+    }
     delete record.compactionReserveTokens;
     if (value !== null) record.compactionTriggerPercent = value;
     else delete record.compactionTriggerPercent;
@@ -1241,8 +1614,7 @@ export class HostedSessionManager {
     if (record.agent === "pi") {
       // 后台子代理跑在 pi 进程内部，abort 停不掉，只能把进程停掉。
       if (background) {
-        this.kill(record.id);
-        void this.stopInSessiond(record.id);
+        void this.teardown(record.id);
         // 那一轮是正常收尾的，不置 interrupted：否则网页会把最后一条回复画成「已停止」。
         record.pendingText = undefined;
         this.appendRecord(record, {
@@ -1304,7 +1676,7 @@ export class HostedSessionManager {
     const record = this.record(sessionId);
     if (!record) throw new RpcError("not_found", "未知托管会话");
     if (!text.trim()) throw new RpcError("invalid_params", "消息不能为空");
-    if (!isDirectory(record.cwd)) {
+    if (!this.cwdExists(record.cwd)) {
       throw new RpcError("adapter_unavailable", `工作目录已不存在：${record.cwd}`);
     }
     if (!this.live.has(record.id)) this.start(record, true);
@@ -1440,6 +1812,21 @@ export class HostedSessionManager {
         this.log(`hosted: auto-resume gave up for ${record.id} after ${attempts} attempts`);
         continue;
       }
+      // 白名单改掉之后旧会话可能指着受保护目录：自动续跑不能绕过闸门起进程。
+      if (!this.cwdExists(record.cwd)) {
+        record.pendingText = undefined;
+        record.interrupted = true;
+        this.appendRecord(record, {
+          messageId: randomUUID(),
+          sessionId: record.id,
+          role: "system",
+          createdAt: Date.now(),
+          blocks: [{ type: "text", text: `工作目录不可用，没有自动续跑：${record.cwd}` }],
+        });
+        this.persistRecords();
+        this.log(`hosted: auto-resume skipped ${record.id}: 工作目录不可用 ${record.cwd}`);
+        continue;
+      }
       record.resumeAttempts = attempts + 1;
       this.persistRecords();
       try {
@@ -1472,6 +1859,20 @@ export class HostedSessionManager {
   dispose(): void {
     if (this.sweeper) clearInterval(this.sweeper);
     this.sweeper = null;
+    if (this.stallTimer) clearInterval(this.stallTimer);
+    this.stallTimer = null;
+    if (this.treeTimer) clearInterval(this.treeTimer);
+    this.treeTimer = null;
+    this.trees.clear();
+    this.stopping.clear();
+    if (this.reprobeTimer) clearTimeout(this.reprobeTimer);
+    this.reprobeTimer = null;
+    this.probeQueue.length = 0;
+    this.probeRunning = false;
+    this.probeCancel?.();
+    this.probeCancel = null;
+    this.probing.clear();
+    this.silentProbes.clear();
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
     this.sessiond?.close();
@@ -1583,10 +1984,15 @@ export class HostedSessionManager {
       busy: false,
       pending: null,
       startedAt: Date.now(),
+      lastOutputAt: Date.now(),
       stderrTail: "",
       resumed: resume,
     };
     this.live.set(record.id, live);
+    // 立刻登记根进程并开始盯后代：托管进程派生的子代理 runner 是 detached 起的，
+    // 停会话时只能按 pid 点名，晚一步它就 re-parent 到 pid 1 了。
+    this.rememberTrees();
+    this.watchTrees();
     if (record.agent === "pi") this.attachPi(record, live);
     child.stdout?.setEncoding?.("utf8");
     // RemoteChild 会把 sessiond 的 seq 作为第二个参数带上，用来推进 ack。
@@ -1627,6 +2033,10 @@ export class HostedSessionManager {
       if (current === live) this.live.delete(record.id);
       if (live.finished) return;
       live.finished = true;
+      // 进程自己退了（正常收尾、崩溃、换模型重启）：登记表里可能还留着 setsid 出去的
+      // 后台子代理，一并收掉。用此刻的快照，后面重启的新进程不能被算进来。
+      // 主动停止时停止流程自己会核对，这里不用重复扫。
+      if (!this.stopping.has(record.id)) void this.reapOrphans(record.id, this.trees.known(record.id));
       // 会话记录从来没生成过（例如上次 spawn 直接失败）时，--resume 会立刻退出；
       // 这种会话改走 --session-id 新建一次，用户不必手动删掉重来。
       if (
@@ -1638,6 +2048,10 @@ export class HostedSessionManager {
         /no conversation found/i.test(live.stderrTail)
       ) {
         this.log(`hosted ${record.id}: 会话记录不存在，改为新建`);
+        if (!this.cwdExists(record.cwd)) {
+          this.log(`hosted ${record.id}: 工作目录不可用，不再新建进程 ${record.cwd}`);
+          return;
+        }
         try {
           this.start(record, false);
           return;
@@ -1683,6 +2097,12 @@ export class HostedSessionManager {
 
   /** 子进程输出进哪条解析路径：pi 走协议客户端，Claude Code 走 stream-json 解析。 */
   private feedChild(record: HostedRecord, live: LiveProcess, chunk: string, seq?: number): void {
+    // 任何一段输出都算「这一轮还在动」：卡住标记靠它清掉。
+    live.lastOutputAt = Date.now();
+    if (live.stalledSince) {
+      live.stalledSince = undefined;
+      this.log(`hosted ${record.id} 恢复输出`);
+    }
     if (live.pi) {
       live.pi.feed(chunk);
       if (seq !== undefined) this.advanceSeq(record, seq);
@@ -2159,7 +2579,7 @@ export class HostedSessionManager {
       record.pendingText = undefined;
       record.resumeAttempts = 0;
       // 走代理的模型在 assistant 事件里可能报 0 用量；回合结束时按 CLI 转录里的真实用量兜底。
-      const context = contextFromTranscript(record);
+      const context = contextFromTranscript(record, this.fs);
       if (context) record.context = context;
       const isError = event["is_error"] === true;
       const text = typeof event["result"] === "string" ? event["result"].trim() : "";
@@ -2323,9 +2743,32 @@ export class HostedSessionManager {
     return this.piSessionIds(record).some((id) => piSubagentRunning(id));
   }
 
+  /**
+   * 记录里的 cwd 的状态。先过枚举闸门再 stat：白名单改掉之后，旧记录可能指着
+   * `~/下载`、`~/文档` 这类受保护目录，直接 stat 就是一次系统授权弹窗。
+   *
+   * 越界与不存在要分开：前者是「白名单里没有它」，后者是「目录被删了」，
+   * 界面上引向的排查动作完全不同。
+   */
+  private cwdState(path: string): "ok" | "missing" | "out-of-scope" {
+    try {
+      this.fs.assert(path, "hosted.cwd");
+    } catch (error) {
+      // 越界：日志已经在闸门里记过，这里只回答状态。
+      if (error instanceof FsScopeError) return "out-of-scope";
+      throw error;
+    }
+    return isDirectory(path) ? "ok" : "missing";
+  }
+
+  private cwdExists(path: string): boolean {
+    return this.cwdState(path) === "ok";
+  }
+
   private summary(record: HostedRecord): SessionSummary {
     const live = this.live.get(record.id);
-    const dirExists = isDirectory(record.cwd);
+    const cwdState = this.cwdState(record.cwd);
+    const dirExists = cwdState === "ok";
     // 进程里真正生效的压缩预留量；和记录里的设置不一致说明还没重启。
     const effectiveReserve = live ? this.liveCompactionReserve(record) : undefined;
     const summary: SessionSummary = {
@@ -2339,6 +2782,7 @@ export class HostedSessionManager {
       archived: record.archived === true,
       live: Boolean(live),
       busy: this.busyOf(record),
+      ...(live?.stalledSince ? { stalledSince: live.stalledSince } : {}),
       needsDecision: Boolean(live?.pending || live?.piPending),
       canSend: dirExists,
       hosted: true,
@@ -2358,7 +2802,12 @@ export class HostedSessionManager {
       ...(effectiveReserve !== undefined ? { compactionEffectiveReserveTokens: effectiveReserve } : {}),
       cwd: record.cwd,
     };
-    if (!dirExists) summary.sendBlockedReason = `工作目录已不存在：${record.cwd}`;
+    if (!dirExists) {
+      summary.sendBlockedReason =
+        cwdState === "out-of-scope"
+          ? `工作目录已不在托管白名单里：${record.cwd}`
+          : `工作目录已不存在：${record.cwd}`;
+    }
     return summary;
   }
 
@@ -2369,10 +2818,16 @@ export class HostedSessionManager {
         `没有配置可托管的目录：编辑 ${join(this.stateDir, "hosted.json")} 的 dirs 后重启 Bridge`,
       );
     }
-    const target = canonical(expandHome(input.trim()));
-    const allowed = this.config.dirs
-      .map((dir) => canonical(expandHome(dir)))
-      .filter((dir): dir is string => dir !== null);
+    const dirs = this.allowDirs();
+    const given = expandHome(input.trim());
+    // 先按字符串比（白名单的两种写法都认）：客户端可以把路径指到 `~/下载`、`~/音乐`，
+    // 对客户端路径做 realpath 就是一次系统授权弹窗 —— 不在白名单里就直接拒绝，
+    // 根本不需要碰文件系统。
+    const hit = dirs.find((dir) => dir.raw === given || dir.real === given);
+    const allowed = dirs.map((dir) => dir.real);
+    // 写法不一致（客户端给 `/var/...`、白名单里存 `/private/var/...`）时才解析一次。
+    // 解析前先过闸门：`~/下载` 这类路径在这一步就被拒，不会走到 realpath。
+    const target = hit ? hit.real : this.fs.check(given).ok ? canonical(given) : null;
     if (!target || !allowed.includes(target)) {
       throw new RpcError("unauthorized", `目录不在允许列表中：${input}（允许：${allowed.join("、") || "无"}）`);
     }
@@ -2479,6 +2934,7 @@ export class HostedSessionManager {
     return record ?? null;
   }
 
+  /** 同步兜底：只发进程组信号，给进程退出前的收尾用；真正收整棵树走 teardown。 */
   private kill(id: string): boolean {
     const live = this.live.get(id);
     if (!live) return false;
@@ -2498,8 +2954,209 @@ export class HostedSessionManager {
     return true;
   }
 
+  /**
+   * 停一个会话的进程，以及它派生的整棵树。
+   *
+   * 顺序有讲究：先登记后代、再把整棵树冻住杀掉（killTree 里做），守护进程那层放最后。
+   * 反过来先杀主进程的话，它临死前派生的子代理会 re-parent 到 pid 1，ppid 线索断掉，
+   * 之后就再也找不回来了 —— 这正是「停掉会话后子代理还在跑」的成因。
+   */
+  private async teardown(
+    id: string,
+    options: { tree?: boolean; strict?: boolean } = {},
+  ): Promise<{ leftover: number[]; stopped: boolean }> {
+    this.stopping.add(id);
+    const live = this.live.get(id);
+    const rootPid = live?.child.pid;
+    let stopped = live !== undefined;
+    const leftover: number[] = [];
+    try {
+      if (live) {
+        live.killed = true;
+        // 根进程还活着时 ppid 链才完整：先登记再动手。
+        this.rememberTrees();
+        this.live.delete(id);
+        try {
+          live.child.stdin?.end();
+        } catch {
+          // ignore
+        }
+      }
+      const roots = typeof rootPid === "number" && rootPid > 1 ? [rootPid] : [];
+      // 不 await：endTree 的同步段就把整棵树 SIGSTOP 冻住了，冻结之后根进程不可能再
+      // 派生新进程，所以下面的进程组信号可以立刻发，不会留出赛跑窗口。
+      const tree = options.tree === false ? null : this.endTree(id, roots);
+      // 进程组级别的兜底：万一还有没登记到的后代。冻住的进程会先挂住这个信号，
+      // 等 killTree 放行（SIGCONT）后才真正退出。
+      if (live) {
+        killProcess(live.child, "SIGTERM");
+        const timer = setTimeout(() => {
+          killProcess(live.child, "SIGKILL");
+        }, KILL_GRACE_MS);
+        timer.unref();
+      }
+      if (tree) {
+        const result = await tree;
+        leftover.push(...result.leftover);
+        if (result.killed > 0) stopped = true;
+      }
+      if (await this.stopInSessiond(id, options.strict === true)) stopped = true;
+      if (options.tree !== false) {
+        // 守护进程里那份可能带着我们没见过的后代：按它的 pid 再收一遍。
+        const again = await this.endTree(id);
+        for (const pid of again.leftover) if (!leftover.includes(pid)) leftover.push(pid);
+      }
+      return { leftover, stopped };
+    } finally {
+      this.stopping.delete(id);
+    }
+  }
+
+  /**
+   * 收掉一个会话的整棵树：登记表里的后代 + 会话根 + 子代理 runner。
+   *
+   * SIGTERM → 宽限 → SIGKILL → 核对都由 killTree 负责；杀不掉的 pid 会带出去，
+   * 调用方必须显式报出去，不能当成停成功。
+   */
+  private async endTree(id: string, roots: number[] = []): Promise<{ leftover: number[]; killed: number }> {
+    const registered = this.trees.known(id);
+    const rootPid = this.live.get(id)?.child.pid;
+    if (typeof rootPid === "number" && rootPid > 1) roots = [...roots, rootPid];
+    else if (roots.length === 0) {
+      // Bridge 没有 live 条目（重启后还没 attach 回来）：pid 只有守护进程知道。
+      const daemon = await this.daemonPid(id);
+      if (daemon) roots = [...roots, daemon];
+    }
+    const extra = this.subagentRunnerPids(id);
+    // 先按副本干活再清表：清理期间重启的新进程不会被算进来。
+    this.trees.forget(id);
+    if (registered.size === 0 && roots.length === 0 && extra.length === 0) return { leftover: [], killed: 0 };
+    const result = await killTree(registered, roots, extra, {
+      graceMs: KILL_GRACE_MS,
+      forbidden: this.foreignPids(id),
+      log: (line) => this.log(`hosted ${id}: ${line}`),
+    });
+    if (result.terminated.length > 0) this.log(`hosted ${id}: 收掉 ${result.terminated.length} 个后代进程`);
+    return { leftover: result.leftover, killed: result.terminated.length };
+  }
+
+  /**
+   * 会话进程自己退出（正常收尾、崩溃、换模型重启）时收掉它还留着的后代。
+   *
+   * 用退出那一刻的登记表快照：随后可能立刻按新参数重启，不能把新进程的子孙算进来。
+   */
+  private async reapOrphans(id: string, registered: Map<number, string>): Promise<void> {
+    const extra = this.subagentRunnerPids(id);
+    this.trees.forget(id);
+    if (registered.size === 0 && extra.length === 0) return;
+    const result = await killTree(registered, [], extra, {
+      graceMs: ORPHAN_GRACE_MS,
+      forbidden: this.foreignPids(id),
+      log: (line) => this.log(`hosted ${id}: ${line}`),
+    });
+    if (result.terminated.length > 0) {
+      this.log(`hosted ${id}: 进程已退出，收掉 ${result.terminated.length} 个残留后代`);
+    }
+    if (result.leftover.length > 0) {
+      this.log(`hosted ${id}: 进程已退出，仍有后代没停掉：${result.leftover.join(", ")}`);
+    }
+  }
+
+  /** 这个会话派生的、还在跑的后台子代理 runner 的 pid（它们不在会话进程组里）。 */
+  private subagentRunnerPids(id: string): number[] {
+    const record = this.records.get(id);
+    if (!record || record.agent !== "pi") return [];
+    return this.piSessionIds(record).flatMap((piId) => piSubagentRunnerPids(piId));
+  }
+
+  /** 别的会话的进程：收自己的时候绝不能误伤。 */
+  private foreignPids(id: string): number[] {
+    const pids: number[] = [];
+    for (const [other, live] of this.live) {
+      if (other === id) continue;
+      if (typeof live.child.pid === "number") pids.push(live.child.pid);
+      for (const pid of this.trees.known(other).keys()) pids.push(pid);
+    }
+    return pids;
+  }
+
+  /** 守护进程里记着的会话 pid：Bridge 重启后还没 attach 回来时，只能问它。 */
+  private async daemonPid(id: string): Promise<number | undefined> {
+    if (!this.sessiond) return undefined;
+    try {
+      const infos = await this.sessiond.list();
+      const info = infos.find((item) => stripPrefix(item.sessionId) === id);
+      return info?.running ? info.pid ?? undefined : undefined;
+    } catch (error) {
+      this.log(`hosted: 查守护进程里的 ${id} 失败：${String(error)}`);
+      return undefined;
+    }
+  }
+
+  /** 把在跑会话的后代登记进内存表：停止时按 pid 点名，不能只靠进程组。 */
+  private rememberTrees(): void {
+    const roots = new Map<string, number>();
+    for (const [id, live] of this.live) {
+      const pid = live.child.pid;
+      if (typeof pid === "number" && pid > 1) roots.set(id, pid);
+    }
+    if (roots.size === 0) return;
+    const nodes = snapshotProcesses();
+    for (const [id, pid] of roots) this.trees.remember(id, [pid], nodes);
+  }
+
+  private watchTrees(): void {
+    if (this.treeTimer) return;
+    this.treeTimer = setInterval(() => {
+      if (this.live.size === 0) {
+        if (this.treeTimer) clearInterval(this.treeTimer);
+        this.treeTimer = null;
+        return;
+      }
+      this.rememberTrees();
+    }, TREE_SCAN_MS);
+    this.treeTimer.unref();
+  }
+
   private stopAll(): void {
-    for (const id of [...this.live.keys()]) this.kill(id);
+    for (const id of [...this.live.keys()]) {
+      // 同步兜底先发进程组信号，再异步收整棵树（能跑完就收干净）。
+      this.kill(id);
+      void this.teardown(id);
+    }
+  }
+
+  /**
+   * 忙着的会话长时间没有输出就标成「疑似卡住」。只做检测与状态上报：
+   * 系统授权弹窗由用户自己点，Bridge 绝不代劳。
+   */
+  private checkStalls(): void {
+    const now = Date.now();
+    for (const [id, live] of this.live) {
+      if (live.finished) continue;
+      const record = this.records.get(id);
+      // 侧栏的「运行中」用的是 busyOf（含 pi 后台子代理），这里必须同一个口径，
+      // 否则子代理卡住时会话看起来在跑、却永远不会被判成卡住。
+      const busy = record ? this.busyOf(record) : live.busy;
+      // 正在等网页回答权限问题不算卡住：那是人没回，不是进程不动。
+      if (!busy || live.pending || live.piPending) {
+        live.stalledSince = undefined;
+        continue;
+      }
+      const idle = now - live.lastOutputAt;
+      if (idle < this.stallMs) {
+        if (live.stalledSince) {
+          live.stalledSince = undefined;
+          this.log(`hosted ${id} 恢复输出`);
+        }
+        continue;
+      }
+      if (live.stalledSince) continue;
+      live.stalledSince = live.lastOutputAt + this.stallMs;
+      this.log(
+        `hosted: 会话 ${id} 已经 ${Math.round(idle / 1000)} 秒没有输出，可能卡在系统授权弹窗或外部等待里`,
+      );
+    }
   }
 
   private sweepIdle(): void {
@@ -2513,9 +3170,8 @@ export class HostedSessionManager {
       if (record.agent === "pi" && this.piSessionIds(record).some((sid) => piSubagentRunning(sid))) continue;
       if (now - record.lastActiveAt <= this.config.idleTimeoutMs) continue;
       this.log(`hosted: idle timeout, stopping ${id}`);
-      this.kill(id);
-      // 接回过的子进程万一没停掉，守护进程里还会留着：下次发消息就会接回旧进程。
-      void this.stopInSessiond(id);
+      // 接回过的子进程、以及它派生的子代理，都要一起收掉。
+      void this.teardown(id);
     }
   }
 
@@ -2612,7 +3268,7 @@ export class HostedSessionManager {
     let changed = false;
     for (const record of this.records.values()) {
       if (record.context) continue;
-      const context = contextFromTranscript(record);
+      const context = contextFromTranscript(record, this.fs);
       if (!context) continue;
       record.context = context;
       changed = true;
@@ -2673,11 +3329,11 @@ export class HostedSessionManager {
 }
 
 /** CLI 把每个会话的转录写在 ~/.claude/projects/<cwd>/<id>.jsonl，末尾那条 assistant 带着用量。 */
-function contextFromTranscript(record: HostedRecord): ContextUsage | undefined {
+function contextFromTranscript(record: HostedRecord, fs: FsScope): ContextUsage | undefined {
   const root = join(homedir(), ".claude", "projects");
   let dirs: string[];
   try {
-    dirs = readdirSync(root);
+    dirs = fs.readdirNames(root, "hosted.transcript");
   } catch {
     return undefined;
   }
@@ -2686,7 +3342,7 @@ function contextFromTranscript(record: HostedRecord): ContextUsage | undefined {
   let text: string;
   let truncated = false;
   try {
-    truncated = statSync(file).size > TRANSCRIPT_TAIL_BYTES;
+    truncated = fs.stat(file, "hosted.transcript").size > TRANSCRIPT_TAIL_BYTES;
     text = readTail(file, TRANSCRIPT_TAIL_BYTES);
   } catch {
     return undefined;

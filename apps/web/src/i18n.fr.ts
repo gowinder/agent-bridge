@@ -393,6 +393,7 @@ export const FR: Record<string, string> = {
     "Les tâches vivent dans la base de Bridge : changer de navigateur ou vider le cache ne les perd pas ; un autre hôte, c'est une autre base.",
   "待发送内容，可直接编辑": "Contenu à envoyer — modifiable directement",
   待回答: "En attente de votre réponse",
+  疑似卡住: "Possible blocage",
   忘记密码: "Mot de passe oublié",
   "思考中…": "Réflexion…",
   "思考程度越高，回答更细致，但更慢也更费额度。":
@@ -757,4 +758,5 @@ export const FR: Record<string, string> = {
   "提问": "Demander",
   "技能": "Compétence",
   "停止任务": "Arrêter la tâche",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} dossier(s) n'ont pas l'autorisation de fichiers macOS : l'indexation et la lecture échoueront. Autorisez la demande sur le Mac ou rajoutez-les dans les réglages de la barre de menus",
 };

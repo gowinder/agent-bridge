@@ -37,6 +37,7 @@ import { contextUsageFromUsage, sessionTokensOf, tokenUsageFromClaude } from "..
 import { modelCatalog } from "../model-catalog.js";
 import { subagentDirsFor, subagentTasks as readSubagentTasks } from "../subagents.js";
 import { RpcError, truncate, type MessagePage, type MessageText, type SessionAdapter } from "./types.js";
+import { FsScope } from "../fs-scope.js";
 import { toolSummaryOf } from "../tool-summary.js";
 
 const SOCKET_DIR = "/tmp/cc-socks";
@@ -46,6 +47,12 @@ const SESSION_ROOTS = [
   join(SUPPORT_DIR, "Claude", "claude-code-sessions"),
 ];
 const PROJECTS_DIR = join(homedir(), ".claude", "projects");
+
+/**
+ * 转录里的 cwd 不可信：它可能落在受保护目录上。这里只按主目录规则过闸门，
+ * `~/.claude` 这类点目录照旧读得到。
+ */
+const gitScope = new FsScope({ roots: () => [], log: (line) => console.log(line) });
 // 桌面端每个打开的会话进程都会写 <pid>.json（pid → sessionId / hostSessionId / socket）。
 const LIVE_SESSIONS_DIR = join(homedir(), ".claude", "sessions");
 /** ps 的启动时间与元数据里的 startedAt 允许的误差，超出即视为 pid 被复用。 */
@@ -622,6 +629,9 @@ export class ClaudeCodeAdapter implements SessionAdapter {
     if (!cwd) return null;
     try {
       const dotGit = join(cwd, ".git");
+      // 转录里的 cwd 可能指着 `~/文档/...`：列一次会话列表就 stat 一次受保护目录，
+      // 弹一次系统授权。先过闸门，越界就当作没有分支名。
+      gitScope.assert(dotGit, "git.branch");
       let headPath = join(dotGit, "HEAD");
       if (statSync(dotGit).isFile()) {
         const pointer = readFileSync(dotGit, "utf8").trim();
@@ -629,6 +639,7 @@ export class ClaudeCodeAdapter implements SessionAdapter {
         if (!match?.[1]) return null;
         headPath = join(resolve(cwd, match[1]), "HEAD");
       }
+      gitScope.assert(headPath, "git.branch");
       const head = readFileSync(headPath, "utf8").trim();
       const ref = /^ref:\s*refs\/heads\/(.+)$/.exec(head);
       if (ref?.[1]) return ref[1];

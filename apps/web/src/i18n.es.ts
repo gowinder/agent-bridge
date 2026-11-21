@@ -388,6 +388,7 @@ export const ES: Record<string, string> = {
     "Las tareas viven en la base de datos de Bridge, así que cambiar de navegador o borrar la caché no las pierde; otro equipo es otra base de datos.",
   "待发送内容，可直接编辑": "Contenido por enviar: puedes editarlo directamente",
   待回答: "Esperando tu respuesta",
+  疑似卡住: "Posible bloqueo",
   忘记密码: "He olvidado la contraseña",
   "思考中…": "Pensando…",
   "思考程度越高，回答更细致，但更慢也更费额度。":
@@ -749,4 +750,5 @@ export const ES: Record<string, string> = {
   "提问": "Preguntar",
   "技能": "Habilidad",
   "停止任务": "Detener la tarea",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} carpeta(s) no tienen permiso de archivos de macOS, así que la indexación y la lectura fallarán: permite el aviso en el Mac o vuelve a añadirlas en los ajustes de la barra de menús",
 };

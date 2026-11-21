@@ -23,6 +23,8 @@ function harness() {
   const store = new Store(join(dir, "state"));
   store.setMeta("devtools_files_enabled", "1");
   const adapters = {
+    // 枚举闸门的基础根来自托管白名单，测试里没有托管会话。
+    hostedDirs: () => ({ enabled: false, dirs: [], idleTimeoutMs: 0, permissionModes: [], allowBypassPermissions: false }),
     projects: async () => ({ projects: [{ projectId: "p1", name: "p", cwd: link }] }),
     session: async (id) => {
       if (id !== "s1") throw new Error("unknown session");

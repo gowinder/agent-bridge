@@ -397,6 +397,7 @@ export const DE: Record<string, string> = {
     "Aufgaben liegen in der Datenbank von Bridge: Browserwechsel oder Cache leeren verlieren sie nicht; ein anderer Host ist eine andere Datenbank.",
   "待发送内容，可直接编辑": "Zu sendender Inhalt — direkt bearbeitbar",
   待回答: "Wartet auf deine Antwort",
+  疑似卡住: "Möglicherweise hängt",
   忘记密码: "\u0050asswort vergessen",
   "思考中…": "Denkt nach…",
   "思考程度越高，回答更细致，但更慢也更费额度。":
@@ -762,4 +763,5 @@ export const DE: Record<string, string> = {
   "提问": "Fragen",
   "技能": "Skill",
   "停止任务": "Aufgabe stoppen",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} Ordner haben keinen macOS-Dateizugriff, daher schlagen Indexierung und Lesen fehl: erlaube die Abfrage am Mac oder füge sie in den Einstellungen der Menüleiste erneut hinzu",
 };

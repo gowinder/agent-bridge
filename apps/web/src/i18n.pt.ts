@@ -397,6 +397,7 @@ export const PT: Record<string, string> = {
     "As tarefas ficam no banco do Bridge: trocar de navegador ou limpar o cache não as perde; outro host é outro banco.",
   "待发送内容，可直接编辑": "Conteúdo a enviar — pode editar direto",
   待回答: "Aguardando sua resposta",
+  疑似卡住: "Possivelmente travado",
   忘记密码: "Esqueci a Senha",
   "思考中…": "Pensando…",
   "思考程度越高，回答更细致，但更慢也更费额度。":
@@ -763,4 +764,5 @@ export const PT: Record<string, string> = {
   "提问": "Perguntar",
   "技能": "Habilidade",
   "停止任务": "Parar a tarefa",
+  "；{0} 个目录还没有 macOS 的文件访问授权，索引和读取会失败：到 Mac 上点「允许」，或在菜单栏设置里重新添加一次": "; {0} pasta(s) não têm autorização de ficheiros do macOS, por isso a indexação e a leitura falham: permita o pedido no Mac ou adicione-as de novo nas definições da barra de menus",
 };
