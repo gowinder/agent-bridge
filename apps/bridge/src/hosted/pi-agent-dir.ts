@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { CONTEXT_FILE_NAMES, HOSTED_GUARD_CONTEXT_FILE } from "./hosted-prompt.js";
 
 /** 用户真正的 pi agent 目录；Bridge 自己也可能被 PI_CODING_AGENT_DIR 指到别处。 */
 export function piAgentSourceDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -26,12 +27,17 @@ export function piAgentSourceDir(env: NodeJS.ProcessEnv = process.env): string {
   return configured ? configured : join(homedir(), ".pi", "agent");
 }
 
-/** 子代理与压缩在 settings.json 里的覆盖项；都没设时不另建目录。 */
+/** 子代理与压缩在 settings.json 里的覆盖项；都没设、也没注入准则时不另建目录。 */
 export interface PiSubagentSettings {
   model?: string;
   thinking?: string;
   /** `compaction.reserveTokens`：窗口减掉它之后就是压缩触发点。 */
   reserveTokens?: number;
+  /**
+   * 写进 agent 目录的 AGENTS.md（全局上下文）。主会话与继承全局上下文的子代理都会读到，
+   * 用来告诉 agent 不要扫描主目录，避免 macOS 授权弹窗把命令挂住。
+   */
+  guardPrompt?: string;
 }
 
 /**
@@ -81,15 +87,15 @@ function rescueRuntimeDir(target: string, source: string, name: string): void {
 
 /**
  * 准备这个会话专用的 pi agent 目录，返回要放进 `PI_CODING_AGENT_DIR` 的路径。
- * 没设子代理模型与思考等级、或读不到用户的 agent 目录时返回 null：不覆盖，pi 用默认目录。
- * 只覆盖传进来的项，其余沿用用户 settings.json 里的值（例如只设思考等级时模型仍跟随）。
+ * 没设子代理模型/思考等级/压缩点、也没注入防扫描准则时返回 null（pi 用默认目录）；
+ * 读不到用户的 agent 目录时同样返回 null。只覆盖传进来的项，其余沿用用户 settings.json。
  */
 export function preparePiAgentDir(
   target: string,
   options: PiSubagentSettings,
   source: string = piAgentSourceDir(),
 ): string | null {
-  if (!options.model && !options.thinking && options.reserveTokens === undefined) return null;
+  if (!options.model && !options.thinking && options.reserveTokens === undefined && !options.guardPrompt) return null;
   // 指向自己就别动，否则会把真实目录清空。
   if (resolve(target) === resolve(source)) return null;
   let entries: string[];
@@ -138,12 +144,30 @@ export function preparePiAgentDir(
     // 建不出来就让 pi 自己用默认目录，至少不挡启动。
   }
   const settings = readSettings(join(source, "settings.json"));
+  let wroteGuard = false;
+  if (options.guardPrompt) {
+    // 用户自己的上下文文件优先：已经链进来的那份不能被我们的准则盖掉。
+    const hasContextFile = CONTEXT_FILE_NAMES.some((name) => existsSync(join(target, name)));
+    if (!hasContextFile) {
+      try {
+        writeFileSync(join(target, HOSTED_GUARD_CONTEXT_FILE), `${options.guardPrompt}\n`);
+        wroteGuard = true;
+      } catch {
+        // 写不进去就交给调用方退回到 CLI 旗标。
+      }
+    }
+  }
   const subagents =
     typeof settings["subagents"] === "object" && settings["subagents"] !== null && !Array.isArray(settings["subagents"])
       ? { ...(settings["subagents"] as Record<string, unknown>) }
       : {};
   if (options.model) subagents["defaultModel"] = options.model;
   if (options.thinking) subagents["defaultThinking"] = options.thinking;
+  // 准则放在全局上下文里，子代理默认不继承：这里只补默认值，用户显式设过就尊重原值。
+  // 只在准则真的写进去时补：用户自己的上下文文件不归我们决定要不要外传给子代理。
+  if (wroteGuard && subagents["defaultInheritGlobalContext"] === undefined) {
+    subagents["defaultInheritGlobalContext"] = true;
+  }
   if (Object.keys(subagents).length > 0) settings["subagents"] = subagents;
   if (options.reserveTokens !== undefined) {
     const compaction =

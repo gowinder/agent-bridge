@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -70,4 +70,36 @@ test("read-only resources stay as real directories", () => {
   // npm 必须是真的目录：pi 解析已安装的包时软链会被当成没装。
   assert.equal(lstatSync(join(target, "npm")).isSymbolicLink(), false);
   assert.ok(existsSync(join(target, "npm", "pkg", "index.js")));
+});
+
+test("guard prompt is written as global context and subagents inherit it", () => {
+  const { source, target } = dirs();
+  preparePiAgentDir(target, { guardPrompt: "不要扫描主目录" }, source);
+  assert.equal(readFileSync(join(target, "AGENTS.md"), "utf8"), "不要扫描主目录\n");
+  const settings = JSON.parse(readFileSync(join(target, "settings.json"), "utf8"));
+  assert.equal(settings.subagents.defaultInheritGlobalContext, true);
+});
+
+test("guard prompt alone still prepares the agent dir", () => {
+  const { source, target } = dirs();
+  assert.equal(preparePiAgentDir(target, { guardPrompt: "guard" }, source), target);
+  assert.ok(existsSync(join(target, "sessions")));
+});
+
+test("the user's own context file is not overwritten by the guard prompt", () => {
+  const { source, target } = dirs();
+  writeFileSync(join(source, "AGENTS.md"), "用户自己的规则\n");
+  preparePiAgentDir(target, { guardPrompt: "guard" }, source);
+  assert.equal(readFileSync(join(target, "AGENTS.md"), "utf8"), "用户自己的规则\n");
+  // 准则没写进去，就别顺手把用户自己的上下文改成「子代理也继承」。
+  const settings = JSON.parse(readFileSync(join(target, "settings.json"), "utf8"));
+  assert.equal(settings.subagents?.defaultInheritGlobalContext, undefined);
+});
+
+test("an explicit subagent inheritGlobalContext=false is respected", () => {
+  const { source, target } = dirs();
+  writeFileSync(join(source, "settings.json"), JSON.stringify({ subagents: { defaultInheritGlobalContext: false } }));
+  preparePiAgentDir(target, { guardPrompt: "guard" }, source);
+  const settings = JSON.parse(readFileSync(join(target, "settings.json"), "utf8"));
+  assert.equal(settings.subagents.defaultInheritGlobalContext, false);
 });

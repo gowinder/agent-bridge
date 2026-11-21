@@ -117,10 +117,10 @@ cat > "$contents/Info.plist" <<PLIST
   <key>CFBundleExecutable</key><string>AgentBridge</string>
   <key>CFBundleIdentifier</key><string>$bundle_id</string>
   <key>AgentBridgeStateDir</key><string>$state_dir_name</string>
-  <key>NSDesktopFolderUsageDescription</key><string>列出你放在「桌面」的工程目录里的会话与文件。</string>
-  <key>NSDocumentsFolderUsageDescription</key><string>列出你放在「文档」的工程目录里的会话与文件。</string>
-  <key>NSDownloadsFolderUsageDescription</key><string>列出你放在「下载」的工程目录里的会话与文件。</string>
-  <key>NSRemovableVolumesUsageDescription</key><string>列出你放在外置磁盘上的工程目录里的会话与文件。</string>
+  <key>NSDesktopFolderUsageDescription</key><string>托管会话里的 agent 在按你的指令读写「桌面」上的工程文件；Bridge 自身不扫描其它目录。</string>
+  <key>NSDocumentsFolderUsageDescription</key><string>托管会话里的 agent 在按你的指令读写「文档」里的工程文件；Bridge 自身不扫描其它目录。</string>
+  <key>NSDownloadsFolderUsageDescription</key><string>托管会话里的 agent 在按你的指令读写「下载」里的工程文件；Bridge 自身不扫描其它目录。</string>
+  <key>NSRemovableVolumesUsageDescription</key><string>托管会话里的 agent 在按你的指令读写外置磁盘上的工程文件；Bridge 自身不扫描其它磁盘。</string>
   <key>CFBundleName</key><string>Agent Bridge</string>
   <key>CFBundleDisplayName</key><string>Agent Bridge</string>
   <key>CFBundlePackageType</key><string>APPL</string>
