@@ -392,6 +392,12 @@ final class AdminClient {
         let data = try await request("POST", "/hosted", body: body)
         return try JSONDecoder().decode(HostedConfig.self, from: data)
     }
+
+    /// 复核整份白名单的授权状态（不修改配置）：打开设定时用，人就在机器前，弹窗才不突兀。
+    func reprobeHostedDirs() async throws -> HostedConfig {
+        let data = try await request("POST", "/hosted", body: ["reprobe": true])
+        return try JSONDecoder().decode(HostedConfig.self, from: data)
+    }
 }
 
 /// Runs the bridge CLI for the two things the admin API cannot answer: whether
@@ -1478,10 +1484,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             Task {
+                await reprobeHostedDirs()
                 await loadHostedConfig()
                 await loadMessageHistory()
                 renderSettings()
                 renderMessageLog()
+                watchDirAuth()
             }
             return
         }
@@ -1527,11 +1535,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settingsWindow = window
 
         Task {
+            await reprobeHostedDirs()
             await loadHostedConfig()
             await loadMessageHistory()
             renderSettings()
             renderMessageLog()
+            watchDirAuth()
         }
+    }
+
+    /// 打开设定时复核一遍白名单：授权状态可能是上次签名身份留下的，并不可信。
+    private func reprobeHostedDirs() async {
+        guard reachable else { return }
+        _ = try? await client.reprobeHostedDirs()
     }
 
     private func valueLabel(_ text: String, mono: Bool = false) -> NSTextField {
@@ -2013,7 +2029,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 不能写成「未授权」——大部分目录根本不需要系统授权。
                 factsText = T("待确认")
                 factsColor = .tertiaryLabelColor
-                factsTip = T("Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。")
+                factsTip = T("Bridge 还没读过这个目录。打开设定时会自动确认一次，也可以点「+」重新添加立即确认。")
             case .some("ok"), nil:
                 factsText = dir.exists
                     ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")

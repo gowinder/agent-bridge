@@ -138,6 +138,10 @@ test("create spawns stream-json CLI with an explicit non-bypass mode", (t) => {
   assert.equal(args[args.indexOf("--permission-prompts") + 1], "host");
   assert.equal(args[args.indexOf("--permission-prompt-tool") + 1], "stdio");
   assert.equal(args[args.indexOf("--session-id") + 1], session.sessionId.replace("hosted:", ""));
+  // 托管会话统一带上防扫描准则：agent 自己 find ~ 会弹一串 macOS 授权框并把命令挂死。
+  const guard = args.indexOf("--append-system-prompt");
+  assert.ok(guard >= 0);
+  assert.match(args[guard + 1], /不要递归扫描用户主目录/);
   assert.ok(!args.includes("--dangerously-skip-permissions"));
   assert.equal(options.cwd, realpathSync(h.repo));
 });

@@ -5165,7 +5165,7 @@ interface ChatState {
   slashCommands?: string[];
   /** 「停止」按钮：只在 Bridge 托管的会话且回合还在跑时出现。 */
   stopButton?: HTMLButtonElement;
-  /** 拿到 slashCommands 之后才知道客户端支不支持 /clear：重新决定「清空历史」显不显示。 */
+  /** 拿到 slashCommands / 忙闲状态之后，重新决定「开新对话」显不显示。 */
   paintReset?: () => void;
   /** 压缩请求的状态；弹层重绘后仍保留，避免重复提交或丢失反馈。 */
   compact?: { pending: boolean; error?: string; note?: string };
@@ -5359,20 +5359,31 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   }
 
   /**
-   * 「清空历史开始对话」：只在客户端明确支持 /clear 时才出现（托管 Claude 会把
-   * slash_commands 报上来），否则勾了也发不出去。勾选只对这一次发送生效，
-   * 发完自动收回，免得下次误清。
+   * 「开新对话」：勾上之后先发一条新建会话的命令，再发这条消息。
+   * pi 用 `/new`（换一个会话文件，上下文清空），托管 Claude 用 `/clear`。
+   * 只有客户端把其中一条报上来才显示（`slashCommands`），否则勾了也发不出去。
+   * 勾选只对这一次发送生效，发完自动收回，免得下次误清。
    */
-  const resetToggle = el("input", { attrs: { type: "checkbox", "aria-label": tr("清空历史开始对话") } });
-  const resetLabel = el("label", { className: "composer-reset", attrs: { title: tr("先发送 /clear，再发这条") } }, [
+  function resetCommand(): string | null {
+    const commands = state.slashCommands ?? [];
+    if (commands.includes("new")) return "new";
+    if (commands.includes("clear")) return "clear";
+    return null;
+  }
+
+  const resetToggle = el("input", { attrs: { type: "checkbox", "aria-label": tr("开新对话") } });
+  const resetLabel = el("label", { className: "composer-reset" }, [
     resetToggle,
-    el("span", { className: "composer-reset-text", text: tr("清空历史开始对话") }),
+    el("span", { className: "composer-reset-text", text: tr("开新对话") }),
   ]);
   resetLabel.hidden = true;
 
   function paintResetToggle(): void {
-    const supported = (state.slashCommands ?? []).includes("clear") && canSend;
+    const command = resetCommand();
+    // `/new`、`/clear` 都要独占空闲进程：这一轮还在跑的时候不显示，免得勾了发不出去。
+    const supported = command !== null && canSend && !state.busy;
     resetLabel.hidden = !supported;
+    resetLabel.title = command ? tr("先发送 {0}，再发这条", `/${command}`) : "";
     if (!supported) resetToggle.checked = false;
   }
   state.paintReset = paintResetToggle;
@@ -5383,12 +5394,13 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   };
 
   async function submitWithOptionalReset(): Promise<void> {
-    if (!resetLabel.hidden && resetToggle.checked) {
+    const command = resetCommand();
+    if (command !== null && !resetLabel.hidden && resetToggle.checked) {
       sendButton.disabled = true;
       status.classList.remove("error");
-      status.textContent = tr("正在清空会话历史…");
+      status.textContent = tr("正在开新对话…");
       try {
-        await call<MessageSendResult>("message.send", { sessionId: state.session.sessionId, text: "/clear" }, 60_000);
+        await call<MessageSendResult>("message.send", { sessionId: state.session.sessionId, text: `/${command}` }, 60_000);
       } catch (error) {
         status.classList.add("error");
         status.textContent = messageOf(error);
@@ -7231,9 +7243,10 @@ async function refreshTail(state: ChatState, force = false): Promise<MessageList
     // 无条件覆盖：客户端换了会话或没上报用量时，旧数字不能留着。
     state.tokens = result.tokens;
     if (result.slashCommands) state.slashCommands = result.slashCommands;
-    state.paintReset?.();
     const busyChanged = (result.busy === true) !== state.busy;
     state.busy = result.busy === true;
+    // 放在 busy 之后：「开新对话」要按最新的忙闲状态决定显不显示。
+    state.paintReset?.();
     markSessionState(state.session.sessionId, state.busy);
     const interruptedChanged = (result.interrupted === true) !== state.interrupted;
     state.interrupted = result.interrupted === true;

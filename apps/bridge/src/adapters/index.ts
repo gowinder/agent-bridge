@@ -116,6 +116,11 @@ export class SessionAdapters {
     return this.hostedSummary(this.hostedManager.setDirs(dirs, probe));
   }
 
+  /** 复核白名单的授权状态：菜单栏打开设定时调，不在启动时自动弹框。 */
+  reprobeHostedDirs(): void {
+    this.hostedManager.reprobeDirs();
+  }
+
   /** 退出时把托管会话的探测子进程一起收掉，否则 SIGTERM 会留下孤儿。 */
   dispose(): void {
     this.hostedManager.dispose();

@@ -155,6 +155,7 @@ jobs:
           cp AgentBridge.dmg "AgentBridge-$VERSION.dmg"
 
       - name: 公证（Apple ID 与证书都配好时）
+        id: notarize
         if: steps.sign.outputs.signed == 'true' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != ''
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -164,6 +165,7 @@ jobs:
             --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
           xcrun stapler staple AgentBridge.dmg
           cp AgentBridge.dmg "AgentBridge-$VERSION.dmg"
+          echo "notarized=true" >> "$GITHUB_OUTPUT"
 
       - name: 计算 sha256
         run: |
@@ -210,6 +212,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
           APP_NAME: ${{ steps.version.outputs.app_name }}
           SIGNED: ${{ steps.sign.outputs.signed }}
+          NOTARIZED: ${{ steps.notarize.outputs.notarized }}
         run: |
           set -eu
           sha=$(cut -d' ' -f1 AgentBridge.dmg.sha256)
@@ -242,10 +245,12 @@ jobs:
             echo "打开 DMG，把 $APP_NAME 拖进「应用程序」。首次启动后在菜单栏点菱形图标，"
             echo "选择「初始化 Bridge…」填入中继地址即可配对。"
             echo
-            if [ "$SIGNED" != "true" ]; then
+            # 签了名但没公证（Apple Development 证书）一样过不了 Gatekeeper：
+            # 只有 notarize 这一步真的跑过，才不用写下面这段。
+            if [ "$NOTARIZED" != "true" ]; then
               echo "## Gatekeeper"
               echo
-              echo "这是未签名构建，首次打开会被系统拦下："
+              echo "这个构建没有经过 Apple 公证，首次打开会被系统拦下："
               echo
               echo "- macOS 15 及以后：关掉拦截弹窗，打开「系统设置 → 隐私与安全性」，在底部点「仍要打开」。（右键 → 打开这条捷径从 15 起被系统去掉了。）"
               echo "- macOS 14 及更早：在「应用程序」里右键 AgentBridge → 打开 → 再点「打开」。"

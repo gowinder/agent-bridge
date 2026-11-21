@@ -9,6 +9,12 @@ import { HostedSessionManager } from "../dist/hosted/manager.js";
 import { PiSession } from "../dist/hosted/pi-session.js";
 import { killProcess, markProcessGroup } from "../dist/hosted/process-group.js";
 
+// 会话专属的 pi agent 目录从 PI_CODING_AGENT_DIR 取源目录：测试里指到临时目录，
+// 别把真实的 ~/.pi/agent 链进来。
+const PI_AGENT_SOURCE = mkdtempSync(join(tmpdir(), "pi-agent-source-"));
+writeFileSync(join(PI_AGENT_SOURCE, "settings.json"), JSON.stringify({}));
+process.env.PI_CODING_AGENT_DIR = PI_AGENT_SOURCE;
+
 class FakeChild extends EventEmitter {
   constructor() {
     super();
@@ -121,12 +127,20 @@ test("creating a pi session starts rpc mode with the bridge session id", (t) => 
   t.after(() => h.manager.dispose());
   const session = h.manager.create({ path: h.repo, agent: "pi" });
   assert.equal(h.spawns.length, 1);
-  const { args } = h.spawns[0];
+  const { args, options } = h.spawns[0];
   assert.equal(args[0], "--mode");
   assert.equal(args[1], "rpc");
   assert.equal(args[args.indexOf("--session-id") + 1], session.sessionId.replace("hosted:", ""));
   assert.ok(args.includes("--approve"));
   assert.ok(!args.includes("--permission-mode"));
+  // 防扫描准则写进会话专属 agent 目录的全局上下文（主会话与子代理都能读到），
+  // 目录建得出来时不再重复塞一份到命令行。
+  const agentDir = options.env.PI_CODING_AGENT_DIR;
+  assert.ok(agentDir);
+  assert.match(readFileSync(join(agentDir, "AGENTS.md"), "utf8"), /不要递归扫描用户主目录/);
+  const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+  assert.equal(settings.subagents.defaultInheritGlobalContext, true);
+  assert.ok(!args.includes("--append-system-prompt"));
 });
 
 test("pi set_model switches in place without restarting the process", async (t) => {
@@ -978,7 +992,10 @@ test("the subagent thinking level is written to the session agent dir", async (t
   const source = fakeAgentDir(h.stateDir);
   withAgentDir(t, source);
   const session = h.manager.create({ path: h.repo, agent: "pi" });
-  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+  // 即使什么都没覆盖，也要建会话专属目录：防扫描准则放在它的 AGENTS.md 里。
+  const first = h.spawns[0].options.env.PI_CODING_AGENT_DIR;
+  assert.notEqual(first, source);
+  assert.match(readFileSync(join(first, "AGENTS.md"), "utf8"), /不要递归扫描用户主目录/);
 
   await h.manager.setSubagentThinking(session.sessionId, "xhigh");
   await h.manager.send(session.sessionId, "继续");
@@ -987,10 +1004,13 @@ test("the subagent thinking level is written to the session agent dir", async (t
   assert.equal(settings.subagents.defaultThinking, "xhigh");
   assert.equal(h.manager.models(session.sessionId).subagentThinking, "xhigh");
 
-  // 清掉之后没有别的覆盖项，会话自己的 agent 目录整个删掉，回到用户设置。
+  // 清掉之后不再写 thinking，但目录留着（防扫描准则不能跟着丢）。
   h.spawns.at(-1).child.kill("SIGTERM");
   await h.manager.setSubagentThinking(session.sessionId, null);
-  assert.equal(existsSync(dir), false);
+  assert.ok(existsSync(dir));
+  const cleared = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+  assert.equal(cleared.subagents?.defaultThinking, undefined);
+  assert.ok(existsSync(join(dir, "AGENTS.md")));
   assert.equal(h.manager.models(session.sessionId).subagentThinking, undefined);
 });
 
@@ -1006,14 +1026,28 @@ test("thinking levels are pi only", async (t) => {
   assert.equal(info.thinkingLevels, undefined);
 });
 
+test("user's own global context file wins, guard falls back to the CLI flag", (t) => {
+  const h = piHarness();
+  t.after(() => h.manager.dispose());
+  const source = fakeAgentDir(h.stateDir);
+  writeFileSync(join(source, "AGENTS.md"), "用户自己的规则\n");
+  withAgentDir(t, source);
+  h.manager.create({ path: h.repo, agent: "pi" });
+  const { args } = h.spawns[0];
+  // 用户文件不能被盖掉，但准则也不能因此丢掉：改用命令行旗标（只覆盖主会话）。
+  const guard = args.indexOf("--append-system-prompt");
+  assert.ok(guard >= 0);
+  assert.match(args[guard + 1], /不要递归扫描用户主目录/);
+});
+
 test("changing the subagent model restarts the idle pi process with the new setting", async (t) => {
   const h = piHarness();
   t.after(() => h.manager.dispose());
   const source = fakeAgentDir(h.stateDir);
   withAgentDir(t, source);
   const session = h.manager.create({ path: h.repo, agent: "pi" });
-  // 窗口未知、也没设子代理模型时不另建目录，直接用用户自己的。
-  assert.equal(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
+  // 窗口未知、也没设子代理模型时也建目录：防扫描准则写在它的 AGENTS.md 里。
+  assert.notEqual(h.spawns[0].options.env.PI_CODING_AGENT_DIR, source);
 
   const updated = await h.manager.setSubagentModel(session.sessionId, "group/dsgroup");
   assert.equal(updated.subagentModel, "group/dsgroup");
@@ -1023,10 +1057,12 @@ test("changing the subagent model restarts the idle pi process with the new sett
   const dir = h.spawns.at(-1).options.env.PI_CODING_AGENT_DIR;
   assert.equal(readSubagentModel(dir), "group/dsgroup");
 
-  // 清掉子代理模型：没有别的覆盖项，会话目录整个清掉，回到用户自己的设置。
+  // 清掉子代理模型：目录留着（防扫描准则不能跟着丢），但不再覆盖 defaultModel。
   h.spawns.at(-1).child.kill("SIGTERM");
   await h.manager.setSubagentModel(session.sessionId, null);
-  assert.equal(existsSync(dir), false);
+  assert.ok(existsSync(dir));
+  // 不再覆盖，回落到用户 settings.json 里的 defaultModel（a/b）。
+  assert.equal(readSubagentModel(dir), "a/b");
   assert.equal(h.manager.sessions().find((item) => item.sessionId === session.sessionId).subagentModel, undefined);
 });
 
