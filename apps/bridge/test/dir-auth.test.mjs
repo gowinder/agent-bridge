@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { summarizeHostedDirs } from "../dist/adapters/index.js";
@@ -298,4 +298,19 @@ test("启动后复核已授权的目录：授权被系统撤销就降级成 deni
   assert.equal(authOf(manager, first.allowed), "ok"); // 复核前还是缓存里的 ok
   await new Promise((resolve) => setTimeout(resolve, 80));
   assert.equal(authOf(manager, first.allowed), "denied");
+});
+
+test("probe 里的越界路径只做字符串匹配，不会被送去 realpath 或探测", async (t) => {
+  const h = harness(t);
+  const targets = [
+    join(homedir(), "Downloads"),
+    join(homedir(), "Desktop"),
+    join(homedir(), "Documents"),
+    "/etc/passwd",
+    "/Volumes/whatever",
+  ];
+  // 这些都不在白名单里：既不该起探测，也不该报错（客户端可能发来旧路径）。
+  h.manager.setDirs([h.allowed], targets);
+  await settle();
+  assert.deepEqual(h.probes, [h.allowed]);
 });
