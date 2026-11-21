@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.11.7] - 2026-11-20
+
 ### Fixed
 
 - 文件枚举收口成一道闸门（`fs-scope.ts`）：枚举/`realpath`/`stat` 只能落在已经授权过的根里（托管白名单、工程目录、状态目录），以及 CLI 自己的主目录数据目录（`~/.pi`、`~/.claude`、`~/Library/Application Support`）。`~/桌面`、`~/文档`、`~/下载`、`~/音乐`、`~/照片`、iCloud/`~/Library/CloudStorage`、`/Volumes/*` 一律在碰文件系统之前拒绝并记一行 `fs-scope: 拒绝越界访问`（同一路径每分钟最多一条）。判定只用字符串与 `lstat`/`readlink`（读链接本身、不进目标），所以 `/tmp/link -> ~/下载` 这类符号链接绕不过去，也不会因为判定本身触发授权弹窗。
