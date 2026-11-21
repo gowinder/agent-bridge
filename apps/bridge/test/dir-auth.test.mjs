@@ -166,24 +166,13 @@ test("探测出错（非 EPERM）算 unknown，不冒充「没授权」", async 
   assert.equal(existsSync(join(h.stateDir, "hosted", "dir-auth.json")), false);
 });
 
-test("超时（弹框没人点）算 pending，不当成可用，也不写进持久化", async (t) => {
+test("超时（弹框没人点）回到「待确认」，不当成可用，也不写进持久化", async (t) => {
   const h = harness(t, { probeDir: () => Promise.resolve("timeout") });
   h.manager.setDirs([h.allowed]);
   await settle();
-  assert.equal(authOf(h.manager, h.allowed), "pending");
+  // pending 只代表「这 20 秒还在等」；没人点就回到 unknown，界面写「待确认」。
+  assert.equal(authOf(h.manager, h.allowed), "unknown");
   assert.equal(existsSync(join(h.stateDir, "hosted", "dir-auth.json")), false);
-  // 重启后回到 unknown：下次打开设置还会再探一次。
-  h.manager.dispose();
-  const manager = new HostedSessionManager({
-    stateDir: h.stateDir,
-    log: () => undefined,
-    spawn: () => {
-      throw new Error("不该起会话进程");
-    },
-    probeDir: () => Promise.resolve("ok"),
-  });
-  t.after(() => manager.dispose());
-  assert.equal(authOf(manager, h.allowed), "unknown");
 });
 
 test("一次加多个目录时弹窗一个一个来，不会同时糊一屏", async (t) => {
@@ -313,4 +302,28 @@ test("probe 里的越界路径只做字符串匹配，不会被送去 realpath �
   h.manager.setDirs([h.allowed], targets);
   await settle();
   assert.deepEqual(h.probes, [h.allowed]);
+});
+
+test("启动后复核会把升级前的 unknown 目录确认成 ok（不再误报未授权）", async (t) => {
+  // 只有白名单、没有 dir-auth.json：就是「升级前就存在的目录」的形态。
+  const root = mkdtempSync(join(tmpdir(), "dir-auth-unknown-"));
+  const stateDir = join(root, "state");
+  const allowed = join(root, "allowed");
+  for (const dir of [stateDir, allowed]) mkdirSync(dir, { recursive: true });
+  writeFileSync(join(stateDir, "hosted.json"), JSON.stringify({ dirs: [allowed], idleTimeoutMs: 600_000 }));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new HostedSessionManager({
+    stateDir,
+    log: () => undefined,
+    spawn: () => {
+      throw new Error("不该起会话进程");
+    },
+    probeDir: () => Promise.resolve("ok"),
+    reprobeDelayMs: 10,
+  });
+  t.after(() => manager.dispose());
+  // hosted.json 里是原样写法（未 canonical）：configForClient 也按原样报，两种都得认。
+  assert.equal(authOf(manager, allowed), "unknown");
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(authOf(manager, allowed), "ok");
 });
