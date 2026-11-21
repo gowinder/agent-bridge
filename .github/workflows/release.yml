@@ -134,8 +134,10 @@ jobs:
           # 自签证书没有时间戳服务，--timestamp 会失败。
           extra=()
           case "$identity" in Developer\ ID*) extra=(--timestamp --options runtime) ;; esac
-          codesign --force "${extra[@]}" --sign "$identity" "$app/Contents/Resources/node/bin/node"
-          codesign --force "${extra[@]}" --sign "$identity" "$app"
+          # runner 自带的 /bin/bash 是 3.2：`set -u` 下展开空数组会报
+          # "unbound variable"，所以只在非空时展开。
+          codesign --force ${extra[@]+"${extra[@]}"} --sign "$identity" "$app/Contents/Resources/node/bin/node"
+          codesign --force ${extra[@]+"${extra[@]}"} --sign "$identity" "$app"
           codesign --verify --strict --verbose=2 "$app"
           echo "signed=true" >> "$GITHUB_OUTPUT"
 
