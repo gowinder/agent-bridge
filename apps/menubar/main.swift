@@ -573,6 +573,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var settingsPortLabel: NSTextField?
     private var settingsBypassSwitch: NSSwitch?
     private var settingsDirsDoc: FlippedView?
+    /// 「确认中…」的轮询计数：设置页关掉后不该继续无限重拉。
+    private var settingsAuthTicks = 0
     private var settingsAddDirButton: NSButton?
     private var settingsImportDirsButton: NSButton?
     private var settingsIdleLabel: NSTextField?
@@ -2003,14 +2005,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 factsColor = .systemRed
                 factsTip = T("系统拒绝了这个目录：到「系统设置 → 隐私与安全性 → 文件与文件夹」勾上 AgentBridge，或点「+」重新添加一次来重新授权。")
             case "pending":
-                factsText = T("等待授权…")
+                factsText = T("确认中…")
                 factsColor = .systemOrange
-                factsTip = T("已经请系统弹了授权框：在 Mac 上点「允许」之后这里会变成已授权。")
+                factsTip = T("正在读一次这个目录来确认能不能访问。需要系统授权时会弹框，点「允许」即可。")
             case .some("unknown"):
-                // 手改 hosted.json 加进来的目录不会被探测，读到 unknown：不能显示成一切正常。
-                factsText = T("未授权")
-                factsColor = .systemOrange
-                factsTip = T("这个目录还没有验证过能不能读：点「+」重新添加一次来申请系统授权。")
+                // 还没确认过（升级前的目录、手改 hosted.json 加进来的）：中性措辞，
+                // 不能写成「未授权」——大部分目录根本不需要系统授权。
+                factsText = T("待确认")
+                factsColor = .tertiaryLabelColor
+                factsTip = T("Bridge 还没读过这个目录。启动 30 秒后会自动确认一次，也可以点「+」重新添加立即确认。")
             case .some("ok"), nil:
                 factsText = dir.exists
                     ? (dir.sessionCount > 0 ? TF(T("%d 个会话"), dir.sessionCount) : "")
@@ -2054,16 +2057,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         doc.frame.size.height = max(CGFloat(dirs.count) * rowHeight + 2, 96)
     }
 
-    /// 目录授权探测在 Bridge 侧异步进行（弹窗要等人点），这里补几次延迟刷新把结果读回来。
+    /// 目录授权探测在 Bridge 侧异步进行（弹窗要等人点），这里轮询到没有 pending 为止。
+    ///
+    /// 原来只补刷 3/10/25 秒三次：一次加两个目录、或者探测真的等到 20 秒超时的情况会
+    /// 停在「确认中…」不动。改成 2 秒一轮、最多 60 秒，期间不用人管。
     private func watchDirAuth() {
-        for delay in [3.0, 10.0, 25.0] {
-            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
-                guard let self else { return }
-                guard (self.hostedConfig?.dirs ?? []).contains(where: { $0.auth == "pending" }) else { return }
-                Task {
-                    await self.loadHostedConfig()
-                    self.renderSettings()
-                }
+        settingsAuthTicks = 0
+        pollDirAuth()
+    }
+
+    private func pollDirAuth() {
+        settingsAuthTicks += 1
+        guard settingsAuthTicks <= 30 else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+            guard let self else { return }
+            guard (self.hostedConfig?.dirs ?? []).contains(where: { $0.auth == "pending" }) else { return }
+            Task {
+                await self.loadHostedConfig()
+                self.renderSettings()
+                self.pollDirAuth()
             }
         }
     }

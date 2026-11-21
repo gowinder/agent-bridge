@@ -585,7 +585,10 @@ export class HostedSessionManager {
     const seen = new Set<string>();
     for (const entry of this.config.dirs) {
       const path = expandHome(entry);
-      if (this.dirAuth.get(path) !== "ok") continue;
+      // ok 要复核（授权可能被撤销），unknown 也要探一次（升级前就存在的目录、手改
+      // hosted.json 加进来的目录，否则菜单栏会把一个完全能读的目录显示成「未授权」）。
+      // denied 不自动重试：那会变成「启动了就一直弹框」，等用户点「+」再说。
+      if (this.dirAuth.get(path) === "denied") continue;
       if (seen.has(path)) continue;
       seen.add(path);
       this.probeDir(path, true);
@@ -617,7 +620,8 @@ export class HostedSessionManager {
       // 路径被移除后又加回来时登记号已经变了：这个结果作废，别把新的探测收掉。
       if (this.probing.get(path) === token) {
         this.probing.delete(path);
-        this.finishProbe(path, result === "timeout" ? "pending" : result, note);
+        // 超时说明这个框没人点：回到 unknown（「待确认」），而不是一直显示「等待授权」。
+      this.finishProbe(path, result === "timeout" ? "unknown" : result, note);
       }
       this.drainProbeQueue();
     };
@@ -678,16 +682,14 @@ export class HostedSessionManager {
   }
 
   private finishProbe(path: string, auth: DirAuth, note: string): void {
-    // 探测期间目录被移出白名单：结果作废（不能把一个已经删掉的目录写回 dir-auth.json）。
-    if (!this.dirAuth.has(path)) {
-      this.silentProbes.delete(path);
-      return;
-    }
-    if (this.silentProbes.delete(path)) {
-      // 复核：没变差就当没发生，避免 UI 闪一下「未授权」又变回来。
-      if (auth === "ok" || this.dirAuth.get(path) !== "ok") return;
-    } else if (this.dirAuth.get(path) !== "pending") {
-      return;
+    const silent = this.silentProbes.delete(path);
+    const current = this.dirAuth.get(path);
+    if (silent) {
+      // 复核（ok 或 unknown）：本来就是 ok 且读得动就不动状态（避免 UI 闪一下）；
+      // unknown → ok 要写，否则升级前的目录永远显示「待确认」。
+      if (auth === "ok" && current === "ok") return;
+    } else if (current !== "pending") {
+      return; // 探测期间目录被移出白名单，或已被新的探测接管。
     }
     this.dirAuth.set(path, auth);
     this.persistDirAuth();
