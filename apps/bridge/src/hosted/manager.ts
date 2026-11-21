@@ -58,6 +58,7 @@ import { subagentTasks } from "../subagents.js";
 import { defaultStateDir } from "../store.js";
 import { piBinary } from "./pi-binary.js";
 import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agent-dir.js";
+import { HOSTED_GUARD_CONTEXT_FILE, HOSTED_GUARD_PROMPT } from "./hosted-prompt.js";
 import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
 import { MAX_PI_TASKS, piSubagentRunning, piSubagentRunnerPids, piSubagentTasks } from "./pi-subagents.js";
@@ -116,14 +117,6 @@ type DirAuth = "ok" | "denied" | "pending" | "unknown";
  */
 const DIR_PROBE_TIMEOUT_MS = 20_000;
 
-/**
- * 启动后重新探一遍「已授权」的目录。
- *
- * `dir-auth.json` 里的 ok 不会自己失效：用户在系统设置里撤销授权、外置卷换了名字、
- * 目录被换成另一个挂载点之后，UI 还显示一切正常，真读时却又弹框/挂住。已授权的 readdir
- * 不弹框、只要几毫秒，所以启动后补探一次是便宜的。延迟到启动完再做，避免和启动抢 IO。
- */
-const REPROBE_OK_DELAY_MS = 30_000;
 /** 自动压缩阈值（`compaction.reserveTokens`）的上限：再大就每轮都压，没意义。 */
 const MAX_COMPACTION_RESERVE_TOKENS = 1_000_000;
 /** 网页能加的启动参数最多这么多项、每项这么长，免得把 argv 撑爆。 */
@@ -374,8 +367,6 @@ export interface HostedManagerOptions {
   stallCheckMs?: number;
   /** 测试用：替换「真的读一次目录」这一步；默认起子进程。 */
   probeDir?: (path: string) => Promise<"ok" | "denied" | "timeout" | "unknown">;
-  /** 启动后多久复核已授权的目录（毫秒）；测试用短值。 */
-  reprobeDelayMs?: number;
 }
 
 /**
@@ -445,9 +436,6 @@ export class HostedSessionManager {
   private readonly probeQueue: string[] = [];
   private probeRunning = false;
   private probeCancel: (() => void) | null = null;
-  private reprobeTimer: NodeJS.Timeout | null = null;
-  /** 启动后复核的那些探测：结果 ok 时不改动状态，只有降级才写。 */
-  private readonly silentProbes = new Set<string>();
   private readonly probeImpl: ((path: string) => Promise<"ok" | "denied" | "timeout" | "unknown">) | null;
   /** stdout 很密，注册表最多两秒写一次。 */
   private lastPersistAt = 0;
@@ -490,8 +478,6 @@ export class HostedSessionManager {
     this.sweeper.unref();
     this.stallTimer = setInterval(() => this.checkStalls(), this.stallCheckMs);
     this.stallTimer.unref();
-    this.reprobeTimer = setTimeout(() => this.reprobeAllowedDirs(), options.reprobeDelayMs ?? REPROBE_OK_DELAY_MS);
-    this.reprobeTimer.unref();
     process.once("exit", this.exitHandler);
   }
 
@@ -569,29 +555,32 @@ export class HostedSessionManager {
    * 挂了两小时，把单线程的 Bridge 一起拖死）。子进程挂着不占主线程，超时直接杀掉，主线程
    * 只拿到一个「还在等授权」的状态。
    */
-  private probeDir(path: string, silent = false): void {
+  private probeDir(path: string): void {
     if (this.probing.has(path)) return;
     this.probing.set(path, ++this.probeToken);
-    // silent 用于启动后复核已授权的目录：不把 UI 打回「等待授权」，只在结果变差时降级。
-    if (!silent) this.dirAuth.set(path, "pending");
+    this.dirAuth.set(path, "pending");
     this.probeQueue.push(path);
-    if (silent) this.silentProbes.add(path);
     this.drainProbeQueue();
   }
 
-  /** 启动后复核一遍已授权的目录：授权被撤销时把它们降级成 denied。 */
-  private reprobeAllowedDirs(): void {
-    this.reprobeTimer = null;
+  /**
+   * 复核白名单目录的授权状态：菜单栏打开设定时调用。
+   *
+   * 不放在启动时：未签名的构建每次更新都换签名身份，上次的 TCC 授权跟着作废，一启动
+   * 就是一轮授权弹窗（用户只是开新对话，却先被问「文糟/桌面/照片」）。打开设定时人就在
+   * 机器前，弹窗才是预期行为，也能当场看到「确认中…」。
+   */
+  reprobeDirs(): void {
     const seen = new Set<string>();
     for (const entry of this.config.dirs) {
       const path = expandHome(entry);
       // ok 要复核（授权可能被撤销），unknown 也要探一次（升级前就存在的目录、手改
       // hosted.json 加进来的目录，否则菜单栏会把一个完全能读的目录显示成「未授权」）。
-      // denied 不自动重试：那会变成「启动了就一直弹框」，等用户点「+」再说。
+      // denied 不再重试：那会变成「一开设定就弹框」，等用户点「+」再说。
       if (this.dirAuth.get(path) === "denied") continue;
       if (seen.has(path)) continue;
       seen.add(path);
-      this.probeDir(path, true);
+      this.probeDir(path);
     }
   }
 
@@ -682,13 +671,8 @@ export class HostedSessionManager {
   }
 
   private finishProbe(path: string, auth: DirAuth, note: string): void {
-    const silent = this.silentProbes.delete(path);
     const current = this.dirAuth.get(path);
-    if (silent) {
-      // 复核（ok 或 unknown）：本来就是 ok 且读得动就不动状态（避免 UI 闪一下）；
-      // unknown → ok 要写，否则升级前的目录永远显示「待确认」。
-      if (auth === "ok" && current === "ok") return;
-    } else if (current !== "pending") {
+    if (current !== "pending") {
       return; // 探测期间目录被移出白名单，或已被新的探测接管。
     }
     this.dirAuth.set(path, auth);
@@ -1315,14 +1299,12 @@ export class HostedSessionManager {
     }
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
     const agentDir = this.piAgentDirOf(record.id);
-    // 没改的那几项沿用记录里的值；三项都没有值就把目录清掉。
+    // 没改的那几项沿用记录里的值。
     const reserveTokens = this.compactionReserveFor(record);
-    if (model || thinking || reserveTokens !== undefined) {
-      if (!preparePiAgentDir(agentDir, { model, thinking, reserveTokens })) {
-        throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理设置没有生效`);
-      }
-    } else {
-      removePiAgentDir(agentDir);
+    // 目录里除了子代理设置还带着防扫描准则（AGENTS.md）：每次重建都得重新写，
+    // 不能因为「三项都没值」就把整个目录删掉。
+    if (!preparePiAgentDir(agentDir, { model, thinking, reserveTokens, guardPrompt: HOSTED_GUARD_PROMPT })) {
+      throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），子代理设置没有生效`);
     }
     // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
     // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
@@ -1403,20 +1385,17 @@ export class HostedSessionManager {
     else delete next.compactionTriggerPercent;
     const reserve = this.compactionReserveFor(next);
     // 先写好新的 agent 目录，再停进程：写不进去就别停，免得白断一轮。
+    // 目录里还有防扫描准则（AGENTS.md），所以就算没有子代理/压缩设置也要建。
     const agentDir = this.piAgentDirOf(record.id);
-    const needsDir = Boolean(record.subagentModel || record.subagentThinking || reserve !== undefined);
-    const prepared = needsDir
-      ? preparePiAgentDir(agentDir, {
-          model: record.subagentModel,
-          thinking: record.subagentThinking,
-          reserveTokens: reserve,
-        })
-      : null;
-    if (needsDir && !prepared) {
+    const prepared = preparePiAgentDir(agentDir, {
+      model: record.subagentModel,
+      thinking: record.subagentThinking,
+      reserveTokens: reserve,
+      guardPrompt: HOSTED_GUARD_PROMPT,
+    });
+    if (!prepared) {
       throw new RpcError("unsupported", `读不到 pi 的 agent 目录（${piAgentSourceDir()}），自动压缩触发点没有生效`);
     }
-    // 窗口还未知（还没跑过一轮、配置里也查不到）时先不建目录，等下次启动再算。
-    if (!prepared) removePiAgentDir(agentDir);
     // 旧进程连它派生的子代理一起收（下面统一走 teardown）。
     // 旧进程派生的后台子代理是 detached 起的，不在进程组里：必须按 pid 收掉，
     // 收不干净就不能装作切换成功。
@@ -1867,14 +1846,11 @@ export class HostedSessionManager {
     this.treeTimer = null;
     this.trees.clear();
     this.stopping.clear();
-    if (this.reprobeTimer) clearTimeout(this.reprobeTimer);
-    this.reprobeTimer = null;
     this.probeQueue.length = 0;
     this.probeRunning = false;
     this.probeCancel?.();
     this.probeCancel = null;
     this.probing.clear();
-    this.silentProbes.clear();
     process.removeListener("exit", this.exitHandler);
     this.stopAll();
     this.sessiond?.close();
@@ -1904,6 +1880,8 @@ export class HostedSessionManager {
     ];
     if (resume) args.push("--resume", record.id);
     else args.push("--session-id", record.id);
+    // 托管会话统一带上防扫描准则：agent 自己跑 `find ~` 会弹一串 macOS 授权框并把命令挂死。
+    args.push("--append-system-prompt", HOSTED_GUARD_PROMPT);
     // 恢复也要带上同一个模型与思考程度，否则续写会悄悄换回 CLI 默认值。
     if (record.model) args.push("--model", record.model);
     if (record.effort) args.push("--effort", record.effort);
@@ -1939,11 +1917,17 @@ export class HostedSessionManager {
     if (record.thinking) args.push("--thinking", record.thinking);
     if (record.args?.length) args.push(...record.args);
     // 子代理模型与思考等级只认 settings.json：给这个会话单独准备一份 agent 目录，用环境变量指过去。
+    // 防扫描准则优先写进这份目录的 AGENTS.md（主会话与继承全局上下文的子代理都会读）；
+    // 用户自己的上下文文件占了位、或目录建不出来时，退回 CLI 旗标。
     const agentDir = preparePiAgentDir(this.piAgentDirOf(record.id), {
       model: record.subagentModel,
       thinking: record.subagentThinking,
       reserveTokens: this.compactionReserveFor(record),
+      guardPrompt: HOSTED_GUARD_PROMPT,
     });
+    if (!agentDir || !existsSync(join(agentDir, HOSTED_GUARD_CONTEXT_FILE))) {
+      args.push("--append-system-prompt", HOSTED_GUARD_PROMPT);
+    }
     const child = this.spawnProcess(
       binary,
       args,
@@ -1973,7 +1957,7 @@ export class HostedSessionManager {
     return spawnLocal(command, args, { cwd, env });
   }
 
-  /** 这个会话专用的 pi agent 目录（只有设了子代理模型才会真的建）。 */
+  /** 这个会话专用的 pi agent 目录：放子代理设置与防扫描准则（AGENTS.md）。 */
   private piAgentDirOf(id: string): string {
     return join(this.stateDir, "pi-agent", id);
   }

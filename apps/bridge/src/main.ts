@@ -678,6 +678,7 @@ async function commandServe(): Promise<void> {
         adapters.setHostedAllowBypass(patch.allowBypassPermissions);
         recordHostEvent(patch.allowBypassPermissions ? "托管会话允许 bypassPermissions" : "托管会话不再允许 bypassPermissions");
       }
+      if (patch.reprobe === true) adapters.reprobeHostedDirs();
       return adapters.hostedConfig();
     },
     async projectDirs() {

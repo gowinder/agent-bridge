@@ -265,7 +265,7 @@ test("菜单栏读的 /hosted 管理接口会带上 auth（否则整块状态 UI
   assert.equal(summary.dirs[0]?.auth, "ok");
 });
 
-test("启动后复核已授权的目录：授权被系统撤销就降级成 denied", async (t) => {
+test("打开设定复核时，授权被系统撤销就降级成 denied；启动时不再自动弹框", async (t) => {
   // 先造一份 ok 的记录。
   const first = harness(t);
   first.manager.setDirs([first.allowed]);
@@ -273,19 +273,29 @@ test("启动后复核已授权的目录：授权被系统撤销就降级成 deni
   assert.equal(authOf(first.manager, first.allowed), "ok");
   first.manager.dispose();
 
-  // 重启：系统那边已经撤销了（探测返回 denied），启动后复核要把它降级。
+  // 重启：启动阶段不该自动探测（未签名构建每次更新都会让 TCC 授权作废，一启动就弹框）。
+  const probes = [];
   const manager = new HostedSessionManager({
     stateDir: first.stateDir,
     log: () => undefined,
     spawn: () => {
       throw new Error("不该起会话进程");
     },
-    probeDir: () => Promise.resolve("denied"),
-    reprobeDelayMs: 10,
+    probeDir: (path) => {
+      probes.push(path);
+      return Promise.resolve("denied");
+    },
   });
   t.after(() => manager.dispose());
-  assert.equal(authOf(manager, first.allowed), "ok"); // 复核前还是缓存里的 ok
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(authOf(manager, first.allowed), "ok");
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(probes, []);
+  assert.equal(authOf(manager, first.allowed), "ok");
+
+  // 打开设定时才复核：系统那边已经撤销了，探测要把它降级。
+  manager.reprobeDirs();
+  await settle();
+  assert.deepEqual(probes, [first.allowed]);
   assert.equal(authOf(manager, first.allowed), "denied");
 });
 
@@ -304,7 +314,7 @@ test("probe 里的越界路径只做字符串匹配，不会被送去 realpath �
   assert.deepEqual(h.probes, [h.allowed]);
 });
 
-test("启动后复核会把升级前的 unknown 目录确认成 ok（不再误报未授权）", async (t) => {
+test("打开设定复核会把升级前的 unknown 目录确认成 ok（不再误报未授权）", async (t) => {
   // 只有白名单、没有 dir-auth.json：就是「升级前就存在的目录」的形态。
   const root = mkdtempSync(join(tmpdir(), "dir-auth-unknown-"));
   const stateDir = join(root, "state");
@@ -319,11 +329,11 @@ test("启动后复核会把升级前的 unknown 目录确认成 ok（不再误�
       throw new Error("不该起会话进程");
     },
     probeDir: () => Promise.resolve("ok"),
-    reprobeDelayMs: 10,
   });
   t.after(() => manager.dispose());
   // hosted.json 里是原样写法（未 canonical）：configForClient 也按原样报，两种都得认。
   assert.equal(authOf(manager, allowed), "unknown");
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  manager.reprobeDirs();
+  await settle();
   assert.equal(authOf(manager, allowed), "ok");
 });
