@@ -1073,11 +1073,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startUpdate(_ release: GitHubRelease) {
-        let bridgePid: Int? = {
-            guard let process = bridgeProcess, process.isRunning else { return nil }
-            return Int(process.processIdentifier)
-        }()
-        updater.install(release, bridgePid: bridgePid)
+        updater.install(release)
     }
 
     @objc private func disconnectDevice(_ sender: NSMenuItem) {

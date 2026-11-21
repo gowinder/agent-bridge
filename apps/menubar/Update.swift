@@ -174,7 +174,7 @@ final class Updater {
         }
     }
 
-    func install(_ release: GitHubRelease, bridgePid: Int?) {
+    func install(_ release: GitHubRelease) {
         guard !isBusy else { return }
         available = release
         guard let asset = release.assets.first(where: { $0.name == "AgentBridge.dmg" })
@@ -185,7 +185,7 @@ final class Updater {
         }
         phase = .downloading
         onChange?()
-        Task { await download(asset, release: release, bridgePid: bridgePid) }
+        Task { await download(asset, release: release) }
     }
 
     // MARK: - Steps
@@ -206,7 +206,7 @@ final class Updater {
         return try JSONDecoder().decode([GitHubRelease].self, from: data)
     }
 
-    private func download(_ asset: GitHubAsset, release: GitHubRelease, bridgePid: Int?) async {
+    private func download(_ asset: GitHubAsset, release: GitHubRelease) async {
         do {
             var request = URLRequest(url: URL(string: asset.url)!)
             request.timeoutInterval = 600
@@ -230,7 +230,7 @@ final class Updater {
             try await verify(dmg, release: release)
             phase = .installing
             onChange?()
-            try await stage(dmg, release: release, bridgePid: bridgePid)
+            try await stage(dmg, release: release)
         } catch {
             phase = .failed(error.localizedDescription)
             onChange?()
@@ -265,7 +265,7 @@ final class Updater {
         }
     }
 
-    private func stage(_ dmg: URL, release: GitHubRelease, bridgePid: Int?) async throws {
+    private func stage(_ dmg: URL, release: GitHubRelease) async throws {
         let app = Bundle.main.bundleURL
         // 预览版的应用名是 AgentBridge-preview.app：查找、替换都按自己这一份来。
         let name = app.lastPathComponent
@@ -298,9 +298,8 @@ final class Updater {
         #!/bin/sh
         set -eu
         app_pid="$1"
-        bridge_pid="$2"
-        source="$3"
-        target="$4"
+        source="$2"
+        target="$3"
         # 应用改名时（AgentBridge.app → AgentBridge-preview.app）落到新名字上，别把
         # 新版本塞进旧目录名。
         name=$(basename "$source")
@@ -312,10 +311,24 @@ final class Updater {
         reopen() { [ "$opened" = "1" ] || open "$target" 2>/dev/null || true; }
         trap reopen EXIT
         while kill -0 "$app_pid" 2>/dev/null; do sleep 0.3; done
-        if [ "$bridge_pid" != "0" ]; then
-          kill "$bridge_pid" 2>/dev/null || true
-          while kill -0 "$bridge_pid" 2>/dev/null; do sleep 0.2; done
-        fi
+        # 旧 Bridge 不一定由当前这份 app 启动：上一个实例起的还在跑，它报的是旧版本号，
+        # 换完包新 app 又会连上它，界面里看起来「装完还是旧版本」。按可执行路径匹配，
+        # 把这份 app 里跑起来的所有进程（bridge、sessiond、托管会话子进程）一起收掉。
+        # 只认「命令行恰好以这份 app 的路径开头」的进程：ps 自己、awk 自己的命令行里
+        # 也带着这个路径，按子串匹配会把自己也算进去，然后循环永远等不到空。
+        bundle_pids() {
+          ps -Aww -o pid=,command= | awk -v prefix="$target/" \
+            '{ cmd = $0; sub(/^[[:space:]]*[0-9]+[[:space:]]+/, "", cmd); if (index(cmd, prefix) == 1) print $1 }'
+        }
+        for pid in $(bundle_pids); do kill "$pid" 2>/dev/null || true; done
+        # 先给 bridge 5 秒自己收尾（它会先停掉托管的会话子进程），剩下的强杀。
+        i=0
+        while [ "$i" -lt 25 ]; do
+          if [ -z "$(bundle_pids)" ]; then break; fi
+          sleep 0.2
+          i=$((i + 1))
+        done
+        for pid in $(bundle_pids); do kill -9 "$pid" 2>/dev/null || true; done
         cp -R "$source" "$target.new"
         old="$target.old"
         rm -rf "$old"
@@ -334,7 +347,6 @@ final class Updater {
         helper.arguments = [
             script.path,
             String(ProcessInfo.processInfo.processIdentifier),
-            String(bridgePid ?? 0),
             staged.path,
             app.path,
         ]
