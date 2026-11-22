@@ -65,3 +65,29 @@ test("files capability still gates paths outside the project", async (t) => {
     (error) => error.code === "unauthorized",
   );
 });
+
+test("binary files download as base64 instead of failing the preview", async (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.dir, { recursive: true, force: true }));
+  // 带 NUL 的假 PDF：文本通道认成二进制，下载通道要原样吐回来。
+  const bytes = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00, 0x01, 0xff, 0x10]);
+  writeFileSync(join(h.link, "doc.pdf"), bytes);
+  await assert.rejects(
+    () => h.devtools.readFile("s1", h.link, "doc.pdf"),
+    (error) => error.code === "invalid_params",
+  );
+  const raw = await h.devtools.readFile("s1", h.link, "doc.pdf", true);
+  assert.equal(raw.mime, "application/pdf");
+  assert.equal(raw.truncated, false);
+  assert.deepEqual(Buffer.from(raw.dataBase64, "base64"), bytes);
+});
+
+test("binary download refuses files past the single-message limit", async (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.dir, { recursive: true, force: true }));
+  writeFileSync(join(h.link, "big.zip"), Buffer.alloc(4 * 1024 * 1024, 1));
+  await assert.rejects(
+    () => h.devtools.readFile("s1", h.link, "big.zip", true),
+    (error) => error.code === "invalid_params" && /太大/.test(error.message),
+  );
+});

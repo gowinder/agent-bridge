@@ -33,6 +33,11 @@ const MAX_TEXT_BYTES = 1024 * 1024;
  * drop the device channel. Leave headroom for the encoding and the JSON wrapper.
  */
 const MAX_IMAGE_BYTES = Math.floor((MAX_MESSAGE_BYTES * 3) / 4) - 256 * 1024;
+/**
+ * 原文件下载走同一条 base64 通道，所以上限和图片一样受 MAX_MESSAGE_BYTES 约束：
+ * 再大的文件要么分片、要么走 HTTP，现在不做。
+ */
+const MAX_BINARY_BYTES = MAX_IMAGE_BYTES;
 const MAX_OUTPUT_BYTES = 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -58,6 +63,36 @@ const IMAGE_MIME: Record<string, string> = {
   ".avif": "image/avif",
   ".bmp": "image/bmp",
   ".ico": "image/x-icon",
+};
+
+/** 不能当文本看、但可以整份下载的格式：预览直接给「下载原文件」，不渲染乱码。 */
+const BINARY_MIME: Record<string, string> = {
+  ".pdf": "application/pdf",
+  ".zip": "application/zip",
+  ".gz": "application/gzip",
+  ".tar": "application/x-tar",
+  ".7z": "application/x-7z-compressed",
+  ".rar": "application/vnd.rar",
+  ".dmg": "application/x-apple-diskimage",
+  ".pkg": "application/octet-stream",
+  ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".epub": "application/epub+zip",
+  ".heic": "image/heic",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mp3": "audio/mpeg",
+  ".m4a": "audio/mp4",
+  ".wav": "audio/wav",
+  ".flac": "audio/flac",
+  ".ogg": "audio/ogg",
+  ".ttf": "font/ttf",
+  ".otf": "font/otf",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".sqlite": "application/vnd.sqlite3",
 };
 
 const TEXT_MIME: Record<string, string> = {
@@ -496,7 +531,12 @@ export class Devtools {
     };
   }
 
-  async readFile(sessionId: string | undefined, root: string, path: string): Promise<FsReadResult> {
+  async readFile(
+    sessionId: string | undefined,
+    root: string,
+    path: string,
+    binary = false,
+  ): Promise<FsReadResult> {
     // 自己发的附件落在 state/uploads 下：不开「文件浏览」也该能点开预览，否则只能拿到一句
     // 「文件浏览未开启」。只免这一个目录的开关，其它路径照旧先要开关，
     // 免得未开启的设备拿 fs.read 探测项目里有什么。
@@ -516,8 +556,15 @@ export class Devtools {
     if (!stats.isFile()) throw new RpcError("invalid_params", "不是文件");
     const ext = extname(real).toLowerCase();
     const imageMime = IMAGE_MIME[ext];
-    const limit = imageMime ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES;
-    const truncated = stats.size > limit;
+    const binaryMime = BINARY_MIME[ext];
+    if (binary && stats.size > MAX_BINARY_BYTES) {
+      const mb = Math.floor(MAX_BINARY_BYTES / (1024 * 1024));
+      throw new RpcError("invalid_params", `文件太大，浏览器里下载不了（上限 ${mb} MB）`);
+    }
+    if (!binary && binaryMime) throw new RpcError("invalid_params", "二进制文件无法预览，可以下载原文件");
+    const limit = binary ? MAX_BINARY_BYTES : imageMime ? MAX_IMAGE_BYTES : MAX_TEXT_BYTES;
+    // 下载要的是完整原文件，不截断。
+    const truncated = !binary && stats.size > limit;
     if (imageMime && truncated) throw new RpcError("invalid_params", "图片过大，无法预览");
     // Never read past the limit: a huge file must not be pulled into memory just to be cut.
     const length = Math.min(stats.size, limit);
@@ -533,11 +580,11 @@ export class Devtools {
     } finally {
       closeSync(fd);
     }
-    if (imageMime) {
+    if (imageMime || binary) {
       return {
         path: real,
         name: basename(real),
-        mime: imageMime,
+        mime: imageMime ?? binaryMime ?? "application/octet-stream",
         size: stats.size,
         mtime: stats.mtimeMs,
         truncated: false,

@@ -983,6 +983,13 @@ const RETRYABLE_RELAY_CODES = new Set(["bridge_offline", "channel_in_use", "rate
  * 值得就地重试的错误：请求超时、通道断开、Bridge 没连上中继、限流这类。
  * 参数错了、找不到、没权限之类重试也没用，不给「重试」按钮。
  */
+/** 出错时拿协议错误码：预览失败要区分「读不了」和「格式不支持」。 */
+function rpcCodeOf(error: unknown): string | undefined {
+  if (error instanceof RpcCallError) return error.code;
+  if (error instanceof RelayError) return error.code;
+  return undefined;
+}
+
 function isRetryableError(error: unknown): boolean {
   if (error instanceof PeerError) return true;
   if (error instanceof RpcCallError) {
@@ -6485,6 +6492,8 @@ interface FileBrowserState {
   parent: string | null;
   entries: FsEntry[];
   preview: FsReadResult | null;
+  /** 预览失败时记下路径：二进制/超大文件走「下载原文件」。 */
+  errorPath: string | null;
   error: string | null;
   /** 出错时点「重试」要重做的那一步（读根目录 / 列目录 / 读文件）。 */
   retry: (() => void) | null;
@@ -6763,6 +6772,7 @@ async function openFilesPane(state: RailState): Promise<void> {
     parent: null,
     entries: [],
     preview: null,
+    errorPath: null,
     error: null,
     retry: null,
     loading: false,
@@ -6829,6 +6839,7 @@ async function openFile(state: RailState, path: string): Promise<void> {
   const files = state.files;
   if (!files) return;
   files.loading = true;
+  files.errorPath = path;
   paintFiles(state, tr("正在读取文件…"));
   try {
     if (!state.projectRoot) throw new Error(tr("这个会话没有项目目录"));
@@ -6839,6 +6850,7 @@ async function openFile(state: RailState, path: string): Promise<void> {
     });
     files.error = null;
     files.retry = null;
+    files.errorPath = null;
   } catch (error) {
     files.error = messageOf(error);
     files.retry = isRetryableError(error) ? () => void openFile(state, path) : null;
@@ -6950,10 +6962,20 @@ function paintFiles(state: RailState, placeholder?: string): void {
   if (files.error) {
     // 断线、超时、Bridge 刚起来这类错误，用户不该只能反复点标签页来重来。
     const retry = files.retry;
+    const failed = files.errorPath;
     pane.append(
       el("div", { className: "rail-empty rail-error" }, [
         el("p", { text: files.error }),
         ...(retry ? [button(tr("重试"), retry, "btn small")] : []),
+        ...(failed
+          ? [
+              button(
+                tr("下载原文件"),
+                () => void downloadRawFile(failed, state.projectRoot, state.sessionId),
+                "btn small",
+              ),
+            ]
+          : []),
       ]),
     );
     return;
@@ -8414,6 +8436,10 @@ async function openFilePreview(path: string): Promise<void> {
       el("div", { className: "file-preview-note is-error" }, [
         el("p", { text: messageOf(error) }),
         ...(isRetryableError(error) ? [button(tr("重试"), () => void openFilePreview(path), "btn small")] : []),
+        // 二进制文件、超大的图片都预览不了，但原文件还能整份下载。
+        ...(rpcCodeOf(error) === "invalid_params" || rpcCodeOf(error) === "unsupported"
+          ? [button(tr("下载原文件"), () => void downloadRawFile(path), "btn small")]
+          : []),
       ]),
     );
   }
@@ -8688,6 +8714,25 @@ function downloadPreviewFile(file: FsReadResult, name: string): void {
       return;
     }
     saveBlobFile(new Blob([file.text ?? ""], { type: file.mime || "text/plain;charset=utf-8" }), name);
+  } catch (error) {
+    flashNotice(tr(`下载失败：{0}`, messageOf(error)));
+  }
+}
+
+/** 预览不了的文件（PDF、压缩包、超大图片）按原始字节下载：文本通道拿不到它。 */
+async function downloadRawFile(
+  path: string,
+  root: string | undefined = previewRoot,
+  sessionId: string | undefined = previewSessionId,
+): Promise<void> {
+  if (!root || !sessionId) {
+    flashNotice(tr("这个会话没有项目目录，无法预览文件"));
+    return;
+  }
+  const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
+  try {
+    const file = await call<FsReadResult>("fs.read", { sessionId, root, path: full, binary: true }, 120_000);
+    downloadPreviewFile(file, file.name || fileName(full));
   } catch (error) {
     flashNotice(tr(`下载失败：{0}`, messageOf(error)));
   }
