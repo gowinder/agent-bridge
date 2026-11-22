@@ -6157,10 +6157,9 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       }
       flush();
       list.append(messageBubble(null, message));
-      turnStartedAt = message.createdAt;
+      if (message.role === "user") turnStartedAt = message.createdAt;
     }
     flush();
-    syncTurnClock();
   };
 
   const load = async (before?: string): Promise<MessageListResult | null> => {
@@ -8499,7 +8498,7 @@ function turnDuration(ms: number): string {
 function paintTurnDurations(): void {
   let live = false;
   // 只碰还在跑的回合：历史回合的耗时是定值，每秒重写一遍纯属浪费。
-  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration][data-end='0']")) {
+  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration][data-running='1']")) {
     const start = Number(node.dataset["start"] ?? "");
     if (!Number.isFinite(start) || start <= 0) continue;
     live = true;
@@ -8517,7 +8516,7 @@ let turnClock: number | null = null;
 /** 有还在跑的回合就开一个 1 秒的计时器，结束时自己停。 */
 function syncTurnClock(): void {
   if (turnClock !== null) return;
-  if (!document.querySelector("[data-turn-duration][data-end='0']")) return;
+  if (!document.querySelector("[data-turn-duration][data-running='1']")) return;
   turnClock = window.setInterval(paintTurnDurations, 1000);
 }
 
@@ -8561,26 +8560,22 @@ function assistantTurn(
   }
   const last = messages[messages.length - 1];
   const start = startedAt > 0 ? startedAt : (messages[0]?.createdAt ?? 0);
-  const end = running ? 0 : (last?.createdAt ?? 0);
   const times =
     start > 0
       ? el("span", { className: "turn-times" }, [
           el("span", { text: tr("开始 {0}", turnClockText(start)) }),
-          el("span", { className: "turn-time-sep", text: "·" }),
           el("span", {
             attrs: {
               "data-turn-duration": "",
               "data-start": String(start),
-              "data-end": String(end),
+              "data-running": running ? "1" : "0",
             },
-            text: tr("持续 {0}", turnDuration((end > 0 ? end : Date.now()) - start)),
+            text: tr(
+              "持续 {0}",
+              turnDuration(running ? Date.now() - start : Math.max(0, (last?.createdAt ?? start) - start)),
+            ),
           }),
-          ...(last?.createdAt
-            ? [
-                el("span", { className: "turn-time-sep", text: "·" }),
-                el("span", { text: tr("更新 {0}", turnClockText(last.createdAt)) }),
-              ]
-            : []),
+          ...(last?.createdAt ? [el("span", { text: tr("更新 {0}", turnClockText(last.createdAt)) })] : []),
         ])
       : null;
   const meta = el("div", { className: "message-meta" }, [
@@ -8725,7 +8720,7 @@ function renderMessages(state: ChatState): void {
         isLastTurn ? state : null,
         folded,
         turnStartedAt || turn[0]?.createdAt || 0,
-        isLastTurn && state.busy,
+        isLastTurn && state.busy && state.queued.length === 0,
       ),
     );
     // 回合末尾补一行用量：整轮加起来比逐条更接近「这轮花了多少」。
@@ -8740,8 +8735,10 @@ function renderMessages(state: ChatState): void {
     }
     flush();
     list.append(messageBubble(state.session, message, folded));
-    turnStartedAt = message.createdAt;
-    turnId = message.messageId;
+    if (message.role === "user") {
+      turnStartedAt = message.createdAt;
+      turnId = message.messageId;
+    }
   }
   flush();
   appendQueued();
