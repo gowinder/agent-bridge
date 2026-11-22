@@ -110,6 +110,7 @@ export const FR: Record<string, string> = {
     "Afficher l'environnement, le contexte, les connecteurs et les tâches en arrière-plan",
   更多: "Plus",
   未读: "Non lu",
+  标为未读: "Marquer comme non lu",
   "本地没有这台设备的凭据，需要重新配对":
     "Ce navigateur n'a plus les identifiants de cet appareil — appairez-le à nouveau",
   本设备: "Cet appareil",

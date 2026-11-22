@@ -111,6 +111,7 @@ export const DE: Record<string, string> = {
     "Umgebung, Kontext, Konnektoren und Hintergrundaufgaben anzeigen",
   更多: "Mehr",
   未读: "Ungelesen",
+  标为未读: "Als ungelesen markieren",
   "本地没有这台设备的凭据，需要重新配对":
     "Dieser Browser hat die Zugangsdaten dieses Geräts nicht mehr — bitte neu koppeln",
   本设备: "Dieses Gerät",

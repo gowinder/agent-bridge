@@ -184,6 +184,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 7.6 0c0 3 1 4.2 1.6 4.7H2.6c.6-.5 1.6-1.7 1.6-4.7Z"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/></svg>',
   bellOff:
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 5.6-3.3M11.8 7.4c.1 2 1 3.1 1.5 3.6H5.2"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+  unread:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.6"/><circle cx="8" cy="8" r="2.3" fill="currentColor" stroke="none"/></svg>',
   expand:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
@@ -423,12 +425,14 @@ function persistUnread(): void {
 function markUnread(sessionId: string, at: number): void {
   unreadSessions[sessionId] = at;
   persistUnread();
+  paintUnreadTitle();
 }
 
 function markRead(sessionId: string): void {
   if (!(sessionId in unreadSessions)) return;
   delete unreadSessions[sessionId];
   persistUnread();
+  paintUnreadTitle();
 }
 
 function unreadAt(sessionId: string): number | undefined {
@@ -437,6 +441,20 @@ function unreadAt(sessionId: string): number | undefined {
 
 function unreadCount(sessions: SessionSummary[]): number {
   return sessions.filter((session) => unreadAt(session.sessionId) !== undefined).length;
+}
+
+/** 页面原本的标题；未读数量以 `(n) ` 前缀叠在上面，换页时重新记一次。 */
+let baseTitle = "";
+
+function paintUnreadTitle(): void {
+  if (!baseTitle) return;
+  const unread = snapshot ? unreadCount(snapshot.sessions) : Object.keys(unreadSessions).length;
+  document.title = unread > 0 ? `(${unread}) ${baseTitle}` : baseTitle;
+}
+
+function setTitle(title: string): void {
+  baseTitle = title;
+  paintUnreadTitle();
 }
 
 /** 手机浏览器关掉页面后只剩 Service Worker 推送能把提醒送到通知中心。 */
@@ -3570,6 +3588,7 @@ function recentSessionsButton(): HTMLElement | null {
       const running = snapshot?.sessions.some(
         (session) => session.sessionId === item.sessionId && session.busy === true,
       ) === true;
+      const unread = unreadAt(item.sessionId) !== undefined;
       const entry = button(
         "",
         () => {
@@ -3587,6 +3606,9 @@ function recentSessionsButton(): HTMLElement | null {
       entry.append(
         el("span", { className: "recent-menu-name" }, [
           ...(running ? [el("span", { className: "spinner recent-spinner" })] : []),
+          ...(unread
+            ? [el("span", { className: "unread-dot", attrs: { role: "img", title: tr("未读"), "aria-label": tr("未读") } })]
+            : []),
           el("span", { className: "recent-menu-text", text: item.title }),
         ]),
         el("span", { className: "recent-menu-meta", text: meta.join(" · ") }),
@@ -4071,7 +4093,7 @@ function renderClients(): void {
   const route: Route = { level: "clients" };
   const totalProjects = data.projects.length;
   const totalSessions = data.sessions.length;
-  document.title = tr("客户端 · Agent Bridge");
+  setTitle(tr("客户端 · Agent Bridge"));
 
   const list = el("ul", { className: "list" });
   if (data.apps.length === 0) {
@@ -4117,7 +4139,7 @@ function renderClients(): void {
 function renderProjects(route: Route & { level: "projects" }): void {
   const data = snapshot!;
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端"));
+  setTitle(tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端")));
   const projects = data.projects.filter((project) => project.appId === route.appId);
 
   const list = el("ul", { className: "list" });
@@ -4176,7 +4198,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const data = snapshot!;
   const project = data.projects.find((item) => item.projectId === route.projectId);
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = tr(`{0} · Agent Bridge`, project?.name ?? tr("工程"));
+  setTitle(tr(`{0} · Agent Bridge`, project?.name ?? tr("工程")));
   const projectSessions = data.sessions.filter((session) => session.projectId === route.projectId);
   const archivedCount = projectSessions.filter((session) => session.archived).length;
   const sessions = visibleSessions(projectSessions, showArchived);
@@ -4284,8 +4306,17 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     row.addEventListener("click", () =>
       navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
     );
-    // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
+            // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
     const actions = el("div", { className: "row-menu" }, [
+      ...(unread
+        ? []
+        : [
+            rowAction(icon("unread"), tr("标为未读"), () => {
+              markUnread(session.sessionId, Date.now());
+              syncDockSessions();
+              void renderRoute();
+            }),
+          ]),
       rowAction(
         session.pinned ? icon("pinOff") : icon("pin"),
         session.pinned ? tr("取消置顶") : tr("置顶"),
@@ -4973,7 +5004,7 @@ function selfDeviceCard(): HTMLElement {
 
 function renderDevices(): void {
   const state = connected!;
-  document.title = tr("已授权设备 · Agent Bridge");
+  setTitle(tr("已授权设备 · Agent Bridge"));
   const list = el("ul", { className: "list" });
   const status = el("p", { className: "hint" });
   for (const item of state.devices) {
@@ -5201,7 +5232,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     );
     return;
   }
-  document.title = `${summary.title} · Agent Bridge`;
+  setTitle(`${summary.title} · Agent Bridge`);
   rememberSession(summary);
   noteSessionTrail(hashFor(route), summary.title);
   markRead(summary.sessionId);
@@ -6095,7 +6126,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     );
     return;
   }
-  document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
+  setTitle(tr(`后台任务 · {0} · Agent Bridge`, summary.title));
   markRead(summary.sessionId);
   previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
   previewSessionId = summary.sessionId;
@@ -6198,7 +6229,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     note.textContent = first.note ?? "";
     loadOlder.hidden = !first.nextBefore;
     paint();
-    document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
+    setTitle(tr(`后台任务 · {0} · Agent Bridge`, summary.title));
   } else {
     note.textContent = "";
   }
@@ -6215,7 +6246,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
         if (task.updatedAt) parts.push(tr(`{0}更新`, timeLabel(task.updatedAt)));
         meta.textContent = parts.join(" · ");
       }
-      document.title = tr(`后台任务 · {0}`, task.name);
+      setTitle(tr(`后台任务 · {0}`, task.name));
     }
   } catch {
     // the rail is decoration here; the record itself already loaded

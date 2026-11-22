@@ -139,6 +139,7 @@ export const EN: Record<string, string> = {
   "显示环境、上下文、连接器与后台任务": "Show environment, context, connectors and background tasks",
   更多: "More",
   未读: "Unread",
+  标为未读: "Mark as unread",
   "本地没有这台设备的凭据，需要重新配对": "This device's credentials are gone from this browser — pair again.",
   本设备: "This device",
   "正在启动 {0}…": "Starting {0}…",
