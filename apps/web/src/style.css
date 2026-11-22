@@ -872,6 +872,75 @@ details[open] > .dock-project-head::before {
   display: none;
 }
 
+/* 「快速清理」：右侧一颗小按钮，点开是时间档菜单。 */
+.dock-cleanup {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.dock-cleanup-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.dock-cleanup-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.dock-cleanup-btn .icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.dock-cleanup-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 42vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.dock-cleanup-menu[hidden] {
+  display: none;
+}
+
+.dock-cleanup-item {
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dock-cleanup-item:hover {
+  background: var(--surface-2);
+}
+
 /* 整行是「打开会话」按钮，右侧再挂一个标签按钮：两个按钮不能互相嵌套。 */
 .dock-history-row {
   display: flex;
@@ -4943,6 +5012,35 @@ body.has-file-preview {
 
 .sheet-note.error {
   color: var(--danger);
+}
+
+/* 批量归档前的核对清单：只要标题、项目与最后一次更新时间。 */
+.cleanup-list {
+  overflow-y: auto;
+}
+
+.cleanup-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cleanup-item:last-child {
+  border-bottom: 0;
+}
+
+.cleanup-item-title {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cleanup-item-meta {
+  color: var(--muted);
+  font-size: 11.5px;
 }
 
 .sheet-foot .actions {
