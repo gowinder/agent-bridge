@@ -168,6 +168,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg>',
   pencil:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L6 12.8l-3.2.8.8-3.2z"/></svg>',
+  quote:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 8.2a4.6 4.6 0 0 1-4.6 4.6H6.6L3.4 14.6v-2.7a4.6 4.6 0 0 1-0.8-9.3"/><path d="M6.2 7h5.2M6.2 9.6h3.2"/></svg>',
   clock:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg>',
   refresh:
@@ -1967,6 +1969,30 @@ function writeComposerCollapsed(collapsed: boolean): void {
     localStorage.setItem(COMPOSER_COLLAPSED_KEY, collapsed ? "1" : "0");
   } catch {
     // storage unavailable; collapse state stays in memory
+  }
+}
+
+const QUICK_REPLY_KEY = "ab.quickReplies";
+/** 第一次用给几条常说的；删光了也不还原，localStorage 里存的是空数组。 */
+const QUICK_REPLY_DEFAULTS = ["合并pr", "确认", "提交", "交给你了"];
+
+function readQuickReplies(): string[] {
+  try {
+    const raw = localStorage.getItem(QUICK_REPLY_KEY);
+    if (raw === null) return [...QUICK_REPLY_DEFAULTS];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [...QUICK_REPLY_DEFAULTS];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  } catch {
+    return [...QUICK_REPLY_DEFAULTS];
+  }
+}
+
+function writeQuickReplies(list: string[]): void {
+  try {
+    localStorage.setItem(QUICK_REPLY_KEY, JSON.stringify(list));
+  } catch {
+    // storage unavailable; the list still works for this page
   }
 }
 
@@ -5581,6 +5607,126 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     input.style.height = `${Math.min(input.scrollHeight + 2, 160)}px`;
   }
 
+  // ---- 快捷回复：点开挑一条填进输入框，发送仍由用户自己点 ----
+  const quickButton = el("button", {
+    className: "icon-btn composer-tool quick-btn",
+    attrs: { type: "button", title: tr("快捷回复"), "aria-label": tr("快捷回复"), "aria-expanded": "false" },
+  }, [icon("quote")]);
+  const quickPop = el("div", { className: "quick-menu", attrs: { role: "dialog", "aria-label": tr("快捷回复") } });
+  quickPop.hidden = true;
+  let quickEditing = false;
+
+  function closeQuick(): void {
+    quickPop.hidden = true;
+    quickButton.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", quickOutside);
+    document.removeEventListener("keydown", quickKeys);
+  }
+
+  function quickOutside(event: Event): void {
+    const target = event.target as Node | null;
+    if (!target || quickPop.contains(target) || quickButton.contains(target)) return;
+    closeQuick();
+  }
+
+  function quickKeys(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    closeQuick();
+    input.focus();
+  }
+
+  /** 插到光标位置（有选中内容就替换掉），不直接发送。 */
+  function applyQuick(text: string): void {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    const pad = before && !/\s$/.test(before) ? " " : "";
+    input.value = `${before}${pad}${text}${after}`;
+    const caret = before.length + pad.length + text.length;
+    input.setSelectionRange(caret, caret);
+    closeQuick();
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
+
+  function quickRow(text: string, index: number): HTMLElement {
+    if (!quickEditing) {
+      const item = el("button", { className: "quick-item", attrs: { type: "button", title: tr("填到输入框") } }, [
+        el("span", { className: "quick-item-text", text }),
+      ]);
+      item.addEventListener("click", () => applyQuick(text));
+      return item;
+    }
+    const field = el("input", { className: "input quick-input", attrs: { type: "text", "aria-label": tr("快捷回复") } });
+    field.value = text;
+    field.addEventListener("input", () => {
+      const next = readQuickReplies();
+      if (next[index] === undefined) return;
+      next[index] = field.value;
+      writeQuickReplies(next);
+    });
+    const remove = button("", () => {
+      writeQuickReplies(readQuickReplies().filter((_, i) => i !== index));
+      paintQuick();
+    }, "icon-btn quick-del");
+    remove.append(icon("close"));
+    remove.title = tr("删除 {0}", text);
+    remove.setAttribute("aria-label", remove.title);
+    return el("div", { className: "quick-row" }, [field, remove]);
+  }
+
+  function paintQuick(): void {
+    const items = readQuickReplies();
+    const head = el("div", { className: "quick-head" }, [
+      el("span", { className: "quick-head-title", text: tr("快捷回复") }),
+      button(
+        quickEditing ? tr("完成") : tr("编辑"),
+        () => {
+          quickEditing = !quickEditing;
+          paintQuick();
+        },
+        "btn ghost small",
+      ),
+    ]);
+    const list = el("div", { className: "quick-list" });
+    if (items.length === 0) list.append(el("p", { className: "quick-empty", text: tr("还没有快捷回复") }));
+    items.forEach((text, index) => list.append(quickRow(text, index)));
+    quickPop.replaceChildren(head, list);
+    if (!quickEditing) return;
+    const field = el("input", {
+      className: "input quick-input",
+      attrs: { type: "text", placeholder: tr("新的快捷回复…"), "aria-label": tr("新的快捷回复…") },
+    });
+    const add = (): void => {
+      const value = field.value.trim();
+      if (!value) return;
+      writeQuickReplies([...readQuickReplies(), value]);
+      paintQuick();
+      quickPop.querySelector<HTMLInputElement>(".quick-add .quick-input")?.focus();
+    };
+    field.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      add();
+    });
+    quickPop.append(el("div", { className: "quick-row quick-add" }, [field, button(tr("添加"), add, "btn small")]));
+  }
+
+  quickButton.addEventListener("click", () => {
+    if (!quickPop.hidden) {
+      closeQuick();
+      return;
+    }
+    quickEditing = false;
+    paintQuick();
+    quickPop.hidden = false;
+    quickButton.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", quickOutside);
+    document.addEventListener("keydown", quickKeys);
+  });
+
   function updateSendState(): void {
     if (!canSend) {
       sendButton.disabled = true;
@@ -5742,6 +5888,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     slashMenu,
     el("div", { className: "composer-row" }, [
       attachButton,
+      quickButton,
       input,
       loadOlder,
       refreshButton,
@@ -5753,6 +5900,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     ]),
     restore,
     contextPop,
+    quickPop,
   ]);
 
   function setCollapsed(collapsed: boolean, focus = false): void {

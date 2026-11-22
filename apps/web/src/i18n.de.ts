@@ -284,6 +284,9 @@ export const DE: Record<string, string> = {
   "压缩中…": "Wird verdichtet…",
   发送内容与预览一致: "Der gesendete Inhalt entspricht der Vorschau",
   "发送到这个会话…": "An diese Sitzung senden…",
+  "快捷回复": "Schnellantworten",
+  "新的快捷回复…": "Neue Schnellantwort…",
+  "还没有快捷回复": "Noch keine Schnellantworten",
   "只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}":
     "Läuft nur in {0}; ein Browser-Disconnect beendet den Prozess nicht, er stoppt nach {1} Minuten Leerlauf und wird beim nächsten Senden fortgesetzt.{2}",
   "只影响之后新派生的子代理，主模型不动。":

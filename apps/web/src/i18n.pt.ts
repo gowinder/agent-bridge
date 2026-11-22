@@ -284,6 +284,9 @@ export const PT: Record<string, string> = {
   "压缩中…": "Compactando…",
   发送内容与预览一致: "O conteúdo enviado corresponde à prévia",
   "发送到这个会话…": "Enviar para esta sessão…",
+  "快捷回复": "Respostas rápidas",
+  "新的快捷回复…": "Nova resposta rápida…",
+  "还没有快捷回复": "Nenhuma resposta rápida",
   "只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}":
     "Roda só em {0}; fechar o navegador não encerra o processo, ele para após {1} minutos ocioso e retoma ao enviar de novo.{2}",
   "只影响之后新派生的子代理，主模型不动。":
