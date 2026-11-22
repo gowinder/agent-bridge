@@ -8498,12 +8498,12 @@ function turnDuration(ms: number): string {
 /** 回合头部的耗时随时在走：只改文本，不重绘整条消息。 */
 function paintTurnDurations(): void {
   let live = false;
-  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration]")) {
+  // 只碰还在跑的回合：历史回合的耗时是定值，每秒重写一遍纯属浪费。
+  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration][data-end='0']")) {
     const start = Number(node.dataset["start"] ?? "");
     if (!Number.isFinite(start) || start <= 0) continue;
-    const end = Number(node.dataset["end"] ?? "0");
-    if (end <= 0) live = true;
-    node.textContent = tr("持续 {0}", turnDuration((end > 0 ? end : Date.now()) - start));
+    live = true;
+    node.textContent = tr("持续 {0}", turnDuration(Date.now() - start));
   }
   // 没在跑的回合就不用每秒叫醒一次。
   if (!live && turnClock !== null) {
