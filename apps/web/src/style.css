@@ -4144,8 +4144,13 @@ body.has-file-preview {
 }
 
 .composer-collapse {
-  display: none;
+  display: inline-flex;
   flex: none;
+}
+
+/* chevron 图标默认朝右，收起按钮要朝下。 */
+.composer-chev {
+  transform: rotate(90deg);
 }
 
 .composer-tool {
@@ -4600,6 +4605,42 @@ body.has-file-preview {
 
 .composer-restore {
   display: none;
+}
+
+/*
+ * 收起态：输入行与附件全部隐藏，只留一条「写消息…」的恢复条。
+ * 桌面端和移动端共用同一套规则，状态按 localStorage 记忆。
+ */
+.composer.is-collapsed {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.composer.is-collapsed .composer-row,
+.composer.is-collapsed .attach-list {
+  display: none;
+}
+
+.composer.is-collapsed .composer-restore {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.composer.is-collapsed .composer-restore:hover {
+  color: var(--text);
 }
 
 /* ---------- empty / skeleton ---------- */
@@ -5159,42 +5200,6 @@ body.has-file-preview {
 
   .composer-input {
     min-height: 40px;
-  }
-
-  .composer-collapse {
-    display: inline-flex;
-  }
-
-  .composer-chev {
-    transform: rotate(90deg);
-  }
-
-  .composer.is-collapsed {
-    padding: 0;
-    background: transparent;
-    box-shadow: none;
-  }
-
-  .composer.is-collapsed .composer-row,
-  .composer.is-collapsed .attach-list {
-    display: none;
-  }
-
-  .composer.is-collapsed .composer-restore {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 11px 14px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--muted);
-    font: inherit;
-    font-size: 14px;
-    text-align: left;
-    box-shadow: var(--shadow);
-    cursor: pointer;
   }
 
   .offline .topbar-actions .btn {
