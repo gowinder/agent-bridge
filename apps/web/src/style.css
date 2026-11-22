@@ -3098,6 +3098,20 @@ details[open] > .dock-project-head::before {
   color: var(--muted);
 }
 
+/* 回合头部：这一轮的开始、耗时与最新消息时间。窄屏允许折行，不挤操作按钮。 */
+.turn-times {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 7px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-time-sep {
+  opacity: 0.45;
+}
+
 .role {
   font-weight: 600;
   letter-spacing: 0.02em;

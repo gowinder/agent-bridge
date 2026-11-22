@@ -6144,9 +6144,10 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       return;
     }
     let turn: MessageRecord[] = [];
+    let turnStartedAt = 0;
     const flush = (): void => {
       if (turn.length === 0) return;
-      list.append(assistantTurn(null, turn));
+      list.append(assistantTurn(null, turn, null, null, null, turnStartedAt || turn[0]?.createdAt || 0));
       turn = [];
     };
     for (const message of messages) {
@@ -6156,8 +6157,10 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       }
       flush();
       list.append(messageBubble(null, message));
+      turnStartedAt = message.createdAt;
     }
     flush();
+    syncTurnClock();
   };
 
   const load = async (before?: string): Promise<MessageListResult | null> => {
@@ -8483,6 +8486,45 @@ function downloadButton(session: SessionSummary, messages: MessageRecord[]): HTM
   return node;
 }
 
+/** 一回合的耗时：不到一分钟用秒，不到一小时用分+秒，再长用小时+分。 */
+function turnDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return tr("{0} 秒", seconds);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return tr("{0} 分 {1} 秒", minutes, seconds % 60);
+  return tr("{0} 小时 {1} 分", Math.floor(minutes / 60), minutes % 60);
+}
+
+/** 回合头部的耗时随时在走：只改文本，不重绘整条消息。 */
+function paintTurnDurations(): void {
+  let live = false;
+  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration]")) {
+    const start = Number(node.dataset["start"] ?? "");
+    if (!Number.isFinite(start) || start <= 0) continue;
+    const end = Number(node.dataset["end"] ?? "0");
+    if (end <= 0) live = true;
+    node.textContent = tr("持续 {0}", turnDuration((end > 0 ? end : Date.now()) - start));
+  }
+  // 没在跑的回合就不用每秒叫醒一次。
+  if (!live && turnClock !== null) {
+    window.clearInterval(turnClock);
+    turnClock = null;
+  }
+}
+
+let turnClock: number | null = null;
+
+/** 有还在跑的回合就开一个 1 秒的计时器，结束时自己停。 */
+function syncTurnClock(): void {
+  if (turnClock !== null) return;
+  if (!document.querySelector("[data-turn-duration][data-end='0']")) return;
+  turnClock = window.setInterval(paintTurnDurations, 1000);
+}
+
+function turnClockText(at: number): string {
+  return new Date(at).toLocaleTimeString(locale());
+}
+
 function assistantTurn(
   session: SessionSummary | null,
   messages: MessageRecord[],
@@ -8491,6 +8533,10 @@ function assistantTurn(
   askState: ChatState | null = null,
   /** 折叠状态（按回合首条 messageId）；任务页不传，就没有折叠按钮。 */
   folded?: Set<string> | null,
+  /** 这一轮的开始时间（用户消息的 createdAt）；不传就退回本轮首条助手消息。 */
+  startedAt = 0,
+  /** 这一轮还在跑：耗时按现在算，并每秒刷新。 */
+  running = false,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: MessageBlock[] = [];
@@ -8514,10 +8560,33 @@ function assistantTurn(
     if (hasText) lastText = message;
   }
   const last = messages[messages.length - 1];
+  const start = startedAt > 0 ? startedAt : (messages[0]?.createdAt ?? 0);
+  const end = running ? 0 : (last?.createdAt ?? 0);
+  const times =
+    start > 0
+      ? el("span", { className: "turn-times" }, [
+          el("span", { text: tr("开始 {0}", turnClockText(start)) }),
+          el("span", { className: "turn-time-sep", text: "·" }),
+          el("span", {
+            attrs: {
+              "data-turn-duration": "",
+              "data-start": String(start),
+              "data-end": String(end),
+            },
+            text: tr("持续 {0}", turnDuration((end > 0 ? end : Date.now()) - start)),
+          }),
+          ...(last?.createdAt
+            ? [
+                el("span", { className: "turn-time-sep", text: "·" }),
+                el("span", { text: tr("更新 {0}", turnClockText(last.createdAt)) }),
+              ]
+            : []),
+        ])
+      : null;
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: "role assistant", text: tr("助手") }),
     ...(peer ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
-    ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString(locale()) })] : []),
+    ...(times ? [times] : []),
   ]);
   if (session) {
     // 复制/下载整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
@@ -8639,6 +8708,8 @@ function renderMessages(state: ChatState): void {
   }
   const folded = state.folded ?? (state.folded = new Set<string>());
   let turn: MessageRecord[] = [];
+  /** 这一轮开始的那条用户消息时间：回合头部显示「开始 / 持续」。 */
+  let turnStartedAt = 0;
   /** 当前回合的首条用户消息 id；用量按它去 tokens.turns 里找。 */
   let turnId = "";
   const lastMessage = state.messages[state.messages.length - 1];
@@ -8653,6 +8724,8 @@ function renderMessages(state: ChatState): void {
         isLastTurn && canAct ? state : null,
         isLastTurn ? state : null,
         folded,
+        turnStartedAt || turn[0]?.createdAt || 0,
+        isLastTurn && state.busy,
       ),
     );
     // 回合末尾补一行用量：整轮加起来比逐条更接近「这轮花了多少」。
@@ -8667,11 +8740,13 @@ function renderMessages(state: ChatState): void {
     }
     flush();
     list.append(messageBubble(state.session, message, folded));
+    turnStartedAt = message.createdAt;
     turnId = message.messageId;
   }
   flush();
   appendQueued();
   markTurnState(list, state);
+  syncTurnClock();
   if (stick) list.scrollTop = list.scrollHeight;
 }
 
