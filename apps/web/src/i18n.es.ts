@@ -103,6 +103,7 @@ export const ES: Record<string, string> = {
   "显示环境、上下文、连接器与后台任务": "Mostrar entorno, contexto, conectores y tareas en segundo plano",
   更多: "Más",
   未读: "Sin leer",
+  标为未读: "Marcar como no leído",
   "本地没有这台设备的凭据，需要重新配对":
     "Este navegador ya no tiene las credenciales de este dispositivo; vuelve a emparejarlo",
   本设备: "Este dispositivo",

@@ -452,6 +452,15 @@ a.crumb:hover {
   font-size: 13.5px;
 }
 
+/* 「最近访问」下拉里的未读点：与侧栏 / 会话列表的「未读」标签同一口径。 */
+.unread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .recent-menu-text {
   min-width: 0;
   overflow: hidden;
