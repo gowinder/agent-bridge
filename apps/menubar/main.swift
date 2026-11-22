@@ -2,6 +2,7 @@
 // lets you cut a device off or revoke its credential without a terminal.
 import AppKit
 import CoreImage
+import Darwin
 import Foundation
 import UserNotifications
 
@@ -514,6 +515,18 @@ enum BridgeCLI {
         return result == 0
     }
 
+    /// 本包里携带的 Bridge 版本（`Resources/bridge/package.json`）。开发时用
+    /// `AGENT_BRIDGE_BIN` 指到源码树，读不到就返回 nil，跳过版本核对。
+    static func bundledVersion() -> String? {
+        guard let path = Bundle.main.resourceURL?.appendingPathComponent("bridge/package.json"),
+              let data = try? Data(contentsOf: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let version = json["version"] as? String,
+              !version.isEmpty
+        else { return nil }
+        return version
+    }
+
     static func info() -> BridgeInfo? {
         guard let result = run(["info"], timeout: 8), result.code == 0 else { return nil }
         let line = result.output.split(separator: "\n").last.map(String.init) ?? result.output
@@ -545,6 +558,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private let client = AdminClient()
+    /// 旧 Bridge 只处理一次，别在 5 秒一轮的刷新里反复重启。
+    private var staleBridgeHandled = false
     private var statusItem: NSStatusItem!
     private var timer: Timer?
     private var snapshot: Snapshot?
@@ -766,6 +781,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         paint()
         checkDevtoolsExpiry()
         if settingsWindow?.isVisible == true { renderSettings() }
+        await restartStaleBridge()
+    }
+
+    /// 更新完还连着一个旧 Bridge 时把它换掉。
+    ///
+    /// 0.11.9 之前的替换脚本只停「当前这份 app 自己起的」Bridge，上一个实例留下的一直活着：
+    /// 新 app 起来发现端口已占就接管它，菜单顶部报的还是旧版本号，看起来像「更新没生效」。
+    /// 这里比 `/status` 报的版本与本包携带的 Bridge 版本，对不上就停掉重新起一份。
+    private func restartStaleBridge() async {
+        guard !staleBridgeHandled, reachable, bridgeProcess == nil, let snapshot,
+              snapshot.bridgePid > 0,
+              let bundled = BridgeCLI.bundledVersion(), snapshot.version != bundled else { return }
+        // 只试一次：换完还对不上（比如端口被另一份安装占着）就交给界面报错，不能来回重启。
+        staleBridgeHandled = true
+        kill(pid_t(snapshot.bridgePid), SIGTERM)
+        // 端口没释放就 startBridge 会直接撞「已有 Bridge 在运行」。
+        for _ in 0 ..< 25 where BridgeCLI.adminPortBusy(AdminClient.port) {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        startBridge()
+        // 新进程要几百毫秒才开始监听，起来后再刷新一次，菜单上的版本号立刻就对。
+        try? await Task.sleep(nanoseconds: 800_000_000)
+        await refresh()
     }
 
     // MARK: - Menu
