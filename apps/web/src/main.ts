@@ -2898,6 +2898,208 @@ async function runDeepSearch(query: string): Promise<void> {
   renderDockHistoryList();
 }
 
+/** 「快速清理」的时间档：按会话最后更新时间倒推。 */
+const CLEANUP_RANGES: Array<{ ms: number; label: string }> = [
+  { ms: 12 * 3_600_000, label: "12 小时" },
+  { ms: 24 * 3_600_000, label: "1 天" },
+  { ms: 3 * 86_400_000, label: "3 天" },
+  { ms: 5 * 86_400_000, label: "5 天" },
+  { ms: 7 * 86_400_000, label: "7 天" },
+  { ms: 15 * 86_400_000, label: "15 天" },
+];
+
+/**
+ * 快速清理只归档 Bridge 托管会话（桌面会话由各自应用管）；置顶、正在跑、等回答的都跳过。
+ * 用 `updatedAt` 而不是 `createdAt`：一小时前还在用的会话不该因为建得早被清掉。
+ */
+function cleanupCandidates(ms: number): SessionSummary[] {
+  const cutoff = Date.now() - ms;
+  return visibleSessions(snapshot?.sessions ?? []).filter(
+    (session) =>
+      session.hosted === true &&
+      session.updatedAt < cutoff &&
+      session.pinned !== true &&
+      session.busy !== true &&
+      session.needsDecision !== true,
+  );
+}
+
+/** 历史面板上的「快速清理」：先选时间档，再在弹层里核对标题后批量归档。 */
+function cleanupControl(): HTMLElement {
+  const wrap = el("div", { className: "dock-cleanup" });
+  const menu = el("div", { className: "dock-cleanup-menu", attrs: { role: "menu" } });
+  menu.hidden = true;
+  const trigger = el(
+    "button",
+    {
+      className: "dock-cleanup-btn",
+      attrs: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false" },
+    },
+    [icon("trash", "icon"), el("span", { text: tr("快速清理") })],
+  );
+
+  const onOutside = (event: PointerEvent): void => {
+    const target = event.target as Node | null;
+    if (!target || wrap.contains(target)) return;
+    close();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") close();
+  };
+  function close(): void {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onOutside);
+    document.removeEventListener("keydown", onKey);
+  }
+
+  for (const range of CLEANUP_RANGES) {
+    const item = el(
+      "button",
+      { className: "dock-cleanup-item", attrs: { type: "button", role: "menuitem" } },
+      [el("span", { text: tr(`归档超过 {0} 未更新的托管会话`, tr(range.label)) })],
+    );
+    item.addEventListener("click", () => {
+      close();
+      cleanupSheet(range.ms, tr(range.label));
+    });
+    menu.append(item);
+  }
+
+  trigger.addEventListener("click", () => {
+    if (!menu.hidden) {
+      close();
+      return;
+    }
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onOutside);
+    document.addEventListener("keydown", onKey);
+  });
+
+  wrap.append(trigger, menu);
+  return wrap;
+}
+
+/** 核对弹层：列出会归档的标题，确认后逐个走 `hosted.archive`。 */
+function cleanupSheet(ms: number, rangeLabel: string): void {
+  const candidates = cleanupCandidates(ms);
+  const mask = el("div", { className: "sheet-mask" });
+  const progress = el("p", { className: "sheet-note", text: "" });
+  progress.hidden = true;
+  let busy = false;
+
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape" && !busy) finish();
+  };
+  function finish(): void {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  }
+
+  const confirm = button("", () => void run(), "btn primary");
+  const cancel = button(
+    tr("取消"),
+    () => {
+      if (!busy) finish();
+    },
+    "btn secondary",
+  );
+
+  function paintConfirm(): void {
+    confirm.textContent = tr("归档 {0} 个", candidates.length);
+    confirm.disabled = busy || candidates.length === 0;
+    cancel.disabled = busy;
+  }
+
+  async function run(): Promise<void> {
+    if (busy || candidates.length === 0) return;
+    busy = true;
+    paintConfirm();
+    progress.hidden = false;
+    let archived = 0;
+    const archivedIds = new Set<string>();
+    const failures: string[] = [];
+    for (const [index, session] of candidates.entries()) {
+      progress.textContent = tr("正在归档 {0}/{1}", index + 1, candidates.length);
+      try {
+        const result = await call<SessionGetResult>("hosted.archive", {
+          sessionId: session.sessionId,
+          archived: true,
+        });
+        patchSession(result.session);
+        archivedIds.add(session.sessionId);
+        archived += 1;
+      } catch (error) {
+        failures.push(`${session.title}：${messageOf(error)}`);
+      }
+    }
+    busy = false;
+    finish();
+    renderDockHistoryList();
+    syncDockSessions();
+    // 正在看的那条也被清掉时，跟单条归档一样退回工程页，免得停在一个已归档的聊天里。
+    const route = parseRoute();
+    if (route.level === "chat" && archivedIds.has(route.sessionId)) {
+      navigate({ level: "sessions", appId: route.appId, projectId: route.projectId });
+    } else if (route.level === "sessions") {
+      void renderRoute();
+    }
+    flashNotice(tr("已归档 {0} 个，失败 {1} 个", archived, failures.length));
+    for (const line of failures) console.warn(`[cleanup] ${line}`);
+  }
+
+  const body = el("div", { className: "sheet-body" });
+  if (candidates.length === 0) {
+    body.append(el("p", { className: "hint", text: tr("没有符合条件的托管会话") }));
+  } else {
+    const list = el("div", { className: "list cleanup-list" });
+    for (const session of candidates) {
+      list.append(
+        el("div", { className: "cleanup-item" }, [
+          el("span", { className: "cleanup-item-title", text: session.title }),
+          el("span", {
+            className: "cleanup-item-meta",
+            text: `${recentProjectName(session.projectId)} · ${recentTime(session.updatedAt)}`,
+          }),
+        ]),
+      );
+    }
+    body.append(list);
+  }
+
+  paintConfirm();
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask && !busy) finish();
+  });
+
+  mask.append(
+    el(
+      "aside",
+      { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("快速清理") } },
+      [
+        el("header", { className: "sheet-head" }, [el("h2", { className: "sheet-title", text: tr("快速清理") })]),
+        el("p", { className: "sheet-note", text: tr(`归档超过 {0} 未更新的托管会话`, rangeLabel) }),
+        body,
+        el("p", {
+          className: "sheet-note",
+          text: tr("只处理 Bridge 托管的会话，桌面会话请在原应用里归档。"),
+        }),
+        el("p", {
+          className: "sheet-note",
+          text: tr("归档后不再出现在历史里，可在工程页「显示已归档」找回。"),
+        }),
+        progress,
+        el("footer", { className: "sheet-foot" }, [el("div", { className: "actions" }, [cancel, confirm])]),
+      ],
+    ),
+  );
+  document.body.append(mask);
+  confirm.focus();
+}
+
 function dockHistory(): HTMLElement {
   if (!dockHistoryView) {
     const wrap = el("div", { className: "dock-history" });
@@ -2935,7 +3137,7 @@ function dockHistory(): HTMLElement {
     const filters = el("div", { className: "dock-tag-filter", attrs: { role: "group", "aria-label": tr("按标签筛选") } });
     dockTagFilterHost = filters;
     const list = el("div", { className: "dock-list dock-history-list" });
-    wrap.append(search, filters, status, list);
+    wrap.append(search, cleanupControl(), filters, status, list);
     dockHistoryView = { wrap, list, input, check, status };
     renderTagFilter();
   }
