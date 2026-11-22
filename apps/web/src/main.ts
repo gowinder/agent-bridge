@@ -5409,7 +5409,10 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       }
       resetToggle.checked = false;
     }
-    await sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
+    await sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => {
+      // 窄屏发送后收起输入区，把空间让给对话；桌面端保持展开，不打断连续输入。
+      if (window.matchMedia("(max-width: 720px)").matches) setCollapsed(true);
+    });
   }
 
   const sendButton = button(tr("发送"), submit, "btn primary");
@@ -5493,7 +5496,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const collapseButton = el("button", {
     className: "icon-btn composer-collapse",
-    attrs: { type: "button", "aria-label": tr("收起输入区"), title: tr("收起输入区") },
+    attrs: { type: "button", "aria-expanded": "true", "aria-label": tr("收起输入区"), title: tr("收起输入区") },
   }, [icon("chevron", "icon composer-chev")]);
   collapseButton.addEventListener("click", () => setCollapsed(true, true));
 
@@ -5521,6 +5524,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   function setCollapsed(collapsed: boolean, focus = false): void {
     composer.classList.toggle("is-collapsed", collapsed);
+    collapseButton.setAttribute("aria-expanded", String(!collapsed));
     writeComposerCollapsed(collapsed);
     if (!collapsed) {
       autoGrow();
