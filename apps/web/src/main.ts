@@ -184,6 +184,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 7.6 0c0 3 1 4.2 1.6 4.7H2.6c.6-.5 1.6-1.7 1.6-4.7Z"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/></svg>',
   bellOff:
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 5.6-3.3M11.8 7.4c.1 2 1 3.1 1.5 3.6H5.2"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+  unread:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.6"/><circle cx="8" cy="8" r="2.3" fill="currentColor" stroke="none"/></svg>',
   expand:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
@@ -423,12 +425,14 @@ function persistUnread(): void {
 function markUnread(sessionId: string, at: number): void {
   unreadSessions[sessionId] = at;
   persistUnread();
+  paintUnreadTitle();
 }
 
 function markRead(sessionId: string): void {
   if (!(sessionId in unreadSessions)) return;
   delete unreadSessions[sessionId];
   persistUnread();
+  paintUnreadTitle();
 }
 
 function unreadAt(sessionId: string): number | undefined {
@@ -437,6 +441,20 @@ function unreadAt(sessionId: string): number | undefined {
 
 function unreadCount(sessions: SessionSummary[]): number {
   return sessions.filter((session) => unreadAt(session.sessionId) !== undefined).length;
+}
+
+/** 页面原本的标题；未读数量以 `(n) ` 前缀叠在上面，换页时重新记一次。 */
+let baseTitle = "";
+
+function paintUnreadTitle(): void {
+  if (!baseTitle) return;
+  const unread = snapshot ? unreadCount(snapshot.sessions) : Object.keys(unreadSessions).length;
+  document.title = unread > 0 ? `(${unread}) ${baseTitle}` : baseTitle;
+}
+
+function setTitle(title: string): void {
+  baseTitle = title;
+  paintUnreadTitle();
 }
 
 /** 手机浏览器关掉页面后只剩 Service Worker 推送能把提醒送到通知中心。 */
@@ -3772,6 +3790,7 @@ function recentSessionsButton(): HTMLElement | null {
       const running = snapshot?.sessions.some(
         (session) => session.sessionId === item.sessionId && session.busy === true,
       ) === true;
+      const unread = unreadAt(item.sessionId) !== undefined;
       const entry = button(
         "",
         () => {
@@ -3789,6 +3808,9 @@ function recentSessionsButton(): HTMLElement | null {
       entry.append(
         el("span", { className: "recent-menu-name" }, [
           ...(running ? [el("span", { className: "spinner recent-spinner" })] : []),
+          ...(unread
+            ? [el("span", { className: "unread-dot", attrs: { role: "img", title: tr("未读"), "aria-label": tr("未读") } })]
+            : []),
           el("span", { className: "recent-menu-text", text: item.title }),
         ]),
         el("span", { className: "recent-menu-meta", text: meta.join(" · ") }),
@@ -4273,7 +4295,7 @@ function renderClients(): void {
   const route: Route = { level: "clients" };
   const totalProjects = data.projects.length;
   const totalSessions = data.sessions.length;
-  document.title = tr("客户端 · Agent Bridge");
+  setTitle(tr("客户端 · Agent Bridge"));
 
   const list = el("ul", { className: "list" });
   if (data.apps.length === 0) {
@@ -4319,7 +4341,7 @@ function renderClients(): void {
 function renderProjects(route: Route & { level: "projects" }): void {
   const data = snapshot!;
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端"));
+  setTitle(tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端")));
   const projects = data.projects.filter((project) => project.appId === route.appId);
 
   const list = el("ul", { className: "list" });
@@ -4378,7 +4400,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const data = snapshot!;
   const project = data.projects.find((item) => item.projectId === route.projectId);
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = tr(`{0} · Agent Bridge`, project?.name ?? tr("工程"));
+  setTitle(tr(`{0} · Agent Bridge`, project?.name ?? tr("工程")));
   const projectSessions = data.sessions.filter((session) => session.projectId === route.projectId);
   const archivedCount = projectSessions.filter((session) => session.archived).length;
   const sessions = visibleSessions(projectSessions, showArchived);
@@ -4486,8 +4508,17 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     row.addEventListener("click", () =>
       navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
     );
-    // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
+            // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
     const actions = el("div", { className: "row-menu" }, [
+      ...(unread
+        ? []
+        : [
+            rowAction(icon("unread"), tr("标为未读"), () => {
+              markUnread(session.sessionId, Date.now());
+              syncDockSessions();
+              void renderRoute();
+            }),
+          ]),
       rowAction(
         session.pinned ? icon("pinOff") : icon("pin"),
         session.pinned ? tr("取消置顶") : tr("置顶"),
@@ -5175,7 +5206,7 @@ function selfDeviceCard(): HTMLElement {
 
 function renderDevices(): void {
   const state = connected!;
-  document.title = tr("已授权设备 · Agent Bridge");
+  setTitle(tr("已授权设备 · Agent Bridge"));
   const list = el("ul", { className: "list" });
   const status = el("p", { className: "hint" });
   for (const item of state.devices) {
@@ -5403,7 +5434,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     );
     return;
   }
-  document.title = `${summary.title} · Agent Bridge`;
+  setTitle(`${summary.title} · Agent Bridge`);
   rememberSession(summary);
   noteSessionTrail(hashFor(route), summary.title);
   markRead(summary.sessionId);
@@ -6297,7 +6328,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     );
     return;
   }
-  document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
+  setTitle(tr(`后台任务 · {0} · Agent Bridge`, summary.title));
   markRead(summary.sessionId);
   previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
   previewSessionId = summary.sessionId;
@@ -6346,9 +6377,10 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       return;
     }
     let turn: MessageRecord[] = [];
+    let turnStartedAt = 0;
     const flush = (): void => {
       if (turn.length === 0) return;
-      list.append(assistantTurn(null, turn));
+      list.append(assistantTurn(null, turn, null, null, null, turnStartedAt || turn[0]?.createdAt || 0));
       turn = [];
     };
     for (const message of messages) {
@@ -6358,6 +6390,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       }
       flush();
       list.append(messageBubble(null, message));
+      if (message.role === "user") turnStartedAt = message.createdAt;
     }
     flush();
   };
@@ -6398,7 +6431,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     note.textContent = first.note ?? "";
     loadOlder.hidden = !first.nextBefore;
     paint();
-    document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
+    setTitle(tr(`后台任务 · {0} · Agent Bridge`, summary.title));
   } else {
     note.textContent = "";
   }
@@ -6415,7 +6448,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
         if (task.updatedAt) parts.push(tr(`{0}更新`, timeLabel(task.updatedAt)));
         meta.textContent = parts.join(" · ");
       }
-      document.title = tr(`后台任务 · {0}`, task.name);
+      setTitle(tr(`后台任务 · {0}`, task.name));
     }
   } catch {
     // the rail is decoration here; the record itself already loaded
@@ -8685,6 +8718,45 @@ function downloadButton(session: SessionSummary, messages: MessageRecord[]): HTM
   return node;
 }
 
+/** 一回合的耗时：不到一分钟用秒，不到一小时用分+秒，再长用小时+分。 */
+function turnDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return tr("{0} 秒", seconds);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return tr("{0} 分 {1} 秒", minutes, seconds % 60);
+  return tr("{0} 小时 {1} 分", Math.floor(minutes / 60), minutes % 60);
+}
+
+/** 回合头部的耗时随时在走：只改文本，不重绘整条消息。 */
+function paintTurnDurations(): void {
+  let live = false;
+  // 只碰还在跑的回合：历史回合的耗时是定值，每秒重写一遍纯属浪费。
+  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration][data-running='1']")) {
+    const start = Number(node.dataset["start"] ?? "");
+    if (!Number.isFinite(start) || start <= 0) continue;
+    live = true;
+    node.textContent = tr("持续 {0}", turnDuration(Date.now() - start));
+  }
+  // 没在跑的回合就不用每秒叫醒一次。
+  if (!live && turnClock !== null) {
+    window.clearInterval(turnClock);
+    turnClock = null;
+  }
+}
+
+let turnClock: number | null = null;
+
+/** 有还在跑的回合就开一个 1 秒的计时器，结束时自己停。 */
+function syncTurnClock(): void {
+  if (turnClock !== null) return;
+  if (!document.querySelector("[data-turn-duration][data-running='1']")) return;
+  turnClock = window.setInterval(paintTurnDurations, 1000);
+}
+
+function turnClockText(at: number): string {
+  return new Date(at).toLocaleTimeString(locale());
+}
+
 function assistantTurn(
   session: SessionSummary | null,
   messages: MessageRecord[],
@@ -8693,6 +8765,10 @@ function assistantTurn(
   askState: ChatState | null = null,
   /** 折叠状态（按回合首条 messageId）；任务页不传，就没有折叠按钮。 */
   folded?: Set<string> | null,
+  /** 这一轮的开始时间（用户消息的 createdAt）；不传就退回本轮首条助手消息。 */
+  startedAt = 0,
+  /** 这一轮还在跑：耗时按现在算，并每秒刷新。 */
+  running = false,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: MessageBlock[] = [];
@@ -8716,10 +8792,29 @@ function assistantTurn(
     if (hasText) lastText = message;
   }
   const last = messages[messages.length - 1];
+  const start = startedAt > 0 ? startedAt : (messages[0]?.createdAt ?? 0);
+  const times =
+    start > 0
+      ? el("span", { className: "turn-times" }, [
+          el("span", { text: tr("开始 {0}", turnClockText(start)) }),
+          el("span", {
+            attrs: {
+              "data-turn-duration": "",
+              "data-start": String(start),
+              "data-running": running ? "1" : "0",
+            },
+            text: tr(
+              "持续 {0}",
+              turnDuration(running ? Date.now() - start : Math.max(0, (last?.createdAt ?? start) - start)),
+            ),
+          }),
+          ...(last?.createdAt ? [el("span", { text: tr("更新 {0}", turnClockText(last.createdAt)) })] : []),
+        ])
+      : null;
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: "role assistant", text: tr("助手") }),
     ...(peer ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
-    ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString(locale()) })] : []),
+    ...(times ? [times] : []),
   ]);
   if (session) {
     // 复制/下载整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
@@ -8841,6 +8936,8 @@ function renderMessages(state: ChatState): void {
   }
   const folded = state.folded ?? (state.folded = new Set<string>());
   let turn: MessageRecord[] = [];
+  /** 这一轮开始的那条用户消息时间：回合头部显示「开始 / 持续」。 */
+  let turnStartedAt = 0;
   /** 当前回合的首条用户消息 id；用量按它去 tokens.turns 里找。 */
   let turnId = "";
   const lastMessage = state.messages[state.messages.length - 1];
@@ -8855,6 +8952,8 @@ function renderMessages(state: ChatState): void {
         isLastTurn && canAct ? state : null,
         isLastTurn ? state : null,
         folded,
+        turnStartedAt || turn[0]?.createdAt || 0,
+        isLastTurn && state.busy && state.queued.length === 0,
       ),
     );
     // 回合末尾补一行用量：整轮加起来比逐条更接近「这轮花了多少」。
@@ -8869,11 +8968,15 @@ function renderMessages(state: ChatState): void {
     }
     flush();
     list.append(messageBubble(state.session, message, folded));
-    turnId = message.messageId;
+    if (message.role === "user") {
+      turnStartedAt = message.createdAt;
+      turnId = message.messageId;
+    }
   }
   flush();
   appendQueued();
   markTurnState(list, state);
+  syncTurnClock();
   if (stick) list.scrollTop = list.scrollHeight;
 }
 

@@ -452,6 +452,15 @@ a.crumb:hover {
   font-size: 13.5px;
 }
 
+/* 「最近访问」下拉里的未读点：与侧栏 / 会话列表的「未读」标签同一口径。 */
+.unread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .recent-menu-text {
   min-width: 0;
   overflow: hidden;
@@ -3161,10 +3170,28 @@ details[open] > .dock-project-head::before {
 
 .message-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
+  gap: 4px 9px;
   font-size: 11.5px;
   color: var(--muted);
+}
+
+/* 回合头部：这一轮的开始、耗时与最新消息时间。窄屏允许折行，不挤操作按钮。 */
+.turn-times {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 7px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 分隔符挂在后一段前面：折行时不会单独掉到行首。 */
+.turn-times > span + span::before {
+  content: "·";
+  margin-right: 7px;
+  opacity: 0.45;
 }
 
 .role {
