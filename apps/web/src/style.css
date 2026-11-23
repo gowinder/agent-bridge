@@ -452,6 +452,15 @@ a.crumb:hover {
   font-size: 13.5px;
 }
 
+/* 「最近访问」下拉里的未读点：与侧栏 / 会话列表的「未读」标签同一口径。 */
+.unread-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .recent-menu-text {
   min-width: 0;
   overflow: hidden;
@@ -861,6 +870,75 @@ details[open] > .dock-project-head::before {
 
 .dock-search-status[hidden] {
   display: none;
+}
+
+/* 「快速清理」：右侧一颗小按钮，点开是时间档菜单。 */
+.dock-cleanup {
+  position: relative;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.dock-cleanup-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+
+.dock-cleanup-btn:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+
+.dock-cleanup-btn .icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.dock-cleanup-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  left: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 42vh;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.dock-cleanup-menu[hidden] {
+  display: none;
+}
+
+.dock-cleanup-item {
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.dock-cleanup-item:hover {
+  background: var(--surface-2);
 }
 
 /* 整行是「打开会话」按钮，右侧再挂一个标签按钮：两个按钮不能互相嵌套。 */
@@ -3092,10 +3170,28 @@ details[open] > .dock-project-head::before {
 
 .message-meta {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 9px;
+  gap: 4px 9px;
   font-size: 11.5px;
   color: var(--muted);
+}
+
+/* 回合头部：这一轮的开始、耗时与最新消息时间。窄屏允许折行，不挤操作按钮。 */
+.turn-times {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 7px;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 分隔符挂在后一段前面：折行时不会单独掉到行首。 */
+.turn-times > span + span::before {
+  content: "·";
+  margin-right: 7px;
+  opacity: 0.45;
 }
 
 .role {
@@ -4144,8 +4240,13 @@ body.has-file-preview {
 }
 
 .composer-collapse {
-  display: none;
+  display: inline-flex;
   flex: none;
+}
+
+/* chevron 图标默认朝右，收起按钮要朝下。 */
+.composer-chev {
+  transform: rotate(90deg);
 }
 
 .composer-tool {
@@ -4272,6 +4373,109 @@ body.has-file-preview {
 .slash-item.is-active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+/* ---------- quick replies ---------- */
+
+.quick-menu {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(100% + 8px);
+  z-index: 31;
+  max-height: min(320px, 60vh);
+  overflow: auto;
+  padding: 8px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
+}
+
+.quick-menu[hidden] {
+  display: none;
+}
+
+.quick-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 6px;
+}
+
+.quick-head-title {
+  flex: 1;
+  font-size: 11.5px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.quick-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quick-item {
+  display: block;
+  width: 100%;
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quick-item:hover,
+.quick-item:focus-visible {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.quick-item-text {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.quick-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.quick-row + .quick-row {
+  margin-top: 4px;
+}
+
+.quick-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.quick-add {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.quick-empty {
+  margin: 2px 4px 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.quick-del {
+  flex: none;
+  color: var(--muted);
+}
+
+.quick-del:hover {
+  color: var(--danger);
 }
 
 /* ---------- model chip ---------- */
@@ -4602,6 +4806,42 @@ body.has-file-preview {
   display: none;
 }
 
+/*
+ * 收起态：输入行与附件全部隐藏，只留一条「写消息…」的恢复条。
+ * 桌面端和移动端共用同一套规则，状态按 localStorage 记忆。
+ */
+.composer.is-collapsed {
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.composer.is-collapsed .composer-row,
+.composer.is-collapsed .attach-list {
+  display: none;
+}
+
+.composer.is-collapsed .composer-restore {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: 14px;
+  text-align: left;
+  box-shadow: var(--shadow);
+  cursor: pointer;
+}
+
+.composer.is-collapsed .composer-restore:hover {
+  color: var(--text);
+}
+
 /* ---------- empty / skeleton ---------- */
 
 .empty {
@@ -4875,6 +5115,35 @@ body.has-file-preview {
 
 .sheet-note.error {
   color: var(--danger);
+}
+
+/* 批量归档前的核对清单：只要标题、项目与最后一次更新时间。 */
+.cleanup-list {
+  overflow-y: auto;
+}
+
+.cleanup-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.cleanup-item:last-child {
+  border-bottom: 0;
+}
+
+.cleanup-item-title {
+  overflow: hidden;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cleanup-item-meta {
+  color: var(--muted);
+  font-size: 11.5px;
 }
 
 .sheet-foot .actions {
@@ -5159,42 +5428,6 @@ body.has-file-preview {
 
   .composer-input {
     min-height: 40px;
-  }
-
-  .composer-collapse {
-    display: inline-flex;
-  }
-
-  .composer-chev {
-    transform: rotate(90deg);
-  }
-
-  .composer.is-collapsed {
-    padding: 0;
-    background: transparent;
-    box-shadow: none;
-  }
-
-  .composer.is-collapsed .composer-row,
-  .composer.is-collapsed .attach-list {
-    display: none;
-  }
-
-  .composer.is-collapsed .composer-restore {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 11px 14px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    background: var(--surface);
-    color: var(--muted);
-    font: inherit;
-    font-size: 14px;
-    text-align: left;
-    box-shadow: var(--shadow);
-    cursor: pointer;
   }
 
   .offline .topbar-actions .btn {

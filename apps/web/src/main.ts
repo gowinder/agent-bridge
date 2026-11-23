@@ -168,6 +168,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2.5h5l3 3v8H4z"/><path d="M9 2.5v3h3"/></svg>',
   pencil:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11.2 2.8a1.7 1.7 0 0 1 2.4 2.4L6 12.8l-3.2.8.8-3.2z"/></svg>',
+  quote:
+    '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 8.2a4.6 4.6 0 0 1-4.6 4.6H6.6L3.4 14.6v-2.7a4.6 4.6 0 0 1-0.8-9.3"/><path d="M6.2 7h5.2M6.2 9.6h3.2"/></svg>',
   clock:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="5.6"/><path d="M8 4.8V8l2.2 1.4"/></svg>',
   refresh:
@@ -184,6 +186,8 @@ const ICONS = {
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 7.6 0c0 3 1 4.2 1.6 4.7H2.6c.6-.5 1.6-1.7 1.6-4.7Z"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/></svg>',
   bellOff:
     '<svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.2 6.8a3.8 3.8 0 0 1 5.6-3.3M11.8 7.4c.1 2 1 3.1 1.5 3.6H5.2"/><path d="M6.6 13.4a1.6 1.6 0 0 0 2.8 0"/><path d="m2.8 2.8 10.4 10.4"/></svg>',
+  unread:
+    '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5.6"/><circle cx="8" cy="8" r="2.3" fill="currentColor" stroke="none"/></svg>',
   expand:
     '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2.6H2.6V6"/><path d="M10 2.6h3.4V6"/><path d="M13.4 10v3.4H10"/><path d="M6 13.4H2.6V10"/></svg>',
   collapse:
@@ -423,12 +427,14 @@ function persistUnread(): void {
 function markUnread(sessionId: string, at: number): void {
   unreadSessions[sessionId] = at;
   persistUnread();
+  paintUnreadTitle();
 }
 
 function markRead(sessionId: string): void {
   if (!(sessionId in unreadSessions)) return;
   delete unreadSessions[sessionId];
   persistUnread();
+  paintUnreadTitle();
 }
 
 function unreadAt(sessionId: string): number | undefined {
@@ -437,6 +443,20 @@ function unreadAt(sessionId: string): number | undefined {
 
 function unreadCount(sessions: SessionSummary[]): number {
   return sessions.filter((session) => unreadAt(session.sessionId) !== undefined).length;
+}
+
+/** 页面原本的标题；未读数量以 `(n) ` 前缀叠在上面，换页时重新记一次。 */
+let baseTitle = "";
+
+function paintUnreadTitle(): void {
+  if (!baseTitle) return;
+  const unread = snapshot ? unreadCount(snapshot.sessions) : Object.keys(unreadSessions).length;
+  document.title = unread > 0 ? `(${unread}) ${baseTitle}` : baseTitle;
+}
+
+function setTitle(title: string): void {
+  baseTitle = title;
+  paintUnreadTitle();
 }
 
 /** 手机浏览器关掉页面后只剩 Service Worker 推送能把提醒送到通知中心。 */
@@ -965,6 +985,13 @@ const RETRYABLE_RELAY_CODES = new Set(["bridge_offline", "channel_in_use", "rate
  * 值得就地重试的错误：请求超时、通道断开、Bridge 没连上中继、限流这类。
  * 参数错了、找不到、没权限之类重试也没用，不给「重试」按钮。
  */
+/** 出错时拿协议错误码：预览失败要区分「读不了」和「格式不支持」。 */
+function rpcCodeOf(error: unknown): string | undefined {
+  if (error instanceof RpcCallError) return error.code;
+  if (error instanceof RelayError) return error.code;
+  return undefined;
+}
+
 function isRetryableError(error: unknown): boolean {
   if (error instanceof PeerError) return true;
   if (error instanceof RpcCallError) {
@@ -1952,6 +1979,30 @@ function writeComposerCollapsed(collapsed: boolean): void {
   }
 }
 
+const QUICK_REPLY_KEY = "ab.quickReplies";
+/** 第一次用给几条常说的；删光了也不还原，localStorage 里存的是空数组。 */
+const QUICK_REPLY_DEFAULTS = ["合并pr", "确认", "提交", "交给你了"];
+
+function readQuickReplies(): string[] {
+  try {
+    const raw = localStorage.getItem(QUICK_REPLY_KEY);
+    if (raw === null) return [...QUICK_REPLY_DEFAULTS];
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [...QUICK_REPLY_DEFAULTS];
+    return parsed.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+  } catch {
+    return [...QUICK_REPLY_DEFAULTS];
+  }
+}
+
+function writeQuickReplies(list: string[]): void {
+  try {
+    localStorage.setItem(QUICK_REPLY_KEY, JSON.stringify(list));
+  } catch {
+    // storage unavailable; the list still works for this page
+  }
+}
+
 async function ensureSnapshot(force = false): Promise<Snapshot> {  if (snapshot && !force) return snapshot;
   const apps = await call<AppListResult>("app.list");
   // 按客户端分别取会话：共用一个 500 条上限时，会话多的客户端会把另一个客户端的
@@ -2898,6 +2949,208 @@ async function runDeepSearch(query: string): Promise<void> {
   renderDockHistoryList();
 }
 
+/** 「快速清理」的时间档：按会话最后更新时间倒推。 */
+const CLEANUP_RANGES: Array<{ ms: number; label: string }> = [
+  { ms: 12 * 3_600_000, label: "12 小时" },
+  { ms: 24 * 3_600_000, label: "1 天" },
+  { ms: 3 * 86_400_000, label: "3 天" },
+  { ms: 5 * 86_400_000, label: "5 天" },
+  { ms: 7 * 86_400_000, label: "7 天" },
+  { ms: 15 * 86_400_000, label: "15 天" },
+];
+
+/**
+ * 快速清理只归档 Bridge 托管会话（桌面会话由各自应用管）；置顶、正在跑、等回答的都跳过。
+ * 用 `updatedAt` 而不是 `createdAt`：一小时前还在用的会话不该因为建得早被清掉。
+ */
+function cleanupCandidates(ms: number): SessionSummary[] {
+  const cutoff = Date.now() - ms;
+  return visibleSessions(snapshot?.sessions ?? []).filter(
+    (session) =>
+      session.hosted === true &&
+      session.updatedAt < cutoff &&
+      session.pinned !== true &&
+      session.busy !== true &&
+      session.needsDecision !== true,
+  );
+}
+
+/** 历史面板上的「快速清理」：先选时间档，再在弹层里核对标题后批量归档。 */
+function cleanupControl(): HTMLElement {
+  const wrap = el("div", { className: "dock-cleanup" });
+  const menu = el("div", { className: "dock-cleanup-menu", attrs: { role: "menu" } });
+  menu.hidden = true;
+  const trigger = el(
+    "button",
+    {
+      className: "dock-cleanup-btn",
+      attrs: { type: "button", "aria-haspopup": "menu", "aria-expanded": "false" },
+    },
+    [icon("trash", "icon"), el("span", { text: tr("快速清理") })],
+  );
+
+  const onOutside = (event: PointerEvent): void => {
+    const target = event.target as Node | null;
+    if (!target || wrap.contains(target)) return;
+    close();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") close();
+  };
+  function close(): void {
+    if (menu.hidden) return;
+    menu.hidden = true;
+    trigger.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", onOutside);
+    document.removeEventListener("keydown", onKey);
+  }
+
+  for (const range of CLEANUP_RANGES) {
+    const item = el(
+      "button",
+      { className: "dock-cleanup-item", attrs: { type: "button", role: "menuitem" } },
+      [el("span", { text: tr(`归档超过 {0} 未更新的托管会话`, tr(range.label)) })],
+    );
+    item.addEventListener("click", () => {
+      close();
+      cleanupSheet(range.ms, tr(range.label));
+    });
+    menu.append(item);
+  }
+
+  trigger.addEventListener("click", () => {
+    if (!menu.hidden) {
+      close();
+      return;
+    }
+    menu.hidden = false;
+    trigger.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", onOutside);
+    document.addEventListener("keydown", onKey);
+  });
+
+  wrap.append(trigger, menu);
+  return wrap;
+}
+
+/** 核对弹层：列出会归档的标题，确认后逐个走 `hosted.archive`。 */
+function cleanupSheet(ms: number, rangeLabel: string): void {
+  const candidates = cleanupCandidates(ms);
+  const mask = el("div", { className: "sheet-mask" });
+  const progress = el("p", { className: "sheet-note", text: "" });
+  progress.hidden = true;
+  let busy = false;
+
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape" && !busy) finish();
+  };
+  function finish(): void {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  }
+
+  const confirm = button("", () => void run(), "btn primary");
+  const cancel = button(
+    tr("取消"),
+    () => {
+      if (!busy) finish();
+    },
+    "btn secondary",
+  );
+
+  function paintConfirm(): void {
+    confirm.textContent = tr("归档 {0} 个", candidates.length);
+    confirm.disabled = busy || candidates.length === 0;
+    cancel.disabled = busy;
+  }
+
+  async function run(): Promise<void> {
+    if (busy || candidates.length === 0) return;
+    busy = true;
+    paintConfirm();
+    progress.hidden = false;
+    let archived = 0;
+    const archivedIds = new Set<string>();
+    const failures: string[] = [];
+    for (const [index, session] of candidates.entries()) {
+      progress.textContent = tr("正在归档 {0}/{1}", index + 1, candidates.length);
+      try {
+        const result = await call<SessionGetResult>("hosted.archive", {
+          sessionId: session.sessionId,
+          archived: true,
+        });
+        patchSession(result.session);
+        archivedIds.add(session.sessionId);
+        archived += 1;
+      } catch (error) {
+        failures.push(`${session.title}：${messageOf(error)}`);
+      }
+    }
+    busy = false;
+    finish();
+    renderDockHistoryList();
+    syncDockSessions();
+    // 正在看的那条也被清掉时，跟单条归档一样退回工程页，免得停在一个已归档的聊天里。
+    const route = parseRoute();
+    if (route.level === "chat" && archivedIds.has(route.sessionId)) {
+      navigate({ level: "sessions", appId: route.appId, projectId: route.projectId });
+    } else if (route.level === "sessions") {
+      void renderRoute();
+    }
+    flashNotice(tr("已归档 {0} 个，失败 {1} 个", archived, failures.length));
+    for (const line of failures) console.warn(`[cleanup] ${line}`);
+  }
+
+  const body = el("div", { className: "sheet-body" });
+  if (candidates.length === 0) {
+    body.append(el("p", { className: "hint", text: tr("没有符合条件的托管会话") }));
+  } else {
+    const list = el("div", { className: "list cleanup-list" });
+    for (const session of candidates) {
+      list.append(
+        el("div", { className: "cleanup-item" }, [
+          el("span", { className: "cleanup-item-title", text: session.title }),
+          el("span", {
+            className: "cleanup-item-meta",
+            text: `${recentProjectName(session.projectId)} · ${recentTime(session.updatedAt)}`,
+          }),
+        ]),
+      );
+    }
+    body.append(list);
+  }
+
+  paintConfirm();
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask && !busy) finish();
+  });
+
+  mask.append(
+    el(
+      "aside",
+      { className: "sheet", attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("快速清理") } },
+      [
+        el("header", { className: "sheet-head" }, [el("h2", { className: "sheet-title", text: tr("快速清理") })]),
+        el("p", { className: "sheet-note", text: tr(`归档超过 {0} 未更新的托管会话`, rangeLabel) }),
+        body,
+        el("p", {
+          className: "sheet-note",
+          text: tr("只处理 Bridge 托管的会话，桌面会话请在原应用里归档。"),
+        }),
+        el("p", {
+          className: "sheet-note",
+          text: tr("归档后不再出现在历史里，可在工程页「显示已归档」找回。"),
+        }),
+        progress,
+        el("footer", { className: "sheet-foot" }, [el("div", { className: "actions" }, [cancel, confirm])]),
+      ],
+    ),
+  );
+  document.body.append(mask);
+  confirm.focus();
+}
+
 function dockHistory(): HTMLElement {
   if (!dockHistoryView) {
     const wrap = el("div", { className: "dock-history" });
@@ -2935,7 +3188,7 @@ function dockHistory(): HTMLElement {
     const filters = el("div", { className: "dock-tag-filter", attrs: { role: "group", "aria-label": tr("按标签筛选") } });
     dockTagFilterHost = filters;
     const list = el("div", { className: "dock-list dock-history-list" });
-    wrap.append(search, filters, status, list);
+    wrap.append(search, cleanupControl(), filters, status, list);
     dockHistoryView = { wrap, list, input, check, status };
     renderTagFilter();
   }
@@ -3570,6 +3823,7 @@ function recentSessionsButton(): HTMLElement | null {
       const running = snapshot?.sessions.some(
         (session) => session.sessionId === item.sessionId && session.busy === true,
       ) === true;
+      const unread = unreadAt(item.sessionId) !== undefined;
       const entry = button(
         "",
         () => {
@@ -3587,6 +3841,9 @@ function recentSessionsButton(): HTMLElement | null {
       entry.append(
         el("span", { className: "recent-menu-name" }, [
           ...(running ? [el("span", { className: "spinner recent-spinner" })] : []),
+          ...(unread
+            ? [el("span", { className: "unread-dot", attrs: { role: "img", title: tr("未读"), "aria-label": tr("未读") } })]
+            : []),
           el("span", { className: "recent-menu-text", text: item.title }),
         ]),
         el("span", { className: "recent-menu-meta", text: meta.join(" · ") }),
@@ -4071,7 +4328,7 @@ function renderClients(): void {
   const route: Route = { level: "clients" };
   const totalProjects = data.projects.length;
   const totalSessions = data.sessions.length;
-  document.title = tr("客户端 · Agent Bridge");
+  setTitle(tr("客户端 · Agent Bridge"));
 
   const list = el("ul", { className: "list" });
   if (data.apps.length === 0) {
@@ -4117,7 +4374,7 @@ function renderClients(): void {
 function renderProjects(route: Route & { level: "projects" }): void {
   const data = snapshot!;
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端"));
+  setTitle(tr(`{0} · Agent Bridge`, appInfo?.name ?? tr("客户端")));
   const projects = data.projects.filter((project) => project.appId === route.appId);
 
   const list = el("ul", { className: "list" });
@@ -4176,7 +4433,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const data = snapshot!;
   const project = data.projects.find((item) => item.projectId === route.projectId);
   const appInfo = data.apps.find((item) => item.appId === route.appId);
-  document.title = tr(`{0} · Agent Bridge`, project?.name ?? tr("工程"));
+  setTitle(tr(`{0} · Agent Bridge`, project?.name ?? tr("工程")));
   const projectSessions = data.sessions.filter((session) => session.projectId === route.projectId);
   const archivedCount = projectSessions.filter((session) => session.archived).length;
   const sessions = visibleSessions(projectSessions, showArchived);
@@ -4284,8 +4541,17 @@ function renderSessions(route: Route & { level: "sessions" }): void {
     row.addEventListener("click", () =>
       navigate({ level: "chat", appId: route.appId, projectId: route.projectId, sessionId: session.sessionId }),
     );
-    // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
+            // 行上的操作浮在右侧，鼠标移上来才出现，免得和行本身的状态标挤在一起。
     const actions = el("div", { className: "row-menu" }, [
+      ...(unread
+        ? []
+        : [
+            rowAction(icon("unread"), tr("标为未读"), () => {
+              markUnread(session.sessionId, Date.now());
+              syncDockSessions();
+              void renderRoute();
+            }),
+          ]),
       rowAction(
         session.pinned ? icon("pinOff") : icon("pin"),
         session.pinned ? tr("取消置顶") : tr("置顶"),
@@ -4973,7 +5239,7 @@ function selfDeviceCard(): HTMLElement {
 
 function renderDevices(): void {
   const state = connected!;
-  document.title = tr("已授权设备 · Agent Bridge");
+  setTitle(tr("已授权设备 · Agent Bridge"));
   const list = el("ul", { className: "list" });
   const status = el("p", { className: "hint" });
   for (const item of state.devices) {
@@ -5201,7 +5467,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     );
     return;
   }
-  document.title = `${summary.title} · Agent Bridge`;
+  setTitle(`${summary.title} · Agent Bridge`);
   rememberSession(summary);
   noteSessionTrail(hashFor(route), summary.title);
   markRead(summary.sessionId);
@@ -5348,6 +5614,126 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     input.style.height = `${Math.min(input.scrollHeight + 2, 160)}px`;
   }
 
+  // ---- 快捷回复：点开挑一条填进输入框，发送仍由用户自己点 ----
+  const quickButton = el("button", {
+    className: "icon-btn composer-tool quick-btn",
+    attrs: { type: "button", title: tr("快捷回复"), "aria-label": tr("快捷回复"), "aria-expanded": "false" },
+  }, [icon("quote")]);
+  const quickPop = el("div", { className: "quick-menu", attrs: { role: "dialog", "aria-label": tr("快捷回复") } });
+  quickPop.hidden = true;
+  let quickEditing = false;
+
+  function closeQuick(): void {
+    quickPop.hidden = true;
+    quickButton.setAttribute("aria-expanded", "false");
+    document.removeEventListener("pointerdown", quickOutside);
+    document.removeEventListener("keydown", quickKeys);
+  }
+
+  function quickOutside(event: Event): void {
+    const target = event.target as Node | null;
+    if (!target || quickPop.contains(target) || quickButton.contains(target)) return;
+    closeQuick();
+  }
+
+  function quickKeys(event: KeyboardEvent): void {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    closeQuick();
+    input.focus();
+  }
+
+  /** 插到光标位置（有选中内容就替换掉），不直接发送。 */
+  function applyQuick(text: string): void {
+    const start = input.selectionStart ?? input.value.length;
+    const end = input.selectionEnd ?? start;
+    const before = input.value.slice(0, start);
+    const after = input.value.slice(end);
+    const pad = before && !/\s$/.test(before) ? " " : "";
+    input.value = `${before}${pad}${text}${after}`;
+    const caret = before.length + pad.length + text.length;
+    input.setSelectionRange(caret, caret);
+    closeQuick();
+    input.dispatchEvent(new Event("input"));
+    input.focus();
+  }
+
+  function quickRow(text: string, index: number): HTMLElement {
+    if (!quickEditing) {
+      const item = el("button", { className: "quick-item", attrs: { type: "button", title: tr("填到输入框") } }, [
+        el("span", { className: "quick-item-text", text }),
+      ]);
+      item.addEventListener("click", () => applyQuick(text));
+      return item;
+    }
+    const field = el("input", { className: "input quick-input", attrs: { type: "text", "aria-label": tr("快捷回复") } });
+    field.value = text;
+    field.addEventListener("input", () => {
+      const next = readQuickReplies();
+      if (next[index] === undefined) return;
+      next[index] = field.value;
+      writeQuickReplies(next);
+    });
+    const remove = button("", () => {
+      writeQuickReplies(readQuickReplies().filter((_, i) => i !== index));
+      paintQuick();
+    }, "icon-btn quick-del");
+    remove.append(icon("close"));
+    remove.title = tr("删除 {0}", text);
+    remove.setAttribute("aria-label", remove.title);
+    return el("div", { className: "quick-row" }, [field, remove]);
+  }
+
+  function paintQuick(): void {
+    const items = readQuickReplies();
+    const head = el("div", { className: "quick-head" }, [
+      el("span", { className: "quick-head-title", text: tr("快捷回复") }),
+      button(
+        quickEditing ? tr("完成") : tr("编辑"),
+        () => {
+          quickEditing = !quickEditing;
+          paintQuick();
+        },
+        "btn ghost small",
+      ),
+    ]);
+    const list = el("div", { className: "quick-list" });
+    if (items.length === 0) list.append(el("p", { className: "quick-empty", text: tr("还没有快捷回复") }));
+    items.forEach((text, index) => list.append(quickRow(text, index)));
+    quickPop.replaceChildren(head, list);
+    if (!quickEditing) return;
+    const field = el("input", {
+      className: "input quick-input",
+      attrs: { type: "text", placeholder: tr("新的快捷回复…"), "aria-label": tr("新的快捷回复…") },
+    });
+    const add = (): void => {
+      const value = field.value.trim();
+      if (!value) return;
+      writeQuickReplies([...readQuickReplies(), value]);
+      paintQuick();
+      quickPop.querySelector<HTMLInputElement>(".quick-add .quick-input")?.focus();
+    };
+    field.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      add();
+    });
+    quickPop.append(el("div", { className: "quick-row quick-add" }, [field, button(tr("添加"), add, "btn small")]));
+  }
+
+  quickButton.addEventListener("click", () => {
+    if (!quickPop.hidden) {
+      closeQuick();
+      return;
+    }
+    quickEditing = false;
+    paintQuick();
+    quickPop.hidden = false;
+    quickButton.setAttribute("aria-expanded", "true");
+    document.addEventListener("pointerdown", quickOutside);
+    document.addEventListener("keydown", quickKeys);
+  });
+
   function updateSendState(): void {
     if (!canSend) {
       sendButton.disabled = true;
@@ -5409,7 +5795,10 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
       }
       resetToggle.checked = false;
     }
-    await sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => setCollapsed(true));
+    await sendMessage(state, input, status, sendButton, loadOlder, pending, renderAttachments, updateSendState, () => {
+      // 窄屏发送后收起输入区，把空间让给对话；桌面端保持展开，不打断连续输入。
+      if (window.matchMedia("(max-width: 720px)").matches) setCollapsed(true);
+    });
   }
 
   const sendButton = button(tr("发送"), submit, "btn primary");
@@ -5493,7 +5882,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
 
   const collapseButton = el("button", {
     className: "icon-btn composer-collapse",
-    attrs: { type: "button", "aria-label": tr("收起输入区"), title: tr("收起输入区") },
+    attrs: { type: "button", "aria-expanded": "true", "aria-label": tr("收起输入区"), title: tr("收起输入区") },
   }, [icon("chevron", "icon composer-chev")]);
   collapseButton.addEventListener("click", () => setCollapsed(true, true));
 
@@ -5506,6 +5895,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     slashMenu,
     el("div", { className: "composer-row" }, [
       attachButton,
+      quickButton,
       input,
       loadOlder,
       refreshButton,
@@ -5517,10 +5907,12 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
     ]),
     restore,
     contextPop,
+    quickPop,
   ]);
 
   function setCollapsed(collapsed: boolean, focus = false): void {
     composer.classList.toggle("is-collapsed", collapsed);
+    collapseButton.setAttribute("aria-expanded", String(!collapsed));
     writeComposerCollapsed(collapsed);
     if (!collapsed) {
       autoGrow();
@@ -6091,7 +6483,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     );
     return;
   }
-  document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
+  setTitle(tr(`后台任务 · {0} · Agent Bridge`, summary.title));
   markRead(summary.sessionId);
   previewRoot = data.projects.find((item) => item.projectId === route.projectId)?.cwd;
   previewSessionId = summary.sessionId;
@@ -6140,9 +6532,10 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       return;
     }
     let turn: MessageRecord[] = [];
+    let turnStartedAt = 0;
     const flush = (): void => {
       if (turn.length === 0) return;
-      list.append(assistantTurn(null, turn));
+      list.append(assistantTurn(null, turn, null, null, null, turnStartedAt || turn[0]?.createdAt || 0));
       turn = [];
     };
     for (const message of messages) {
@@ -6152,6 +6545,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
       }
       flush();
       list.append(messageBubble(null, message));
+      if (message.role === "user") turnStartedAt = message.createdAt;
     }
     flush();
   };
@@ -6192,7 +6586,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
     note.textContent = first.note ?? "";
     loadOlder.hidden = !first.nextBefore;
     paint();
-    document.title = tr(`后台任务 · {0} · Agent Bridge`, summary.title);
+    setTitle(tr(`后台任务 · {0} · Agent Bridge`, summary.title));
   } else {
     note.textContent = "";
   }
@@ -6209,7 +6603,7 @@ async function renderTask(route: Route & { level: "chat"; taskId: string }, toke
         if (task.updatedAt) parts.push(tr(`{0}更新`, timeLabel(task.updatedAt)));
         meta.textContent = parts.join(" · ");
       }
-      document.title = tr(`后台任务 · {0}`, task.name);
+      setTitle(tr(`后台任务 · {0}`, task.name));
     }
   } catch {
     // the rail is decoration here; the record itself already loaded
@@ -6246,6 +6640,8 @@ interface FileBrowserState {
   parent: string | null;
   entries: FsEntry[];
   preview: FsReadResult | null;
+  /** 预览失败时记下路径：二进制/超大文件走「下载原文件」。 */
+  errorPath: string | null;
   error: string | null;
   /** 出错时点「重试」要重做的那一步（读根目录 / 列目录 / 读文件）。 */
   retry: (() => void) | null;
@@ -6524,6 +6920,7 @@ async function openFilesPane(state: RailState): Promise<void> {
     parent: null,
     entries: [],
     preview: null,
+    errorPath: null,
     error: null,
     retry: null,
     loading: false,
@@ -6590,6 +6987,7 @@ async function openFile(state: RailState, path: string): Promise<void> {
   const files = state.files;
   if (!files) return;
   files.loading = true;
+  files.errorPath = path;
   paintFiles(state, tr("正在读取文件…"));
   try {
     if (!state.projectRoot) throw new Error(tr("这个会话没有项目目录"));
@@ -6600,6 +6998,7 @@ async function openFile(state: RailState, path: string): Promise<void> {
     });
     files.error = null;
     files.retry = null;
+    files.errorPath = null;
   } catch (error) {
     files.error = messageOf(error);
     files.retry = isRetryableError(error) ? () => void openFile(state, path) : null;
@@ -6711,10 +7110,20 @@ function paintFiles(state: RailState, placeholder?: string): void {
   if (files.error) {
     // 断线、超时、Bridge 刚起来这类错误，用户不该只能反复点标签页来重来。
     const retry = files.retry;
+    const failed = files.errorPath;
     pane.append(
       el("div", { className: "rail-empty rail-error" }, [
         el("p", { text: files.error }),
         ...(retry ? [button(tr("重试"), retry, "btn small")] : []),
+        ...(failed
+          ? [
+              button(
+                tr("下载原文件"),
+                () => void downloadRawFile(failed, state.projectRoot, state.sessionId),
+                "btn small",
+              ),
+            ]
+          : []),
       ]),
     );
     return;
@@ -8175,6 +8584,10 @@ async function openFilePreview(path: string): Promise<void> {
       el("div", { className: "file-preview-note is-error" }, [
         el("p", { text: messageOf(error) }),
         ...(isRetryableError(error) ? [button(tr("重试"), () => void openFilePreview(path), "btn small")] : []),
+        // 二进制文件、超大的图片都预览不了，但原文件还能整份下载。
+        ...(rpcCodeOf(error) === "invalid_params" || rpcCodeOf(error) === "unsupported"
+          ? [button(tr("下载原文件"), () => void downloadRawFile(path), "btn small")]
+          : []),
       ]),
     );
   }
@@ -8454,6 +8867,28 @@ function downloadPreviewFile(file: FsReadResult, name: string): void {
   }
 }
 
+/** 预览不了的文件（PDF、压缩包、超大图片）按原始字节下载：文本通道拿不到它。 */
+async function downloadRawFile(
+  path: string,
+  root: string | undefined = previewRoot,
+  sessionId: string | undefined = previewSessionId,
+): Promise<void> {
+  if (!root || !sessionId) {
+    flashNotice(tr("这个会话没有项目目录，无法预览文件"));
+    return;
+  }
+  const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
+  try {
+    const file = await call<FsReadResult>("fs.read", { sessionId, root, path: full, binary: true }, 120_000);
+    // 旧 Bridge 不认 binary，会把文件当文本读回来（还只给前 1 MB）。存下去就是个乱码文件，
+    // 不如直接说清楚要更新。
+    if (!file.dataBase64) throw new Error(tr("这台 Mac 上的 Bridge 版本太旧，下载原文件需要先更新 Bridge"));
+    downloadPreviewFile(file, file.name || fileName(full));
+  } catch (error) {
+    flashNotice(tr(`下载失败：{0}`, messageOf(error)));
+  }
+}
+
 /** 下载这段回复（markdown）；正文被截断时先回 Bridge 取全文。 */
 function downloadButton(session: SessionSummary, messages: MessageRecord[]): HTMLButtonElement {
   const title = tr("下载这段回复（Markdown）");
@@ -8479,6 +8914,45 @@ function downloadButton(session: SessionSummary, messages: MessageRecord[]): HTM
   return node;
 }
 
+/** 一回合的耗时：不到一分钟用秒，不到一小时用分+秒，再长用小时+分。 */
+function turnDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 60) return tr("{0} 秒", seconds);
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return tr("{0} 分 {1} 秒", minutes, seconds % 60);
+  return tr("{0} 小时 {1} 分", Math.floor(minutes / 60), minutes % 60);
+}
+
+/** 回合头部的耗时随时在走：只改文本，不重绘整条消息。 */
+function paintTurnDurations(): void {
+  let live = false;
+  // 只碰还在跑的回合：历史回合的耗时是定值，每秒重写一遍纯属浪费。
+  for (const node of document.querySelectorAll<HTMLElement>("[data-turn-duration][data-running='1']")) {
+    const start = Number(node.dataset["start"] ?? "");
+    if (!Number.isFinite(start) || start <= 0) continue;
+    live = true;
+    node.textContent = tr("持续 {0}", turnDuration(Date.now() - start));
+  }
+  // 没在跑的回合就不用每秒叫醒一次。
+  if (!live && turnClock !== null) {
+    window.clearInterval(turnClock);
+    turnClock = null;
+  }
+}
+
+let turnClock: number | null = null;
+
+/** 有还在跑的回合就开一个 1 秒的计时器，结束时自己停。 */
+function syncTurnClock(): void {
+  if (turnClock !== null) return;
+  if (!document.querySelector("[data-turn-duration][data-running='1']")) return;
+  turnClock = window.setInterval(paintTurnDurations, 1000);
+}
+
+function turnClockText(at: number): string {
+  return new Date(at).toLocaleTimeString(locale());
+}
+
 function assistantTurn(
   session: SessionSummary | null,
   messages: MessageRecord[],
@@ -8487,6 +8961,10 @@ function assistantTurn(
   askState: ChatState | null = null,
   /** 折叠状态（按回合首条 messageId）；任务页不传，就没有折叠按钮。 */
   folded?: Set<string> | null,
+  /** 这一轮的开始时间（用户消息的 createdAt）；不传就退回本轮首条助手消息。 */
+  startedAt = 0,
+  /** 这一轮还在跑：耗时按现在算，并每秒刷新。 */
+  running = false,
 ): HTMLElement {
   const bubble = el("article", { className: "message assistant" });
   const steps: MessageBlock[] = [];
@@ -8510,10 +8988,29 @@ function assistantTurn(
     if (hasText) lastText = message;
   }
   const last = messages[messages.length - 1];
+  const start = startedAt > 0 ? startedAt : (messages[0]?.createdAt ?? 0);
+  const times =
+    start > 0
+      ? el("span", { className: "turn-times" }, [
+          el("span", { text: tr("开始 {0}", turnClockText(start)) }),
+          el("span", {
+            attrs: {
+              "data-turn-duration": "",
+              "data-start": String(start),
+              "data-running": running ? "1" : "0",
+            },
+            text: tr(
+              "持续 {0}",
+              turnDuration(running ? Date.now() - start : Math.max(0, (last?.createdAt ?? start) - start)),
+            ),
+          }),
+          ...(last?.createdAt ? [el("span", { text: tr("更新 {0}", turnClockText(last.createdAt)) })] : []),
+        ])
+      : null;
   const meta = el("div", { className: "message-meta" }, [
     el("span", { className: "role assistant", text: tr("助手") }),
     ...(peer ? [el("span", { className: "pill tiny", text: tr("Bridge 注入") })] : []),
-    ...(last?.createdAt ? [el("span", { className: "meta mono", text: new Date(last.createdAt).toLocaleTimeString(locale()) })] : []),
+    ...(times ? [times] : []),
   ]);
   if (session) {
     // 复制/下载整回合的输出（被截断的那条现取全文），分享仍沿用最后一条带正文的消息。
@@ -8635,6 +9132,8 @@ function renderMessages(state: ChatState): void {
   }
   const folded = state.folded ?? (state.folded = new Set<string>());
   let turn: MessageRecord[] = [];
+  /** 这一轮开始的那条用户消息时间：回合头部显示「开始 / 持续」。 */
+  let turnStartedAt = 0;
   /** 当前回合的首条用户消息 id；用量按它去 tokens.turns 里找。 */
   let turnId = "";
   const lastMessage = state.messages[state.messages.length - 1];
@@ -8649,6 +9148,8 @@ function renderMessages(state: ChatState): void {
         isLastTurn && canAct ? state : null,
         isLastTurn ? state : null,
         folded,
+        turnStartedAt || turn[0]?.createdAt || 0,
+        isLastTurn && state.busy && state.queued.length === 0,
       ),
     );
     // 回合末尾补一行用量：整轮加起来比逐条更接近「这轮花了多少」。
@@ -8663,11 +9164,15 @@ function renderMessages(state: ChatState): void {
     }
     flush();
     list.append(messageBubble(state.session, message, folded));
-    turnId = message.messageId;
+    if (message.role === "user") {
+      turnStartedAt = message.createdAt;
+      turnId = message.messageId;
+    }
   }
   flush();
   appendQueued();
   markTurnState(list, state);
+  syncTurnClock();
   if (stick) list.scrollTop = list.scrollHeight;
 }
 

@@ -680,7 +680,8 @@ Prerelease tags never reach production.
 
 Release (`.github/workflows/release.yml`): macOS runner, universal Node runtime,
 `AgentBridge.app`, DMG, SHA-256, GitHub Release on `v*` (prerelease if the tag
-has a hyphen). Signing and notarisation require the Apple secrets; without them
+has a hyphen; a prerelease tag may sit on `develop` or `main`, a stable tag must
+be on `main`). Signing and notarisation require the Apple secrets; without them
 the DMG is unsigned. Stable releases can dispatch a `repository_dispatch` to the
 homepage repository.
 

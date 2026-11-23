@@ -358,6 +358,11 @@ export interface FsReadParams {
   sessionId: string;
   root: string;
   path: string;
+  /**
+   * 拿原始字节（base64）而不是文本：预览不了的图片、PDF、压缩包走这条路下载。
+   * 受单条消息大小限制，超大的文件仍然下不了。
+   */
+  binary?: boolean;
 }
 
 export interface FsReadResult {
