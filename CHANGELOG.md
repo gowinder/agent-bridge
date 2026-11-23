@@ -11,6 +11,8 @@
 - 预发布 tag 可以直接打在 `develop` 的提交上：release 工作流原来要求 tag 指向 main 上的提交，
   每出一个 rc 都得先把 develop 合进 main、顺带把生产部署成 rc，而预览版本来就跟着 develop 走。
   正式 tag 仍然只认 main。
+- 「下载原文件」在旧 Bridge 上不再存一个乱码文件：旧版不认 `binary` 参数，会把二进制当文本读回来，
+  现在直接提示先更新这台 Mac 上的 Bridge。
 
 ### Added
 

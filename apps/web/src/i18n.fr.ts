@@ -61,6 +61,7 @@ export const FR: Record<string, string> = {
   上下文用量: "Utilisation du contexte",
   "下载 {0}": "Télécharger {0}",
   "下载原文件": "Télécharger le fichier d'origine",
+  "这台 Mac 上的 Bridge 版本太旧，下载原文件需要先更新 Bridge": "Le Bridge de ce Mac est trop ancien pour télécharger le fichier d'origine ; mets Bridge à jour d'abord",
   "下载失败：{0}": "Échec du téléchargement : {0}",
   不可发送: "Envoi impossible",
   不可用: "Indisponible",

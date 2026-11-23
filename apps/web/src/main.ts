@@ -8880,6 +8880,9 @@ async function downloadRawFile(
   const full = path.startsWith("/") ? path : `${root}/${path.replace(/^\.\//, "")}`;
   try {
     const file = await call<FsReadResult>("fs.read", { sessionId, root, path: full, binary: true }, 120_000);
+    // 旧 Bridge 不认 binary，会把文件当文本读回来（还只给前 1 MB）。存下去就是个乱码文件，
+    // 不如直接说清楚要更新。
+    if (!file.dataBase64) throw new Error(tr("这台 Mac 上的 Bridge 版本太旧，下载原文件需要先更新 Bridge"));
     downloadPreviewFile(file, file.name || fileName(full));
   } catch (error) {
     flashNotice(tr(`下载失败：{0}`, messageOf(error)));
