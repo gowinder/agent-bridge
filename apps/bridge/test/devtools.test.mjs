@@ -91,3 +91,15 @@ test("binary download refuses files past the single-message limit", async (t) =>
     (error) => error.code === "invalid_params" && /太大/.test(error.message),
   );
 });
+
+test("binary download still needs the files capability", async (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.dir, { recursive: true, force: true }));
+  writeFileSync(join(h.link, "doc.pdf"), Buffer.from([0x25, 0x50, 0x44, 0x46, 0x00]));
+  h.store.setMeta("devtools_files_enabled", "0");
+  // binary 只是换读取方式，不能当成绕过「文件浏览」开关的后门。
+  await assert.rejects(
+    () => h.devtools.readFile("s1", h.link, "doc.pdf", true),
+    (error) => error.code === "unsupported",
+  );
+});
