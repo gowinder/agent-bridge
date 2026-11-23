@@ -1170,7 +1170,12 @@ export class DeviceSession implements ChannelSession {
         if (!root) throw new RpcError("invalid_params", "root required");
         const path = stringParam(params, "path");
         if (!path) throw new RpcError("invalid_params", "path required");
-        return this.options.devtools.readFile(stringParam(params, "sessionId"), root, path);
+        return this.options.devtools.readFile(
+          stringParam(params, "sessionId"),
+          root,
+          path,
+          params["binary"] === true,
+        );
       }
       case "shell.exec": {
         const root = stringParam(params, "root");

@@ -91,6 +91,7 @@ export const EN: Record<string, string> = {
   "这个会话还没有 token 用量": "No token usage recorded for this session",
   上下文用量: "Context usage",
   "下载 {0}": "Download {0}",
+  "下载原文件": "Download original file",
   "下载失败：{0}": "Download failed: {0}",
   不可发送: "Can't send",
   不可用: "Unavailable",
