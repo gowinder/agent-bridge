@@ -60,6 +60,7 @@ export const FR: Record<string, string> = {
   "上下文已用 {0}%": "{0} % du contexte utilisé",
   上下文用量: "Utilisation du contexte",
   "下载 {0}": "Télécharger {0}",
+  "下载原文件": "Télécharger le fichier d'origine",
   "下载失败：{0}": "Échec du téléchargement : {0}",
   不可发送: "Envoi impossible",
   不可用: "Indisponible",

@@ -60,6 +60,7 @@ export const PT: Record<string, string> = {
   "上下文已用 {0}%": "{0}% do contexto usado",
   上下文用量: "Uso do contexto",
   "下载 {0}": "Baixar {0}",
+  "下载原文件": "Baixar arquivo original",
   "下载失败：{0}": "Falha ao baixar: {0}",
   不可发送: "Não é possível enviar",
   不可用: "Indisponível",
