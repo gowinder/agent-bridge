@@ -399,7 +399,8 @@ web client and deploys with `wrangler`:
 
 `.github/workflows/release.yml` builds the universal menu bar app, the DMG and
 its SHA-256, and publishes a GitHub Release on `v*`. Signing and notarisation
-run only when the Apple secrets are present.
+run only when the Apple secrets are present. A prerelease tag (with a hyphen)
+may point at a commit on `develop` or `main`; a stable tag must be on `main`.
 
 - Preview: <https://agent-bridge-preview.craftstead.app>
 - Production: <https://agent-bridge.craftstead.app>
