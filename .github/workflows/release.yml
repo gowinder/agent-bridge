@@ -184,7 +184,8 @@ jobs:
             AgentBridge.dmg.sha256
 
       # 任何有写权限的人都能打 tag。Release 又是自动更新的来源，所以必须确认
-      # 这个提交走过 main 的 PR，并且 tag 与 package.json 的版本号一致。
+      # 提交进过受保护分支（正式包认 main，预发布包认 develop/main），
+      # 并且 tag 与 package.json 的版本号一致。
       - name: 检查发布条件
         id: gate
         if: startsWith(github.ref, 'refs/tags/v')
@@ -196,15 +197,36 @@ jobs:
             echo "tag $GITHUB_REF_NAME 与 package.json 的版本 $VERSION 不一致，拒绝发布" >&2
             exit 1
           fi
-          if ! git rev-parse --verify --quiet origin/main >/dev/null; then
-            echo "读不到 origin/main，无法确认这个提交是否已合入 main" >&2
-            exit 1
+          # tag 可以指向任何分支。正式包会被自动更新发给所有正式安装，必须来自 main；
+          # 预发布包只发给 preview 安装（bundle id 带 .preview），和 develop 的构建同源，
+          # 所以允许从 develop 或 main 打——否则每出一个 rc 都要先合 main、顺带把生产
+          # 部署成 rc。
+          git fetch --quiet --no-tags origin '+refs/heads/*:refs/remotes/origin/*'
+          if echo "$GITHUB_REF_NAME" | grep -q -- '-'; then
+            where=""
+            for branch in develop main; do
+              if git rev-parse --verify --quiet "origin/$branch" >/dev/null \
+                && git merge-base --is-ancestor "$GITHUB_SHA" "origin/$branch"; then
+                where="$branch"
+                break
+              fi
+            done
+            if [ -z "$where" ]; then
+              echo "预发布 tag $GITHUB_REF_NAME 指向的 $GITHUB_SHA 不在 develop 或 main 上" >&2
+              exit 1
+            fi
+            echo "发布前检查通过：$GITHUB_SHA 在 $where 上，预发布 tag 与版本号一致"
+          else
+            if ! git rev-parse --verify --quiet origin/main >/dev/null; then
+              echo "读不到 origin/main，无法确认这个提交是否已合入 main" >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "提交 $GITHUB_SHA 不在 main 上（正式 Release 只认 main）" >&2
+              exit 1
+            fi
+            echo "发布前检查通过：$GITHUB_SHA 在 main 上，tag 与版本号一致"
           fi
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "提交 $GITHUB_SHA 不在 main 上（tag 可以指向任何分支，Release 不能）" >&2
-            exit 1
-          fi
-          echo "发布前检查通过：$GITHUB_SHA 在 main 上，tag 与版本号一致"
 
       - name: 创建 GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
