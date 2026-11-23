@@ -279,6 +279,9 @@ export const ES: Record<string, string> = {
   "压缩中…": "Compactando…",
   发送内容与预览一致: "El contenido enviado coincide con la vista previa",
   "发送到这个会话…": "Enviar a esta sesión…",
+  "快捷回复": "Respuestas rápidas",
+  "新的快捷回复…": "Nueva respuesta rápida…",
+  "还没有快捷回复": "Aún no hay respuestas rápidas",
   "只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}":
     "Solo se ejecuta en {0}; cerrar el navegador no termina el proceso, que se detiene tras {1} minutos de inactividad y se reanuda al volver a enviar.{2}",
   "只影响之后新派生的子代理，主模型不动。": "Solo afecta a los subagentes que se creen a partir de ahora; el modelo principal no cambia.",

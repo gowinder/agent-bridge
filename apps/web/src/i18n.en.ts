@@ -343,6 +343,9 @@ export const EN: Record<string, string> = {
   "压缩中…": "Compacting…",
   发送内容与预览一致: "The sent content matches the preview",
   "发送到这个会话…": "Send to this session…",
+  "快捷回复": "Quick replies",
+  "新的快捷回复…": "New quick reply…",
+  "还没有快捷回复": "No quick replies yet",
   "只在 {0} 中运行；网页断开不会结束进程，空闲 {1} 分钟后自动停止，再发消息时 resume。{2}":
     "Runs only in {0}; closing the browser does not end the process, it stops after {1} idle minutes and resumes when you send again.{2}",
   "只影响之后新派生的子代理，主模型不动。": "Affects only subagents spawned from now on; the main model stays as is.",
