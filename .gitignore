@@ -42,3 +42,10 @@ spikes/mcp-client/**/device.json
 spikes/mcp-client/**/confirm
 
 .claude-results/
+
+# apps/mcp 运行时状态（设备身份、会话登记册、listener 事件）——绝不入库
+apps/mcp/state/
+apps/mcp/state-*/
+apps/mcp/state-listener/
+apps/mcp/**/identity.json
+apps/mcp/**/confirm

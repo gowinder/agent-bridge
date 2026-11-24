@@ -1,0 +1,10 @@
+{
+  "engine": "pi",
+  "model": "magpie/group/dsgroup",
+  "thinking": "high",
+  "subagentModel": "magpie/group/dsgroup",
+  "subagentThinking": "low",
+  "promptSuffix": "使用subagent执行",
+  "relayUrl": "wss://agent-bridge.craftstead.app",
+  "modeA": false
+}
