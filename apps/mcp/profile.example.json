@@ -1,0 +1,10 @@
+{
+  "engine": "pi",
+  "model": "",
+  "thinking": "",
+  "subagentModel": "",
+  "subagentThinking": "",
+  "promptSuffix": "",
+  "relayUrl": "wss://agent-bridge.craftstead.app",
+  "modeA": false
+}

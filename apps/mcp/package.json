@@ -1,0 +1,46 @@
+{
+  "name": "agent-bridge-mcp",
+  "version": "0.1.0",
+  "description": "MCP server (stdio) that lets a cloud agent drive Agent Bridge hosted Pi / Claude Code sessions on your Mac",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "agent-bridge-mcp": "./server/index.mjs",
+    "agent-bridge-mcp-pair": "./server/pair.mjs",
+    "agent-bridge-mcp-client": "./bin/client.mjs",
+    "agent-bridge-mcp-listen": "./bin/listener.sh"
+  },
+  "files": [
+    "server",
+    "bin",
+    "profile.example.json",
+    "README.md"
+  ],
+  "scripts": {
+    "check": "find server bin -name '*.mjs' -print0 | xargs -0 -n1 node --check",
+    "selftest": "node server/selftest.mjs",
+    "selftest:peer": "node server/selftest-peer.mjs",
+    "selftest:listener": "node server/selftest-listener.mjs",
+    "selftest:all": "npm run selftest && npm run selftest:peer && npm run selftest:listener",
+    "pair": "node server/pair.mjs",
+    "serve": "node server/index.mjs"
+  },
+  "dependencies": {
+    "@craftstead/crypto": "*",
+    "@craftstead/protocol": "*"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gowinder/agent-bridge.git",
+    "directory": "apps/mcp"
+  },
+  "keywords": [
+    "mcp",
+    "agent-bridge",
+    "pi",
+    "claude-code"
+  ]
+}

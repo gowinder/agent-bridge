@@ -15,7 +15,9 @@
     "relay:dev": "npm --workspace @craftstead/relay run dev",
     "relay:deploy": "npm --workspace @craftstead/relay run deploy",
     "bridge": "node apps/bridge/dist/main.js",
-    "menubar": "bash apps/menubar/build.sh"
+    "mcp": "node apps/mcp/server/index.mjs",
+    "menubar": "bash apps/menubar/build.sh",
+    "test:mcp": "npm -w agent-bridge-mcp run selftest:all"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250926.0",

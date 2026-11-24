@@ -30,6 +30,7 @@ opaque ciphertext and routing metadata.
 - [Configuration](#configuration)
 - [Security model](#security-model)
 - [Limitations](#limitations)
+- [MCP server](#mcp-server)
 - [Development](#development)
 - [Deployment](#deployment)
 - [License](#license)
@@ -353,13 +354,28 @@ These are properties of the current design, not bugs to be worked around:
   the claim anchors.
 - **The relay is trusted for availability, not confidentiality.** It can drop,
   delay or refuse traffic, and it learns room ids, timing and frame sizes.
-- **Hosted sessions are Claude Code only.** The hosted adapter depends on
-  `claude`'s stream-json control protocol.
+- **Hosted sessions support Claude Code and pi.** The hosted adapter speaks
+  `claude`'s stream-json control protocol and pi's RPC mode; other agents are
+  mirrored from their desktop or CLI sessions.
 - **Transcripts are not encrypted at rest.** `hosted/*.jsonl` and `bridge.db`
   rely on macOS file permissions (0700/0600), not on disk encryption.
 - **One bridge per room.** A second Mac cannot take over a claimed room id.
 
 Full detail, protocol reference and troubleshooting: [docs/GUIDE.md](docs/GUIDE.md).
+
+## MCP server
+
+`apps/mcp` is a stdio MCP server that lets an agent running on another machine
+drive the pi / Claude Code sessions the bridge hosts on your Mac: open a session
+in an allowlisted directory, send work, read the reply, wait for the turn to
+finish, archive it. It is **not** a remote shell — it only touches the sessions
+it opened (or that the user adopts by name), maps none of the shell / filesystem
+/ device protocol methods, and the relay still sees only ciphertext. Pairing is a
+one-time invite plus the same six-digit code comparison as the web client.
+
+Install steps, the MCP host configuration snippet, the pairing walkthrough, a
+first-task example, the optional listener and troubleshooting are in
+[apps/mcp/README.md](apps/mcp/README.md).
 
 ## Development
 
@@ -368,6 +384,7 @@ apps/bridge      Node daemon: relay client, session adapters, admin API, push
 apps/relay       Cloudflare Worker + Durable Object `Room`
 apps/web         Vite SPA / PWA (TypeScript, no framework)
 apps/menubar     Swift AppKit menu bar app (LSUIElement)
+apps/mcp         stdio MCP server that drives hosted sessions (Node, no build step)
 packages/protocol  Wire types, method names, limits
 packages/crypto    Noise handshakes, PSK derivation, chunked secure channel
 ```
@@ -381,6 +398,8 @@ npm test             # build + node:test
 npm run web          # vite dev server for the web client
 npm run relay:dev    # wrangler dev for the relay
 npm run bridge -- serve
+npm run mcp          # stdio MCP server (apps/mcp), for an MCP host to spawn
+npm run test:mcp     # apps/mcp offline selftests
 ```
 
 Branching and release rules are in `AGENTS.md`: `develop` deploys the preview
