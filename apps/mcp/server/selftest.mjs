@@ -461,6 +461,9 @@ function testStateDirResolution() {
 
     process.env.AB_LISTENER_STATE_DIR = join(tmpdir(), "agent-bridge-selftest-listener-dir");
     assertEqual(listenerStateDir(), process.env.AB_LISTENER_STATE_DIR, "AB_LISTENER_STATE_DIR 仍可覆盖 listener 目录");
+
+    process.env.AB_LISTENER_STATE_DIR = "relative-listener";
+    assertEqual(listenerStateDir(), join(stateDir(), "listener"), "相对路径的 listener 覆盖同样被忽略（不能落到 CWD）");
   } finally {
     restore("AGENT_BRIDGE_MCP_HOME", saved.mcpHome);
     restore("XDG_CONFIG_HOME", saved.xdg);

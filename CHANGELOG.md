@@ -4,6 +4,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增 `apps/mcp`：一个 stdio MCP server，让外部 agent（如云端 Muse）经本仓中继驱动 Mac 上
+  bridge 托管的 pi / Claude Code 会话 —— 建会话、派活、读结果、等待回合、归档；另有可选的
+  listener 组件把「跑完 / 等用户」写进事件流。九个工具、会话登记册与会话模型与生产实现一致；
+  设备身份与会话登记册存在每用户配置目录，不入仓。安装与配对见 `apps/mcp/README.md`。
+
 ## [0.11.10] - 2026-11-23
 
 ### Added

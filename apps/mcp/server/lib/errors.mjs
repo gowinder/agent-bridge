@@ -5,17 +5,21 @@
 
 import { statePaths } from "./state.mjs";
 
-/** 配对指引里的路径取实际状态目录（模块加载时算一次）；提示里不出现任何私有部署路径。 */
-const { identity: IDENTITY_PATH, confirm: CONFIRM_PATH } = statePaths();
-
-export const PAIRING_HINT = [
-  `本连接器还没有配对设备身份（${IDENTITY_PATH} 不存在）。`,
-  "配对步骤（邀请不要贴进聊天）：",
-  "  1. 在 Mac 菜单栏 Agent Bridge 里生成配对邀请链接；",
-  "  2. 把整条链接写成本机文件，例如 ~/invite.txt；",
-  "  3. 运行：node server/pair.mjs --invite-file <该文件>",
-  `  4. 比对菜单栏与终端里的 6 位确认码，一致时把 yes 写进 ${CONFIRM_PATH}。`,
-].join("\n");
+/**
+ * 配对指引：路径现取状态目录。pair.mjs 的 --state-dir 是在 import 之后才设 env，
+ * 所以在模块加载时算成常量会把提示指到默认目录。
+ */
+export function pairingHint() {
+  const { identity, confirm } = statePaths();
+  return [
+    `本连接器还没有配对设备身份（${identity} 不存在）。`,
+    "配对步骤（邀请不要贴进聊天）：",
+    "  1. 在 Mac 菜单栏 Agent Bridge 里生成配对邀请链接；",
+    "  2. 把整条链接写成本机文件，例如 ~/invite.txt；",
+    "  3. 运行：node apps/mcp/server/pair.mjs --invite-file <该文件>",
+    `  4. 比对菜单栏与终端里的 6 位确认码，一致时把 yes 写进 ${confirm}。`,
+  ].join("\n");
+}
 
 export class ToolError extends Error {
   constructor(code, message, { hint, details, cause } = {}) {
@@ -42,7 +46,7 @@ export class ToolError extends Error {
 export class UnpairedError extends ToolError {
   constructor(details) {
     super("unpaired", "未配对：本机没有可用的 Agent Bridge 设备身份，无法连接 bridge。", {
-      hint: PAIRING_HINT,
+      hint: pairingHint(),
       details,
     });
   }

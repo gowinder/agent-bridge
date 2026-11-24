@@ -110,7 +110,7 @@ export class BridgeLink {
       noise = await loadNoiseNode();
     } catch (error) {
       throw new ToolError("wasm_unavailable", `Noise wasm 加载失败：${error.message}`, {
-        hint: "Noise wasm 由 @craftstead/crypto 提供（packages/crypto/wasm/noise.wasm），确认依赖已安装并跑过仓库根 npm run build。",
+        hint: "Noise wasm 由 @craftstead/crypto 提供（packages/crypto/wasm/noise.wasm，不在 git 里）：先跑 npm install，再跑 npm run build:wasm -w @craftstead/crypto（需要 rustup 与 wasm32-unknown-unknown），最后跑仓库根 npm run build。",
       });
     }
     try {

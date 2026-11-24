@@ -13,7 +13,8 @@
 import { appendFile, chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { readJson, stateDir } from "./state.mjs";
+import { warn } from "./log.mjs";
+import { absoluteOverride, readJson, stateDir } from "./state.mjs";
 
 export const WATCHES_VERSION = 1;
 export const DRAIN_CURSOR_VERSION = 1;
@@ -22,8 +23,12 @@ export const DRAIN_CURSOR_VERSION = 1;
 export const LISTENER_DEVICE_NAME = "Muse (MCP) Listener";
 
 export function listenerStateDir() {
-  const override = process.env.AB_LISTENER_STATE_DIR?.trim();
+  // 与 state.mjs 同一条守卫：相对路径会让 watches/events 落到 CWD，而 state.mjs 仍回落到
+  // 每用户目录 —— 两个目录一旦错位，listener 会读到主设备的 identity.json（同身份两条连接）。
+  const override = absoluteOverride(process.env.AB_LISTENER_STATE_DIR);
   if (override) return override;
+  const raw = process.env.AB_LISTENER_STATE_DIR?.trim();
+  if (raw) warn(`AB_LISTENER_STATE_DIR 必须是绝对路径，已忽略「${raw}」`);
   return join(stateDir(), "listener");
 }
 

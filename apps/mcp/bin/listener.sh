@@ -11,14 +11,31 @@ set -u
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "${HERE}/.." && pwd)"
-if [ -n "${AGENT_BRIDGE_MCP_HOME:-}" ]; then
-  CONFIG_ROOT="${AGENT_BRIDGE_MCP_HOME}"
-elif [ -n "${XDG_CONFIG_HOME:-}" ]; then
-  CONFIG_ROOT="${XDG_CONFIG_HOME}/agent-bridge/mcp"
+# 覆盖值只认绝对路径（与 server/lib/state.mjs 的 absoluteOverride 一致）：相对路径在
+# node 侧会被忽略，这里若照收就会让 pidfile/心跳落到另一种目录上。
+abs_path() {
+  case "${1:-}" in
+    /*) printf '%s' "$1" ;;
+    *) printf '' ;;
+  esac
+}
+HOME_OVERRIDE="$(abs_path "${AGENT_BRIDGE_MCP_HOME:-}")"
+XDG_OVERRIDE="$(abs_path "${XDG_CONFIG_HOME:-}")"
+LISTENER_OVERRIDE="$(abs_path "${AB_LISTENER_STATE_DIR:-}")"
+if [ -n "${AGENT_BRIDGE_MCP_HOME:-}" ] && [ -z "${HOME_OVERRIDE}" ]; then
+  printf '[agent-bridge warn] AGENT_BRIDGE_MCP_HOME 必须是绝对路径，已忽略「%s」\n' "${AGENT_BRIDGE_MCP_HOME}" >&2
+fi
+if [ -n "${AB_LISTENER_STATE_DIR:-}" ] && [ -z "${LISTENER_OVERRIDE}" ]; then
+  printf '[agent-bridge warn] AB_LISTENER_STATE_DIR 必须是绝对路径，已忽略「%s」\n' "${AB_LISTENER_STATE_DIR}" >&2
+fi
+if [ -n "${HOME_OVERRIDE}" ]; then
+  CONFIG_ROOT="${HOME_OVERRIDE}"
+elif [ -n "${XDG_OVERRIDE}" ]; then
+  CONFIG_ROOT="${XDG_OVERRIDE}/agent-bridge/mcp"
 else
   CONFIG_ROOT="${HOME}/.agent-bridge/mcp"
 fi
-STATE_DIR="${AB_LISTENER_STATE_DIR:-${CONFIG_ROOT}/listener}"
+STATE_DIR="${LISTENER_OVERRIDE:-${CONFIG_ROOT}/listener}"
 # 把解析结果传给拉起的 node 进程，保证启动器的 pid/心跳 与 listener 自己的状态目录完全一致。
 export AB_LISTENER_STATE_DIR="${STATE_DIR}"
 PID_FILE="${STATE_DIR}/listener.pid"

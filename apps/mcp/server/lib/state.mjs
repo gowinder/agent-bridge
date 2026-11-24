@@ -24,7 +24,7 @@ import { isAbsolute, join } from "node:path";
 export const DEFAULT_DEVICE_NAME = "Muse (MCP)";
 
 /** 显式覆盖只接受绝对路径：相对路径会落到当前目录（很可能正好在仓库里）。 */
-function absoluteOverride(value) {
+export function absoluteOverride(value) {
   const trimmed = value?.trim();
   return trimmed && isAbsolute(trimmed) ? trimmed : null;
 }
