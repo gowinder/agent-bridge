@@ -1,6 +1,6 @@
 {
   "name": "@craftstead/crypto",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agent Bridge 的 Noise 握手与 wasm 加密实现",
   "license": "MIT",
   "type": "module",

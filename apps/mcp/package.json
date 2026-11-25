@@ -1,6 +1,9 @@
 {
-  "name": "agent-bridge-mcp",
+  "name": "@craftstead/agent-bridge-mcp",
   "version": "0.1.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "mcpName": "io.github.gowinder/agent-bridge",
   "description": "MCP server (stdio) that lets a cloud agent drive Agent Bridge hosted Pi / Claude Code sessions on your Mac",
   "license": "MIT",
@@ -30,8 +33,8 @@
     "serve": "node server/index.mjs"
   },
   "dependencies": {
-    "@craftstead/crypto": "^0.1.0",
-    "@craftstead/protocol": "^0.1.0"
+    "@craftstead/crypto": "^0.1.1",
+    "@craftstead/protocol": "^0.1.1"
   },
   "repository": {
     "type": "git",
