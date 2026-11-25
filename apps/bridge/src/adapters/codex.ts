@@ -44,6 +44,12 @@ const DISCOVERY_WAIT_MS = 15_000;
 const SEND_TIMEOUT_MS = 180_000;
 const COMPACT_TIMEOUT_MS = 120_000;
 const UNSET_CLIENT_ID = "00000000-0000-0000-0000-000000000000";
+/**
+ * 桌面刚启动（或重启）时 `ipc.sock` 还是上一次留下的旧文件：connect 会先吃 ECONNREFUSED，
+ * 等它把 server 重新绑上才好。这几毫秒到几秒的窗口重试几次就能盖住。
+ */
+const IPC_CONNECT_WAIT_MS = 3_000;
+const IPC_CONNECT_RETRY_MS = 250;
 
 /** Wire versions expected by Codex desktop IPC handlers (from ChatGPT app bundle). */
 const IPC_METHOD_VERSIONS: Record<string, number> = {
@@ -951,15 +957,27 @@ export class CodexAdapter implements SessionAdapter {
   }
 
   private async desktopClient(): Promise<IpcClient> {
-    if (!existsSync(IPC_SOCKET)) {
-      throw new RpcError("adapter_unavailable", "Codex 桌面未运行（未找到本地 IPC 通道）");
+    const deadline = Date.now() + IPC_CONNECT_WAIT_MS;
+    let refused = false;
+    for (;;) {
+      if (existsSync(IPC_SOCKET)) {
+        try {
+          return await IpcClient.connect();
+        } catch (error) {
+          // 只有「连不上」值得等（桌面正在启动）；其它错误（超时、协议）原样往上抛。
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code !== "ECONNREFUSED" && code !== "ENOENT") throw error;
+          refused = refused || code === "ECONNREFUSED";
+        }
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, IPC_CONNECT_RETRY_MS));
     }
-    return IpcClient.connect().catch(() => {
-      throw new RpcError(
-        "adapter_unavailable",
-        "无法连接 Codex 本地 IPC 通道（Codex 桌面可能未在运行）",
-      );
-    });
+    // 文件还在但没人接：这是上一次运行留下的 socket，桌面没重新绑定（或根本不是它写的）。
+    const reason = refused
+      ? "只剩上次留下的 socket 文件，桌面没重新连上；重启 ChatGPT 桌面后再试"
+      : "Codex 桌面可能未在运行；先启动 ChatGPT 桌面，再发一次";
+    throw new RpcError("adapter_unavailable", `连不上 Codex 本地 IPC 通道（${reason}）`);
   }
 
   /** 找到承接线程的桌面客户端；找不到时给出让用户下一步怎么做的提示。 */
