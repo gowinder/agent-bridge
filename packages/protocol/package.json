@@ -1,7 +1,6 @@
 {
   "name": "@craftstead/protocol",
-  "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Agent Bridge 的共享协议类型",
   "license": "MIT",
   "type": "module",
@@ -17,12 +16,16 @@
     "dist",
     "!dist/*.tsbuildinfo"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/gowinder/agent-bridge.git",
     "directory": "packages/protocol"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "prepublishOnly": "tsc -b"
   }
 }

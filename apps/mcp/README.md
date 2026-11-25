@@ -70,9 +70,28 @@ tools, one bridge connection, no inbound port on either side.
 
 ## Install
 
-Run everything from the repository root — `apps/mcp` imports
-`@craftstead/crypto` and `@craftstead/protocol` from the workspace, so the file
-cannot be copied out of the repo.
+Two routes: the published npm package, or a clone of this repository.
+
+### Route A — npm (recommended)
+
+The package is `@craftstead/agent-bridge-mcp`. It pulls `@craftstead/crypto` and
+`@craftstead/protocol` from the registry, and the crypto tarball already carries
+`wasm/noise.wasm`, so this route needs neither a Rust toolchain nor a repo build:
+
+```sh
+npx -y @craftstead/agent-bridge-mcp        # spawns the stdio server (bin: agent-bridge-mcp)
+npm i -g @craftstead/agent-bridge-mcp     # or install once; the four bins go on PATH
+```
+
+With a global install the commands below that are written as
+`node apps/mcp/…` become the packaged bins instead: `agent-bridge-mcp`,
+`agent-bridge-mcp-pair`, `agent-bridge-mcp-client`, `agent-bridge-mcp-listen`.
+
+### Route B — from a clone
+
+Run everything from the repository root — in the workspace `apps/mcp` imports
+`@craftstead/crypto` and `@craftstead/protocol` from the monorepo, so
+`server/index.mjs` cannot be copied out of the repo.
 
 ```sh
 git clone https://github.com/gowinder/agent-bridge.git
@@ -588,7 +607,7 @@ user to confirm the id or unarchive it on the Mac; never guess a session id.
 ## Self-checks
 
 Fully offline — no network, no Mac, no production instance. Run these inside
-`apps/mcp` (or add `-w agent-bridge-mcp` from the repository root):
+`apps/mcp` (or add `-w @craftstead/agent-bridge-mcp` from the repository root):
 
 ```sh
 npm run check               # node --check on every shipped .mjs in apps/mcp
@@ -598,6 +617,6 @@ npm run selftest:listener   # edge detection, watches.json, events, drain cursor
 ```
 
 From the repository root, `npm run test:mcp` runs all three suites
-(`selftest:all` inside the `agent-bridge-mcp` workspace). `npm run check` at the
+(`selftest:all` inside the `@craftstead/agent-bridge-mcp` workspace). `npm run check` at the
 root is the TypeScript type check for the rest of the monorepo; this app is plain
 `.mjs` and is covered by the syntax check above.

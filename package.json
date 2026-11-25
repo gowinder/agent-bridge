@@ -17,7 +17,7 @@
     "bridge": "node apps/bridge/dist/main.js",
     "mcp": "node apps/mcp/server/index.mjs",
     "menubar": "bash apps/menubar/build.sh",
-    "test:mcp": "npm -w agent-bridge-mcp run selftest:all"
+    "test:mcp": "npm -w @craftstead/agent-bridge-mcp run selftest:all"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250926.0",

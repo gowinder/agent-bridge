@@ -377,6 +377,17 @@ Install steps, the MCP host configuration snippet, the pairing walkthrough, a
 first-task example, the optional listener and troubleshooting are in
 [apps/mcp/README.md](apps/mcp/README.md).
 
+The server ships on npm as **`@craftstead/agent-bridge-mcp`** (scoped to the same
+publisher as `@craftstead/protocol` and `@craftstead/crypto`); the packaged bin
+is still `agent-bridge-mcp`, and the MCP `serverInfo` name stays
+`agent-bridge-mcp`.
+
+```sh
+npx -y @craftstead/agent-bridge-mcp        # or: npm i -g @craftstead/agent-bridge-mcp
+```
+
+Running it from a clone (`npm run mcp`) works the same way.
+
 ## Development
 
 ```
