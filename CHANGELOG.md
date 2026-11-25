@@ -10,6 +10,17 @@
   bridge 托管的 pi / Claude Code 会话 —— 建会话、派活、读结果、等待回合、归档；另有可选的
   listener 组件把「跑完 / 等用户」写进事件流。九个工具、会话登记册与会话模型与生产实现一致；
   设备身份与会话登记册存在每用户配置目录，不入仓。安装与配对见 `apps/mcp/README.md`。
+- 仓库根新增 `glama.json`：Glama MCP 目录的服务器声明（`$schema` + maintainers）。
+
+### Changed
+
+- 三个包按 plan (a) 做好公开发布准备（不内联打包，`@craftstead/protocol`、`@craftstead/crypto`
+  也一并上 npm）：前两个去掉 `private`，加 `publishConfig.access=public` 与 `prepublishOnly`
+  构建（crypto 另加 wasm 存在性校验——`wasm/noise.wasm` 是构建产物、不在 git 里，缺了直接
+  中止发布，避免烧掉不可复用的版本号）；`agent-bridge-mcp` 的两个依赖从 `*` 改成 `^0.1.0`
+  （发布形态下必须指向真实的 registry 版本），并补上 `mcpName`。干净房间验证：三个 tarball
+  以 `file:` 安装到仓外新目录后，`initialize` / `tools/list` 正常，未配对时 `bridge_status`
+  返回结构化 `unpaired`。`npm login` / `npm publish` 属于账号持有人操作，不在本次改动内。
 
 ## [0.11.10] - 2026-11-23
 
