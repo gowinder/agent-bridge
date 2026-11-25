@@ -872,6 +872,37 @@ details[open] > .dock-project-head::before {
   display: none;
 }
 
+/* 刷新 + 快速清理：同一行，刷新靠左、清理靠右。 */
+.dock-history-tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dock-history-tools .dock-cleanup {
+  flex: 1;
+}
+
+.dock-refresh-btn .icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.dock-refresh-btn[disabled] {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.dock-refresh-btn.is-busy .icon svg {
+  animation: dock-refresh-spin 0.9s linear infinite;
+}
+
+@keyframes dock-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* 「快速清理」：右侧一颗小按钮，点开是时间档菜单。 */
 .dock-cleanup {
   position: relative;

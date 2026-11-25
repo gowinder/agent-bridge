@@ -2355,6 +2355,7 @@ let dockHistoryView: {
   input: HTMLInputElement;
   check: HTMLInputElement;
   status: HTMLElement;
+  refresh: HTMLButtonElement;
 } | null = null;
 
 /** 标签库由 snapshot 带下来，新建/删除后本地同步，不用整份重拉。 */
@@ -3151,6 +3152,34 @@ function cleanupSheet(ms: number, rangeLabel: string): void {
   confirm.focus();
 }
 
+/** 手动刷新：历史面板开在聊天页时不跟列表页的 5 秒轮询，状态会停在打开那一刻。 */
+async function refreshDockHistory(): Promise<void> {
+  const button = dockHistoryView?.refresh;
+  if (!button || button.disabled) return;
+  button.disabled = true;
+  button.classList.add("is-busy");
+  try {
+    await ensureSnapshot(true);
+    syncDockSessions();
+    renderDockHistoryList();
+    flashNotice(tr("已刷新"));
+  } catch (error) {
+    flashNotice(tr(`刷新失败：{0}`, messageOf(error)));
+  } finally {
+    button.disabled = false;
+    button.classList.remove("is-busy");
+  }
+}
+
+function dockHistoryRefreshButton(): HTMLButtonElement {
+  const node = el("button", {
+    className: "dock-cleanup-btn dock-refresh-btn",
+    attrs: { type: "button", title: tr("刷新历史对话"), "aria-label": tr("刷新历史对话") },
+  }, [icon("refresh", "icon"), el("span", { text: tr("刷新") })]);
+  node.addEventListener("click", () => void refreshDockHistory());
+  return node;
+}
+
 function dockHistory(): HTMLElement {
   if (!dockHistoryView) {
     const wrap = el("div", { className: "dock-history" });
@@ -3188,8 +3217,10 @@ function dockHistory(): HTMLElement {
     const filters = el("div", { className: "dock-tag-filter", attrs: { role: "group", "aria-label": tr("按标签筛选") } });
     dockTagFilterHost = filters;
     const list = el("div", { className: "dock-list dock-history-list" });
-    wrap.append(search, cleanupControl(), filters, status, list);
-    dockHistoryView = { wrap, list, input, check, status };
+    const refresh = dockHistoryRefreshButton();
+    const tools = el("div", { className: "dock-history-tools" }, [refresh, cleanupControl()]);
+    wrap.append(search, tools, filters, status, list);
+    dockHistoryView = { wrap, list, input, check, status, refresh };
     renderTagFilter();
   }
   renderTagFilter();
