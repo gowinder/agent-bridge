@@ -502,8 +502,33 @@ export class CodexAdapter implements SessionAdapter {
   private ipcFailedAt = 0;
   private static readonly IPC_BACKOFF_MS = 30_000;
 
+  private ipcProbedAt = 0;
+
   private ipcUsable(): boolean {
+    this.probeIpc();
     return existsSync(IPC_SOCKET) && Date.now() - this.ipcFailedAt > CodexAdapter.IPC_BACKOFF_MS;
+  }
+
+  /**
+   * 只靠 `ipcFailedAt` 的话，用户要先把消息发失败一次才看到「不可发送」。这里在列会话时
+   * 顺手探一下（一分钟最多一次），死 socket 也能在列表上直接标出来。
+   */
+  private probeIpc(): void {
+    if (Date.now() - this.ipcProbedAt < 60_000) return;
+    this.ipcProbedAt = Date.now();
+    if (!existsSync(IPC_SOCKET)) {
+      this.ipcFailedAt = Date.now();
+      return;
+    }
+    void IpcClient.connect().then(
+      (client) => {
+        this.ipcFailedAt = 0;
+        client.close();
+      },
+      () => {
+        this.ipcFailedAt = Date.now();
+      },
+    );
   }
 
   private ipcBlockedReason(): string {
