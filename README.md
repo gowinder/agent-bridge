@@ -142,6 +142,8 @@ Then either run the daemon directly (`npm run bridge -- <command>`) or build the
 menu bar app with `npm run menubar` (add
 `AGENT_BRIDGE_ARCHS="arm64 x86_64"` for a universal binary).
 
+**Windows or Linux?** The host app is macOS-only today — [vote for Windows/Linux support](https://github.com/gowinder/agent-bridge/issues/253) so we build for real demand.
+
 ## First run
 
 The menu bar app does all of this for you; the CLI equivalents are shown for
