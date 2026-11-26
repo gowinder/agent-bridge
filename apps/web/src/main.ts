@@ -313,6 +313,8 @@ let hostedDraft: {
   piThinking: string;
   /** 子代理的思考等级（`subagents.defaultThinking`）；空串表示跟随 pi 设置。 */
   subagentThinking: string;
+  /** codex 会话要接管的已有线程 id；空串表示新建线程。 */
+  threadId: string;
 } | null = null;
 /**
  * 上一次新建托管会话时用的选项，存在 Bridge 的 hosted.json 里（换浏览器也在），
@@ -2157,6 +2159,7 @@ function agentLabel(kind: string, hostedAgent?: HostedAgent): string {
   if (kind === "hosted") {
     // 托管会话的 kind 只说明「由 Bridge 托管」，具体引擎藏在 hostedAgent 里。
     if (hostedAgent === "pi") return tr("pi 托管");
+    if (hostedAgent === "codex-appserver") return tr("Codex 托管");
     if (hostedAgent === "claude") return tr("Claude 托管");
     return tr("托管");
   }
@@ -3656,6 +3659,7 @@ function agentMark(kind: SessionSummary["kind"] | AppInfo["kind"], hostedAgent?:
   // 托管会话按实际引擎显示，别再一律当成 Claude Code。
   if (kind === "hosted") {
     if (hostedAgent === "pi") return "PI";
+    if (hostedAgent === "codex-appserver") return "CX";
     if (hostedAgent === "claude") return "CC";
     return "BH";
   }
@@ -4469,6 +4473,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
         subagentModel: last?.subagentModel ?? "",
         piThinking: last?.piThinking ?? "",
         subagentThinking: last?.subagentThinking ?? "",
+        threadId: "",
       };
       panelHost.replaceChildren(hostedCreatePanel(project, hostedDraft));
     }
@@ -4748,6 +4753,7 @@ function hostedCreatePanel(
     subagentModel: string;
     piThinking: string;
     subagentThinking: string;
+    threadId: string;
   },
 ): HTMLElement {
   const form = el("form", { className: "panel hosted-create" });
@@ -4809,6 +4815,25 @@ function hostedCreatePanel(
   let piModelList: ModelOption[] = [];
   const optionsHint = el("p", { className: "hint", text: tr("正在读取本机 CLI 支持的模型与思考程度…") });
   const effortHint = el("p", { className: "hint", text: tr("思考程度越高，回答更细致，但更慢也更费额度。") });
+  // codex 可以接管一条已有线程（例如 Codex 桌面 app 建的）：填线程 id 就续聊，不新建。
+  const threadId = el("input", {
+    className: "input mono",
+    attrs: {
+      type: "text",
+      placeholder: tr("已有的 codex threadId（可选）"),
+      spellcheck: "false",
+      autocomplete: "off",
+      "aria-label": tr("codex 线程 id"),
+    },
+  });
+  threadId.value = draft.threadId;
+  threadId.addEventListener("input", () => {
+    draft.threadId = threadId.value;
+  });
+  const threadIdField = el("label", { className: "field" }, [
+    el("span", { text: tr("接管已有线程（可选）") }),
+    threadId,
+  ]);
   const title = el("input", {
     className: "input",
     attrs: { type: "text", placeholder: tr("标题（可选）"), maxlength: "60" },
@@ -4886,16 +4911,19 @@ function hostedCreatePanel(
     submit.disabled = true;
     status.classList.remove("error");
     const piSelected = draft.agent === "pi";
-    status.textContent = tr(`正在启动 {0}…`, piSelected ? "pi" : "Claude Code");
+    const codexSelected = draft.agent === "codex-appserver";
+    status.textContent = tr(`正在启动 {0}…`, piSelected ? "pi" : codexSelected ? "Codex" : "Claude Code");
     const permissionMode = (mode.value || "manual") as HostedPermissionMode;
     const extraArgs = loadHostedArgPrefs().filter((item) => item.enabled).map((item) => item.value);
-    const chosenModel = piSelected ? draft.piModel.trim() : model.value.trim();
+    // codex 的模型跟随本机 codex 配置：模型下拉是 Claude 的目录，别把它带进去。
+    const chosenModel = piSelected ? draft.piModel.trim() : codexSelected ? "" : model.value.trim();
     void call<SessionGetResult>("hosted.create", {
       path: cwd,
       agent: draft.agent,
       permissionMode,
       ...(chosenModel ? { model: chosenModel } : {}),
-      ...(!piSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(!piSelected && !codexSelected && effort.value.trim() ? { effort: effort.value.trim() } : {}),
+      ...(codexSelected && draft.threadId.trim() ? { threadId: draft.threadId.trim() } : {}),
       ...(piSelected && draft.piThinking.trim() ? { thinking: draft.piThinking.trim() } : {}),
       ...(piSelected && draft.subagentModel.trim() ? { subagentModel: draft.subagentModel.trim() } : {}),
       ...(piSelected && draft.subagentThinking.trim() ? { subagentThinking: draft.subagentThinking.trim() } : {}),
@@ -4950,23 +4978,33 @@ function hostedCreatePanel(
   const agentHint = el("p", { className: "hint" });
   const syncAgent = (): void => {
     const pi = draft.agent === "pi";
-    // pi 没有权限模式与思考程度；模型清单也要等它跑过一次才拿得到，选 pi 时一并收起。
-    for (const node of [modeField, modeHint, modelField, effortField, effortHint, optionsHint]) node.hidden = pi;
+    const codex = draft.agent === "codex-appserver";
+    // pi 与 codex 都没有 Claude Code 的权限模式与思考程度；pi 的模型清单还要跑过一次才拿得到。
+    for (const node of [modeField, modeHint]) node.hidden = pi || codex;
+    for (const node of [modelField, effortField, effortHint]) node.hidden = pi || codex;
+    optionsHint.hidden = pi;
     piModelField.hidden = !pi;
     piThinkingField.hidden = !pi;
     subagentField.hidden = !pi;
     subagentThinkingField.hidden = !pi;
     subagentHint.hidden = !pi;
+    threadIdField.hidden = !codex;
     const useSelect = piModelList.length > 0;
     subagentSelect.hidden = !useSelect;
     subagentModel.hidden = useSelect;
     argsHint.textContent = pi
       ? tr("打钩的参数随新建一起传给 pi；--mode、--session 这类会话与协议旗标不接受。")
-      : tr("打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。");
+      : codex
+        ? tr("打钩的参数随新建一起传给 codex；app-server、--sandbox、审批口径这类旗标不接受。")
+        : tr("打钩的参数随新建一起传给 claude；会话身份、输出协议与权限相关的旗标不接受。");
     agentHint.textContent = pi
       ? tr("pi 用 `pi --mode rpc` 常驻，斜杠命令、扩展提问与换模型都能在网页里用。")
-      : "";
-    agentHint.hidden = !pi;
+      : codex
+        ? tr(
+            "codex 走 OpenAI 官方 app-server 协议：每会话一个进程、流式回复、审批接进网页。默认沙箱 workspace-write，模型跟随本机 codex 配置。",
+          )
+        : "";
+    agentHint.hidden = !pi && !codex;
   };
   agent.addEventListener("change", () => {
     draft.agent = agent.value === "pi" ? "pi" : "claude";
@@ -4980,6 +5018,7 @@ function hostedCreatePanel(
     ]),
     el("label", { className: "field" }, [el("span", { text: tr("托管引擎") }), agent]),
     agentHint,
+    threadIdField,
     modeField,
     modeHint,
     modelField,

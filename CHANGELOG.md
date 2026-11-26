@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- 新增第三个托管引擎「Codex · App Server」：走 OpenAI 官方 `codex app-server` 协议
+  （stdio 上的 JSON-RPC），Bridge 自己起进程、新建 Codex 线程，流式回复、工具活动与
+  协议内审批都接进网页；桌面 app 不用开着。每会话一条线程，线程记在 `~/.codex/sessions`，
+  桌面 app 里可搜索、可续；Bridge 重启或空闲停进程后按 `thread/resume` 续同一条线程。
+  新建时可以填一个已有的 `threadId` 接管（例如桌面 app 建的线程）。默认沙箱
+  `workspace-write`、审批 `on-request`，需要升级权限时在网页里批/拒；停止回合走
+  `turn/interrupt`，不硬杀进程。
+
 ## [0.11.10-rc.1] - 2026-11-23
 
 ### Fixed
