@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.11.11-rc.1] - 2026-11-26
+
 ### Added
 
 - 新增第三个托管引擎「Codex · App Server」：走 OpenAI 官方 `codex app-server` 协议
@@ -13,6 +15,8 @@
   新建时可以填一个已有的 `threadId` 接管（例如桌面 app 建的线程）。默认沙箱
   `workspace-write`、审批 `on-request`，需要升级权限时在网页里批/拒；停止回合走
   `turn/interrupt`，不硬杀进程。
+- README 安装一节末尾加了 Windows / Linux 需求投票入口：桌面 app 目前只支持 macOS，
+  想要其他平台可以去 issue #253 投票。
 
 ## [0.11.10-rc.1] - 2026-11-23
 
