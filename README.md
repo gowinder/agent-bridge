@@ -98,12 +98,12 @@ Each adapter is a separate module in `apps/bridge/src/adapters/`. Capability dif
 
 ### Hosted engines
 
-The `hosted` entry starts one process per session and keeps its stdin, which is why only it can create sessions and why only it gets real approval prompts.
+The `hosted` entry starts one process per session and keeps its stdin, which is why it is the only entry with end-to-end approval prompts.
 
 | Engine | Availability | Process | Notes |
 | --- | --- | --- | --- |
-| Claude Code | 0.11.x | `claude -p --input-format stream-json --output-format stream-json --permission-prompts host` | Default engine |
-| pi | 0.11.10+ | `pi --mode rpc --session-id <id> --approve` | Resumes by session file after a `/new` |
+| Claude Code | all 0.11.x releases | `claude -p --input-format stream-json --output-format stream-json --permission-prompts host` | Default engine |
+| pi | 0.8.0 or later | `pi --mode rpc --session-id <id> --approve` | Resumes by session file after a `/new` |
 | Codex · App Server | **0.11.11-rc.1 (pre-release)** | `codex app-server --listen stdio://` | Official Codex protocol over stdio JSON-RPC; the desktop app does not need to run; sandbox `workspace-write`, approval `on-request`; one thread per session in `~/.codex/sessions`, resumed with `thread/resume` |
 
 ## Install
