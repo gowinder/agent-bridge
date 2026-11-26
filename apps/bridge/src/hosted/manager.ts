@@ -61,6 +61,13 @@ import { piAgentSourceDir, preparePiAgentDir, removePiAgentDir } from "./pi-agen
 import { HOSTED_GUARD_PROMPT, hostedGuardWritten } from "./hosted-prompt.js";
 import { piDefaultModel, piModelCatalog, piModelContextWindow } from "./pi-models.js";
 import { PiSession, type PiPending } from "./pi-session.js";
+import { codexBinary } from "./codex-binary.js";
+import {
+  CodexAppServer,
+  type CodexApproval,
+  type CodexApprovalPolicy,
+  type CodexSandbox,
+} from "./codex-app-server.js";
 import { MAX_PI_TASKS, piSubagentRunning, piSubagentRunnerPids, piSubagentTasks } from "./pi-subagents.js";
 import { claudeTaskMessages, piTaskMessages } from "./task-messages.js";
 import { killProcess, markProcessGroup } from "./process-group.js";
@@ -92,6 +99,23 @@ const TRANSCRIPT_TAIL_BYTES = 262_144;
 const MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:\[\]/-]{0,79}$/;
 /** pi 的思考等级（`pi --thinking` 与 pi-subagents 的 `thinking` 同一套，从低到高）。 */
 const PI_THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+/**
+ * codex 会话的沙箱档位与审批口径：只能改工作目录里的东西，需要时问人。
+ * 不用 `never`——那等于把协议里的审批整段绕过去。
+ */
+const CODEX_SANDBOX: CodexSandbox = "workspace-write";
+const CODEX_APPROVAL_POLICY: CodexApprovalPolicy = "on-request";
+/** 审批必须路由到人：本机 config.toml 可能设成 auto_review，那样网页收不到请求。 */
+const CODEX_APPROVALS_REVIEWER = "user" as const;
+/** 接管已有线程时只接受 codex 自己的 uuid 形状，不让远程设备拿任意字符串去 resume。 */
+const CODEX_THREAD_PATTERN = /^[0-9a-fA-F-]{8,64}$/;
+
+/** 页面上、日志里都能看懂的引擎名。 */
+function agentNameOf(agent: HostedAgent | undefined): string {
+  if (agent === "pi") return "pi";
+  if (agent === "codex-appserver") return "Codex（app-server）";
+  return "Claude Code";
+}
 
 /** 托管白名单最多这么多个目录：多到这份上说明是没整理过的清单，容易点错。 */
 const MAX_HOSTED_DIRS = 64;
@@ -178,6 +202,29 @@ const BLOCKED_PI_ARGS = new Set([
   "--approve",
   "-na",
   "--no-approve",
+]);
+
+/**
+ * codex 这边同理：沙箱档位、审批口径、进程子命令与工作目录由 Bridge 定，
+ * 网页再传一遍会顶掉会话记录里的设置（`--yolo` 那类旗标更是直接把审批关掉）。
+ */
+const BLOCKED_CODEX_ARGS = new Set([
+  "app-server",
+  "exec",
+  "--listen",
+  "-s",
+  "--sandbox",
+  "-a",
+  "--ask-for-approval",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--full-auto",
+  "--yolo",
+  "-C",
+  "--cd",
+  "-m",
+  "--model",
+  "resume",
+  "--last",
 ]);
 
 /** `/new` 报回来的会话文件路径要直接进 argv：只接受绝对路径，且不能夹带换行/空字节。 */
@@ -279,6 +326,8 @@ interface HostedRecord {
   compactionReserveTokens?: number;
   /** pi 会话在 `/new` 之后用的新会话文件：续写要按 `--session <路径>` 而不是 `--session-id`。 */
   piSessionPath?: string;
+  /** codex-appserver 会话绑定的线程 id：重开 = thread/resume 续同一条线程。 */
+  codexThreadId?: string;
   /** pi 自己的命令清单（`get_commands` 原样）：同名时让给 pi 的扩展命令，Bridge 不截流。 */
   piCommands?: string[];
   /** 由 CLI 的 init 事件报告的实际模型，用来核对是否按预期生效。 */
@@ -320,6 +369,12 @@ interface LiveProcess {
   pending: PendingPermission | null;
   /** pi 会话的协议客户端；Claude Code 会话没有。 */
   pi?: PiSession;
+  /** codex 会话的协议客户端；其余引擎没有。 */
+  codex?: CodexAppServer;
+  /** codex 正在等网页批/拒的反方向请求。 */
+  codexPending?: CodexApproval;
+  /** 握手 + 建/续线程的进度：发消息前必须等它完成。 */
+  codexReady?: Promise<void>;
   /** pi 扩展正在等网页回答的提问。 */
   piPending?: PiPending;
   startedAt: number;
@@ -915,8 +970,17 @@ export class HostedSessionManager {
       out.set(adapterKey, bucket);
     };
     for (const record of this.records.values()) {
-      // 只有 pi 需要认领：claude 桌面索引里的 id 是 `local_*`，不是 CLI 的 `--session-id`，
-      // 对不上；而 claude-code-cli 适配器本来就按 hosted/sessions.json 排除托管会话。
+      // pi 与 codex 都要认领：两者的原生会话 id 就是托管记录里的那个 id，
+      // 适配器会把同一段对话再列一遍。claude 桌面索引里的 id 是 `local_*`，对不上；
+      // 而 claude-code-cli 适配器本来就按 hosted/sessions.json 排除托管会话。
+      if (record.agent === "codex-appserver") {
+        // 两个 codex 适配器读的是同一份线程库，两边都要认领。
+        if (record.codexThreadId) {
+          claim("codex", record.codexThreadId);
+          claim("codex-cli", record.codexThreadId);
+        }
+        continue;
+      }
       if (record.agent !== "pi") continue;
       for (const id of this.piSessionIds(record)) claim("pi", id);
     }
@@ -986,6 +1050,9 @@ export class HostedSessionManager {
         all = piTaskMessages(id, taskId);
         if (all) break;
       }
+    } else if (record.agent === "codex-appserver") {
+      // codex 的子代理活动在它自己的 transcript 里，Bridge 没有可读的任务转录。
+      throw new RpcError("not_found", "codex 托管会话没有后台任务记录");
     } else {
       all = claudeTaskMessages(record.id, taskId);
     }
@@ -1018,10 +1085,17 @@ export class HostedSessionManager {
         { label: "工作目录", value: record.cwd },
         ...(pi
           ? [{ label: "引擎", value: "pi 托管" }]
-          : [
-              { label: "权限模式", value: record.permissionMode },
-              { label: "思考程度", value: record.effort ?? "CLI 默认" },
-            ]),
+          : record.agent === "codex-appserver"
+            ? [
+                { label: "引擎", value: "Codex（app-server）" },
+                { label: "沙箱", value: CODEX_SANDBOX },
+                { label: "审批", value: "on-request（网页批/拒）" },
+                { label: "codex 线程", value: record.codexThreadId ?? "（还没建）" },
+              ]
+            : [
+                { label: "权限模式", value: record.permissionMode },
+                { label: "思考程度", value: record.effort ?? "CLI 默认" },
+              ]),
         { label: "模型", value: modelLabel(record) },
         ...(pi
           ? [
@@ -1041,7 +1115,7 @@ export class HostedSessionManager {
       servers: [],
       // 子代理记录和桌面会话同一份：CLI 按 --session-id 写在自己的 projects 目录下。
       // pi 没有这份转录，后台子代理 run 的状态在 pi-subagents 自己的临时目录里。
-      tasks: pi ? this.piTasks(record) : subagentTasks([record.id]),
+      tasks: pi ? this.piTasks(record) : record.agent === "codex-appserver" ? [] : subagentTasks([record.id]),
       ...(record.context ? { context: record.context } : {}),
       note: "This session is hosted by Bridge, not by the Claude desktop app.",
     };
@@ -1049,23 +1123,25 @@ export class HostedSessionManager {
 
   create(params: HostedCreateParams): SessionSummary {
     const cwd = this.allowedPath(params.path);
-    const agent: HostedAgent = params.agent === "pi" ? "pi" : "claude";
-    // pi 没有权限模式与思考程度：记录里留 manual，只当作占位。
-    const permissionMode = agent === "pi" ? "manual" : this.permissionMode(params.permissionMode);
+    const agent: HostedAgent =
+      params.agent === "pi" ? "pi" : params.agent === "codex-appserver" ? "codex-appserver" : "claude";
+    // pi 与 codex 都没有 Claude Code 那套权限模式：记录里留 manual，只当占位。
+    const permissionMode = agent === "claude" ? this.permissionMode(params.permissionMode) : "manual";
     this.assertModeAllowed(permissionMode);
     const model = this.model(params.model);
-    const effort = agent === "pi" ? undefined : this.effort(params.effort);
+    const effort = agent === "claude" ? this.effort(params.effort) : undefined;
     const subagentModel = agent === "pi" ? this.model(params.subagentModel) : undefined;
     const thinking = agent === "pi" ? this.thinkingLevel(params.thinking) : undefined;
     const subagentThinking = agent === "pi" ? this.thinkingLevel(params.subagentThinking) : undefined;
     const extraArgs = this.extraArgs(params.args, agent);
+    const codexThreadId = agent === "codex-appserver" ? this.codexThreadId(params.threadId) : undefined;
     const now = Date.now();
     const id = randomUUID();
     const record: HostedRecord = {
       id,
       cwd,
       title: params.title?.trim() || "托管会话",
-      ...(agent === "pi" ? { agent } : {}),
+      ...(agent === "claude" ? {} : { agent }),
       permissionMode,
       ...(model ? { model } : {}),
       ...(effort ? { effort } : {}),
@@ -1073,6 +1149,7 @@ export class HostedSessionManager {
       ...(thinking ? { thinking } : {}),
       ...(subagentThinking ? { subagentThinking } : {}),
       ...(extraArgs ? { args: extraArgs } : {}),
+      ...(codexThreadId ? { codexThreadId } : {}),
       createdAt: now,
       updatedAt: now,
       lastActiveAt: now,
@@ -1085,7 +1162,7 @@ export class HostedSessionManager {
       if (error instanceof RpcError) throw error;
       throw new RpcError(
         "adapter_unavailable",
-        `无法启动 ${agent === "pi" ? "pi" : "Claude Code"}：${error instanceof Error ? error.message : String(error)}`,
+        `无法启动 ${agentNameOf(agent)}：${error instanceof Error ? error.message : String(error)}`,
       );
     }
     this.records.set(id, record);
@@ -1160,7 +1237,7 @@ export class HostedSessionManager {
         if (error instanceof RpcError) throw error;
         throw new RpcError(
           "adapter_unavailable",
-          `无法 resume ${record.agent === "pi" ? "pi" : "Claude Code"}：${error instanceof Error ? error.message : String(error)}`,
+          `无法 resume ${agentNameOf(record.agent)}：${error instanceof Error ? error.message : String(error)}`,
         );
       }
       record.lastActiveAt = Date.now();
@@ -1209,6 +1286,18 @@ export class HostedSessionManager {
         models.length > 0
           ? "思考等级立刻生效（改回跟随 pi 设置要重启进程）；换模型会停掉当前 pi 进程，下一条消息按新模型重新打开这个会话；子代理的设置只影响之后新派生的子代理。"
           : "pi 的模型清单要等会话跑过一次才拿得到。";
+      return result;
+    }
+    if (record.agent === "codex-appserver") {
+      // codex 的模型清单要跑着 app-server 才能问（model/list）；v1 不在网页上换模型。
+      const result: SessionModelsResult = { models: [], canSwitch: false };
+      if (record.model) {
+        result.current = record.model;
+        result.currentName = record.model;
+      }
+      result.note = record.model
+        ? "这条会话钉住了模型；换模型请新建会话并传新的 model。"
+        : "这条会话没钉模型，跑的是本机 codex 配置里的模型。";
       return result;
     }
     const models = modelCatalog();
@@ -1508,25 +1597,35 @@ export class HostedSessionManager {
     },
   ): void {
     const prev = this.config.lastCreate ?? {};
-    // pi 的 permissionMode 只是占位（它没有权限模式），沿用上一次 Claude Code 用的那个。
+    // pi / codex 的 permissionMode 只是占位（它们没有权限模式），沿用上一次 Claude Code 用的那个。
     const next: HostedCreateDefaults = {
       agent,
-      permissionMode: agent === "pi" ? (prev.permissionMode ?? permissionMode) : permissionMode,
+      permissionMode: agent === "claude" ? permissionMode : (prev.permissionMode ?? permissionMode),
     };
-    // 本次用的引擎以「这次选了什么」为准：选回默认就不写这项，下次预填跟着回到默认；
-    // 另一个引擎的那份原样留着，来回切引擎不会互相清空。
+    // 其它引擎的那几份原样留着，来回切引擎不会互相清空。
+    if (prev.model) next.model = prev.model;
+    if (prev.effort) next.effort = prev.effort;
+    if (prev.piModel) next.piModel = prev.piModel;
+    if (prev.piThinking) next.piThinking = prev.piThinking;
+    if (prev.subagentModel) next.subagentModel = prev.subagentModel;
+    if (prev.subagentThinking) next.subagentThinking = prev.subagentThinking;
+    if (prev.codexModel) next.codexModel = prev.codexModel;
+    // 本次用的引擎以「这次选了什么」为准：这一桶没选的字段要清掉，下次预填才回到默认。
     if (agent === "pi") {
-      if (prev.model) next.model = prev.model;
-      if (prev.effort) next.effort = prev.effort;
+      delete next.piModel;
+      delete next.piThinking;
+      delete next.subagentModel;
+      delete next.subagentThinking;
       if (used.model) next.piModel = used.model;
       if (used.thinking) next.piThinking = used.thinking;
       if (used.subagentModel) next.subagentModel = used.subagentModel;
       if (used.subagentThinking) next.subagentThinking = used.subagentThinking;
+    } else if (agent === "codex-appserver") {
+      delete next.codexModel;
+      if (used.model) next.codexModel = used.model;
     } else {
-      if (prev.piModel) next.piModel = prev.piModel;
-      if (prev.piThinking) next.piThinking = prev.piThinking;
-      if (prev.subagentModel) next.subagentModel = prev.subagentModel;
-      if (prev.subagentThinking) next.subagentThinking = prev.subagentThinking;
+      delete next.model;
+      delete next.effort;
       if (used.model) next.model = used.model;
       if (used.effort) next.effort = used.effort;
     }
@@ -1538,6 +1637,7 @@ export class HostedSessionManager {
   options(): HostedOptionsResult {
     const models = modelCatalog();
     const pi = piBinary();
+    const codex = codexBinary();
     const agents: HostedAgentOption[] = [
       { id: "claude", label: "Claude Code", available: true },
       {
@@ -1545,6 +1645,14 @@ export class HostedSessionManager {
         label: "pi",
         available: pi !== null,
         ...(pi === null ? { detail: "未找到 pi 可执行文件（~/.bun/bin/pi 或 AGENT_BRIDGE_PI_PATH）" } : {}),
+      },
+      {
+        id: "codex-appserver",
+        label: "Codex · App Server",
+        available: codex !== null,
+        ...(codex === null
+          ? { detail: "未找到 codex 可执行文件（~/.bun/bin/codex 或 AGENT_BRIDGE_CODEX_PATH）" }
+          : {}),
       },
     ];
     const result: HostedOptionsResult = {
@@ -1589,8 +1697,32 @@ export class HostedSessionManager {
       !live.pending &&
       !live.piPending &&
       this.piSessionIds(record).some((id) => piSubagentRunning(id));
-    if (!live || (!live.busy && !live.pending && !live.piPending && !background)) {
+    if (!live || (!live.busy && !live.pending && !live.piPending && !live.codexPending && !background)) {
       return { interrupted: false, session: this.summary(record) };
+    }
+    if (record.agent === "codex-appserver") {
+      if (!live || (!live.busy && !live.codexPending)) {
+        return { interrupted: false, session: this.summary(record) };
+      }
+      if (live.codexPending) {
+        live.codex?.respond(false, "用户停止了当前回合");
+        live.codexPending = undefined;
+      }
+      // 先中断回合再保持进程：app-server 被直接杀掉会把在跑的 turn 落成 interrupted。
+      void live.codex?.interrupt();
+      live.busy = false;
+      record.interrupted = true;
+      record.pendingText = undefined;
+      this.appendRecord(record, {
+        messageId: randomUUID(),
+        sessionId: record.id,
+        role: "system",
+        createdAt: Date.now(),
+        blocks: [{ type: "text", text: "已停止当前回合" }],
+      });
+      this.log(`hosted: interrupt ${record.id}`);
+      this.touch(record);
+      return { interrupted: true, session: this.summary(record) };
     }
     if (record.agent === "pi") {
       // 后台子代理跑在 pi 进程内部，abort 停不掉，只能把进程停掉。
@@ -1693,6 +1825,37 @@ export class HostedSessionManager {
       this.touch(record);
       return { accepted: true, delivered: true };
     }
+    if (record.agent === "codex-appserver") {
+      const codex = live.codex;
+      if (!codex) throw new RpcError("adapter_unavailable", "codex 协议还没就绪，稍后再发");
+      if (live.codexPending) {
+        const decision = approvalAnswer(text);
+        if (decision !== null) {
+          codex.respond(decision, decision ? undefined : "用户拒绝");
+          live.codexPending = undefined;
+          // decline 只拒掉这一次调用，回合会继续：保持忙，等下一条输出或 turn/completed。
+          live.busy = true;
+          this.recordUser(record, text);
+          this.touch(record);
+          return { accepted: true, delivered: true, detail: decision ? "已批准待批的操作" : "已拒绝待批的操作" };
+        }
+        // 不是答复：先把这次调用拒掉，再把这句当用户消息发出去。
+        codex.respond(false, "用户没有批准这次调用，改为直接回复");
+        live.codexPending = undefined;
+      }
+      if (live.busy) throw new RpcError("conflict", "这一轮还在跑，等它结束再发");
+      const started = await this.codexTurn(record, live, text);
+      if (!started) throw new RpcError("adapter_unavailable", "codex 没有接受这条消息");
+      this.recordUser(record, text);
+      // 这一轮要等 turn/completed 才算结束；中途 Bridge 退出就靠它续跑。
+      record.pendingText = text;
+      record.interrupted = false;
+      // 首条消息会把默认标题换成摘要：同步给 codex，桌面 app 里也能按这个名字找到。
+      // 改名只是锦上添花，不能挡住这条消息的投递。
+      void this.syncCodexTitle(record, live);
+      this.touch(record);
+      return { accepted: true, delivered: true };
+    }
     if (live.pending) {
       const handled = this.answerPermission(record, live, text);
       if (handled) {
@@ -1736,7 +1899,7 @@ export class HostedSessionManager {
         const result = await sessiond.attach(record.id, record.stdoutSeq ?? 0);
         const child = sessiond.remoteChild(record.id);
         if (!result.running || !child) continue;
-        const live = this.track(record, child, true, this.cliBinary());
+        const live = this.track(record, child, true, this.engineBinary(record), true);
         if (result.gap) {
           this.appendRecord(record, {
             messageId: randomUUID(),
@@ -1815,6 +1978,7 @@ export class HostedSessionManager {
         const live = this.live.get(record.id);
         if (live) {
           if (record.agent === "pi") live.pi?.prompt(text, false);
+          else if (record.agent === "codex-appserver") void this.codexTurn(record, live, text);
           else this.writeUserTurn(live, text);
           live.busy = true;
           record.interrupted = false;
@@ -1859,6 +2023,10 @@ export class HostedSessionManager {
   private start(record: HostedRecord, resume: boolean): void {
     if (record.agent === "pi") {
       this.startPi(record, resume);
+      return;
+    }
+    if (record.agent === "codex-appserver") {
+      this.startCodex(record);
       return;
     }
     // 已有记录可能是在开关打开时建的：关掉开关后不允许再用 bypass 启动。
@@ -1939,6 +2107,216 @@ export class HostedSessionManager {
     this.track(record, child, resume, binary);
   }
 
+  /**
+   * codex 用 `codex app-server --listen stdio://`：一行一条 JSON-RPC，进程常驻。
+   * 线程由 codex 自己存在 `~/.codex/sessions`，Bridge 只记 threadId，重开时 thread/resume 续上。
+   */
+  private startCodex(record: HostedRecord): void {
+    const binary = codexBinary();
+    if (!binary) {
+      throw new RpcError(
+        "adapter_unavailable",
+        "未找到 codex 可执行文件：托管 codex 会话需要它在 ~/.bun/bin、/opt/homebrew/bin、/usr/local/bin 或 AGENT_BRIDGE_CODEX_PATH 中。",
+      );
+    }
+    const args = ["app-server", "--listen", "stdio://"];
+    if (record.args?.length) args.push(...record.args);
+    const child = this.spawnProcess(binary, args, record.cwd, record.id, record.stdoutSeq ?? 0);
+    this.track(record, child, true, binary);
+  }
+
+  /**
+   * codex 会话：把 stdin 交给协议客户端，事件回写到托管记录。
+   * `attached` 表示这是 Bridge 重启后接回同一个 sessiond 进程（不能重发 initialize）。
+   */
+  private attachCodex(record: HostedRecord, live: LiveProcess, attached: boolean): void {
+    const codex = new CodexAppServer(
+      (line) => {
+        try {
+          live.child.stdin?.write(`${line}\n`);
+        } catch {
+          // 进程刚退出时写不进去：下一轮发送会重新拉起。
+        }
+      },
+      {
+        assistant: (blocks) => {
+          if (record.title === "托管会话") {
+            const text = blocks.find((block) => block.type === "text" && block.text.trim());
+            if (text) record.title = truncateTitle(text.text);
+          }
+          this.appendRecord(record, {
+            messageId: randomUUID(),
+            sessionId: record.id,
+            role: "assistant",
+            createdAt: Date.now(),
+            blocks,
+          });
+          this.touch(record);
+        },
+        system: (text) => this.codexNotice(record, text),
+        context: (usage) => {
+          record.context = usage;
+          this.touch(record);
+        },
+        approval: (pending) => {
+          live.codexPending = pending ?? undefined;
+          if (pending) {
+            // 审批走网页现有的「待批准」块：按钮发出的就是「允许」/「拒绝」两个词。
+            live.busy = true;
+            this.appendRecord(record, {
+              messageId: randomUUID(),
+              sessionId: record.id,
+              role: "assistant",
+              createdAt: Date.now(),
+              blocks: [
+                {
+                  type: "next-step",
+                  text: pending.text,
+                  ask: pending.reason ? `${pending.ask}（${pending.reason}）` : pending.ask,
+                  actions: [{ label: "允许" }, { label: "拒绝" }],
+                  pending: true,
+                },
+              ],
+            });
+          }
+          this.touch(record);
+        },
+        title: (name) => {
+          const next = name.trim().slice(0, MAX_TITLE_CHARS);
+          // 网页改过的标题以网页为准；这里只补 codex 自己起的名字。
+          if (next && record.title === "托管会话") {
+            record.title = next;
+            this.touch(record);
+          }
+        },
+        thread: (threadId) => {
+          if (record.codexThreadId !== threadId) {
+            record.codexThreadId = threadId;
+            this.persistRecords();
+          }
+        },
+        turnDone: (status, error) => {
+          live.busy = false;
+          live.codexPending = undefined;
+          record.pendingText = undefined;
+          record.resumeAttempts = 0;
+          record.interrupted = status === "interrupted";
+          if (status === "failed") this.codexNotice(record, `这一轮失败：${error ?? "未知原因"}`);
+          this.touch(record);
+        },
+        log: (line) => this.log(`hosted ${record.id} ${line}`),
+      },
+    );
+    live.codex = codex;
+    if (attached) {
+      // 接回同一个进程：initialize 重发会报 already initialized，线程也已经在进程里；
+      // 代价是拿不到在跑那一轮的 turnId，之后的停止只能退化成直接停进程。
+      if (record.codexThreadId) codex.adoptThread(record.codexThreadId);
+      return;
+    }
+    live.codexReady = this.handshakeCodex(record, live, codex);
+  }
+
+  /** 握手 + 建线程/续线程。失败只写成系统消息：进程已经起来了，要不要重试由用户决定。 */
+  private async handshakeCodex(
+    record: HostedRecord,
+    live: LiveProcess,
+    codex: CodexAppServer,
+  ): Promise<void> {
+    const fail = (detail: string): void => {
+      this.codexNotice(record, `codex 启动失败：${detail}`);
+      this.log(`hosted ${record.id} codex handshake failed: ${detail}`);
+    };
+    const init = await codex.initialize();
+    if (init.error) {
+      fail(init.error);
+      return;
+    }
+    const target = record.codexThreadId;
+    const started = target
+      ? await codex.resumeThread({
+          threadId: target,
+          cwd: record.cwd,
+          sandbox: CODEX_SANDBOX,
+          approvalPolicy: CODEX_APPROVAL_POLICY,
+          approvalsReviewer: CODEX_APPROVALS_REVIEWER,
+          developerInstructions: HOSTED_GUARD_PROMPT,
+          ...(record.model ? { model: record.model } : {}),
+        })
+      : await codex.startThread({
+          cwd: record.cwd,
+          sandbox: CODEX_SANDBOX,
+          approvalPolicy: CODEX_APPROVAL_POLICY,
+          approvalsReviewer: CODEX_APPROVALS_REVIEWER,
+          developerInstructions: HOSTED_GUARD_PROMPT,
+          ...(record.model ? { model: record.model } : {}),
+        });
+    if (started.error) {
+      fail(started.error);
+      return;
+    }
+    // 接管的线程自带持久化的工作目录：白名单改了之后不能凭一个 threadId 绕出去。
+    if (target && started.cwd && !this.cwdAllowed(started.cwd)) {
+      fail(`这条线程的工作目录不在托管白名单里：${started.cwd}`);
+      // 线程已经在进程里挂着，直接收掉，免得它带着白名单外的 cwd 继续跑。
+      void this.teardown(record.id);
+      return;
+    }
+    // 新建的线程按会话标题命名；续上的线程保留它自己（可能被桌面 app 改过）的名字。
+    if (!target && record.title !== "托管会话") void this.syncCodexTitle(record, live);
+  }
+
+  /** 把会话标题同步给 codex，桌面 app 的会话列表里也能按这个名字找到。 */
+  private async syncCodexTitle(record: HostedRecord, live: LiveProcess): Promise<void> {
+    const codex = live.codex;
+    if (!codex || !record.codexThreadId || record.title === "托管会话") return;
+    const result = await codex.setName(record.title);
+    if (result.error) this.log(`hosted ${record.id} codex 改名失败：${result.error}`);
+  }
+
+  private codexNotice(record: HostedRecord, text: string): void {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    this.appendRecord(record, {
+      messageId: randomUUID(),
+      sessionId: record.id,
+      role: "system",
+      createdAt: Date.now(),
+      blocks: [{ type: "text", text: trimmed }],
+    });
+    this.touch(record);
+  }
+
+  /** codex 发一轮：先等握手完成，再 turn/start。返回 false 表示这一轮没起来。 */
+  private async codexTurn(record: HostedRecord, live: LiveProcess, text: string): Promise<boolean> {
+    const codex = live.codex;
+    if (!codex) return false;
+    await live.codexReady;
+    // 等握手期间进程可能被换掉了：旧客户端发出去也没人收。
+    if (live.codex !== codex) return false;
+    const started = await codex.startTurn(text);
+    if (started.error) {
+      live.busy = false;
+      record.pendingText = undefined;
+      this.codexNotice(record, `codex 没有接受这条消息：${started.error}`);
+      return false;
+    }
+    live.busy = true;
+    return true;
+  }
+
+  /** 停止/收进程前先把在跑的一轮中断掉，别让它落成 interrupted 残回合。 */
+  private async quiesceCodex(live: LiveProcess): Promise<void> {
+    const codex = live.codex;
+    if (!codex) return;
+    if (live.codexPending) {
+      codex.respond(false, "用户停止了当前回合");
+      live.codexPending = undefined;
+    }
+    if (!live.busy) return;
+    await codex.interrupt();
+  }
+
   /** 默认交给 sessiond 持有；注入 spawn 的测试和守护进程不可用时走本机。 */
   private spawnProcess(
     command: string,
@@ -1963,7 +2341,7 @@ export class HostedSessionManager {
   }
 
   /** 把子进程挂进 live 表并接好事件；新建与重连共用同一套退出/错误处理。 */
-  private track(record: HostedRecord, child: HostedChild, resume: boolean, cli: string): LiveProcess {
+  private track(record: HostedRecord, child: HostedChild, resume: boolean, cli: string, attached = false): LiveProcess {
     const live: LiveProcess = {
       child,
       buffer: "",
@@ -1980,6 +2358,7 @@ export class HostedSessionManager {
     this.rememberTrees();
     this.watchTrees();
     if (record.agent === "pi") this.attachPi(record, live);
+    else if (record.agent === "codex-appserver") this.attachCodex(record, live, attached);
     child.stdout?.setEncoding?.("utf8");
     // RemoteChild 会把 sessiond 的 seq 作为第二个参数带上，用来推进 ack。
     child.stdout?.on("data", (chunk: string | Buffer, seq?: number) =>
@@ -2081,7 +2460,7 @@ export class HostedSessionManager {
     if (seq !== undefined) this.advanceSeq(record, seq);
   }
 
-  /** 子进程输出进哪条解析路径：pi 走协议客户端，Claude Code 走 stream-json 解析。 */
+  /** 子进程输出进哪条解析路径：pi / codex 走各自的协议客户端，Claude Code 走 stream-json 解析。 */
   private feedChild(record: HostedRecord, live: LiveProcess, chunk: string, seq?: number): void {
     // 任何一段输出都算「这一轮还在动」：卡住标记靠它清掉。
     live.lastOutputAt = Date.now();
@@ -2091,6 +2470,11 @@ export class HostedSessionManager {
     }
     if (live.pi) {
       live.pi.feed(chunk);
+      if (seq !== undefined) this.advanceSeq(record, seq);
+      return;
+    }
+    if (live.codex) {
+      live.codex.feed(chunk);
       if (seq !== undefined) this.advanceSeq(record, seq);
       return;
     }
@@ -2609,14 +2993,14 @@ export class HostedSessionManager {
       return true;
     }
     const trimmed = text.trim();
-    if (/^(允许|批准|同意|可以|allow|yes|y)$/i.test(trimmed)) {
+    if (approvalAnswer(trimmed) === true) {
       this.respondControl(record, live, pending.requestId, { behavior: "allow", updatedInput: pending.input });
       live.pending = null;
       live.busy = true;
       this.touch(record);
       return true;
     }
-    if (/^(拒绝|不允许|不同意|deny|no|n)$/i.test(trimmed)) {
+    if (approvalAnswer(trimmed) === false) {
       this.respondControl(record, live, pending.requestId, { behavior: "deny", message: "用户拒绝" });
       live.pending = null;
       live.busy = false;
@@ -2747,6 +3131,13 @@ export class HostedSessionManager {
     return isDirectory(path) ? "ok" : "missing";
   }
 
+  /** 接管线程时核对它的工作目录：先换算成 realpath 再比，不能按字符串相等判断。 */
+  private cwdAllowed(path: string): boolean {
+    const target = canonical(path);
+    if (!target) return false;
+    return this.allowDirs().some((dir) => dir.real === target);
+  }
+
   private cwdExists(path: string): boolean {
     return this.cwdState(path) === "ok";
   }
@@ -2769,12 +3160,12 @@ export class HostedSessionManager {
       live: Boolean(live),
       busy: this.busyOf(record),
       ...(live?.stalledSince ? { stalledSince: live.stalledSince } : {}),
-      needsDecision: Boolean(live?.pending || live?.piPending),
+      needsDecision: Boolean(live?.pending || live?.piPending || live?.codexPending),
       canSend: dirExists,
       hosted: true,
       hostedState: live ? "running" : "stopped",
       // 老记录没有 agent 字段，那是 Claude Code 时代留下的；一律写出来，网页的图标/文案才分得清。
-      hostedAgent: record.agent === "pi" ? "pi" : "claude",
+      hostedAgent: record.agent === "pi" ? "pi" : record.agent === "codex-appserver" ? "codex-appserver" : "claude",
       permissionMode: record.permissionMode,
       ...(record.model ?? record.observedModel ? { model: record.model ?? record.observedModel } : {}),
       ...(record.effort ? { effort: record.effort } : {}),
@@ -2842,6 +3233,13 @@ export class HostedSessionManager {
    * 菜单栏/launchd 启动时 PATH 里通常没有 `claude`（它装在 ~/.local/bin），
    * 直接 spawn "claude" 会 ENOENT。按显式配置、常见安装位置依次找一个存在的。
    */
+  /** 会话实际用的可执行文件：只用于日志与「找不到 xxx」这类错误文案。 */
+  private engineBinary(record: HostedRecord): string {
+    if (record.agent === "pi") return piBinary() ?? "pi";
+    if (record.agent === "codex-appserver") return codexBinary() ?? "codex";
+    return this.cliBinary();
+  }
+
   private cliBinary(): string {
     const explicit = this.config.cliPath ?? process.env["AGENT_BRIDGE_CLAUDE_PATH"];
     if (explicit) return explicit;
@@ -2869,7 +3267,7 @@ export class HostedSessionManager {
   /** 网页加的启动参数：每项按空格拆成 argv，挡掉 Bridge 自己那套会话与权限旗标。 */
   private extraArgs(values: string[] | undefined, agent: HostedAgent = "claude"): string[] | undefined {
     const tokens: string[] = [];
-    const blocked = agent === "pi" ? BLOCKED_PI_ARGS : BLOCKED_EXTRA_ARGS;
+    const blocked = agent === "pi" ? BLOCKED_PI_ARGS : agent === "codex-appserver" ? BLOCKED_CODEX_ARGS : BLOCKED_EXTRA_ARGS;
     for (const value of values ?? []) {
       if (typeof value !== "string") continue;
       if (value.length > MAX_EXTRA_ARG_CHARS) {
@@ -2885,6 +3283,16 @@ export class HostedSessionManager {
       }
     }
     return tokens.length > 0 ? tokens.slice(0, MAX_EXTRA_ARGS) : undefined;
+  }
+
+  /** 接管已有 codex 线程时校验 id：只接受 uuid 形状，不让任意字符串进到 thread/resume。 */
+  private codexThreadId(value: string | undefined): string | undefined {
+    const id = value?.trim();
+    if (!id) return undefined;
+    if (!CODEX_THREAD_PATTERN.test(id)) {
+      throw new RpcError("invalid_params", `codex 线程 id 不合法：${value}`);
+    }
+    return id;
   }
 
   /** 思考程度会原样进 argv：只接受 CLI 自己列出的档位。 */
@@ -2953,6 +3361,8 @@ export class HostedSessionManager {
   ): Promise<{ leftover: number[]; stopped: boolean }> {
     this.stopping.add(id);
     const live = this.live.get(id);
+    // codex 要先 turn/interrupt 再关进程，否则在跑的那一轮会落成 interrupted 残回合。
+    if (live?.codex && (live.busy || live.codexPending)) await this.quiesceCodex(live);
     const rootPid = live?.child.pid;
     let stopped = live !== undefined;
     const leftover: number[] = [];
@@ -3125,7 +3535,7 @@ export class HostedSessionManager {
       // 否则子代理卡住时会话看起来在跑、却永远不会被判成卡住。
       const busy = record ? this.busyOf(record) : live.busy;
       // 正在等网页回答权限问题不算卡住：那是人没回，不是进程不动。
-      if (!busy || live.pending || live.piPending) {
+      if (!busy || live.pending || live.piPending || live.codexPending) {
         live.stalledSince = undefined;
         continue;
       }
@@ -3148,7 +3558,7 @@ export class HostedSessionManager {
   private sweepIdle(): void {
     const now = Date.now();
     for (const [id, live] of this.live) {
-      if (live.busy || live.pending) continue;
+      if (live.busy || live.pending || live.codexPending) continue;
       if (now - live.startedAt < IDLE_SWEEP_MS) continue;
       const record = this.records.get(id);
       if (!record) continue;
@@ -3189,7 +3599,9 @@ export class HostedSessionManager {
           id: item["id"],
           cwd: item["cwd"],
           title: typeof item["title"] === "string" ? item["title"] : "托管会话",
-          ...(item["agent"] === "pi" ? { agent: "pi" as const } : {}),
+          ...(item["agent"] === "pi" || item["agent"] === "codex-appserver"
+            ? { agent: item["agent"] }
+            : {}),
           permissionMode: this.permissionMode(
             typeof item["permissionMode"] === "string" ? item["permissionMode"] : "manual",
           ),
@@ -3197,6 +3609,9 @@ export class HostedSessionManager {
           ...(typeof item["model"] === "string" && MODEL_PATTERN.test(item["model"]) ? { model: item["model"] } : {}),
           ...(typeof item["effort"] === "string" && /^[a-z][a-z-]{0,15}$/.test(item["effort"])
             ? { effort: item["effort"] }
+            : {}),
+          ...(typeof item["codexThreadId"] === "string" && CODEX_THREAD_PATTERN.test(item["codexThreadId"])
+            ? { codexThreadId: item["codexThreadId"] }
             : {}),
           ...(typeof item["subagentModel"] === "string" && MODEL_PATTERN.test(item["subagentModel"])
             ? { subagentModel: item["subagentModel"] }
@@ -3289,6 +3704,7 @@ export class HostedSessionManager {
                 : {}),
               ...(record.args?.length ? { args: record.args } : {}),
               ...(record.piSessionPath ? { piSessionPath: record.piSessionPath } : {}),
+              ...(record.codexThreadId ? { codexThreadId: record.codexThreadId } : {}),
               ...(record.observedModel ? { observedModel: record.observedModel } : {}),
               ...(record.interrupted ? { interrupted: record.interrupted } : {}),
               ...(record.pendingText ? { pendingText: record.pendingText } : {}),
@@ -3424,12 +3840,22 @@ function readConfig(stateDir: string): HostedConfig {
 function readCreateDefaults(raw: unknown): HostedCreateDefaults | undefined {
   if (!isRecord(raw)) return undefined;
   const out: HostedCreateDefaults = {};
-  if (raw["agent"] === "pi" || raw["agent"] === "claude") out.agent = raw["agent"];
+  if (raw["agent"] === "pi" || raw["agent"] === "claude" || raw["agent"] === "codex-appserver") {
+    out.agent = raw["agent"];
+  }
   const mode = raw["permissionMode"];
   if (typeof mode === "string" && HOSTED_PERMISSION_MODES.includes(mode as HostedPermissionMode)) {
     out.permissionMode = mode as HostedPermissionMode;
   }
-  for (const key of ["model", "effort", "piModel", "piThinking", "subagentModel", "subagentThinking"] as const) {
+  for (const key of [
+    "model",
+    "effort",
+    "piModel",
+    "piThinking",
+    "subagentModel",
+    "subagentThinking",
+    "codexModel",
+  ] as const) {
     const value = raw[key];
     if (typeof value === "string" && value.trim() !== "") out[key] = value;
   }
@@ -3543,6 +3969,14 @@ function trimMessageForList(message: MessageRecord): MessageRecord {
     return block;
   });
   return changed ? { ...message, blocks } : message;
+}
+
+/** 网页上「允许」/「拒绝」按钮发出的就是这两个词；返回 null 表示这句不是答复。 */
+function approvalAnswer(text: string): boolean | null {
+  const trimmed = text.trim();
+  if (/^(允许|批准|同意|可以|allow|yes|y)$/i.test(trimmed)) return true;
+  if (/^(拒绝|不允许|不同意|deny|no|n)$/i.test(trimmed)) return false;
+  return null;
 }
 
 function truncateTitle(text: string): string {

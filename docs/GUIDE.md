@@ -395,9 +395,11 @@ session, so the UI hides what an agent cannot do.
 - **Send:** `dsh --profile headless --session-id <id>`.
 - **Read:** partial. **Create:** no.
 
-### `hosted` — Claude Code · Hosted by Bridge
+### `hosted` — Claude Code / pi / Codex · Hosted by Bridge
 
-Full enumerate/read/send/create. See [section 8](#8-hosted-sessions).
+Full enumerate/read/send/create. The engine is per session (`hostedAgent`);
+Codex sessions are driven over the official `codex app-server` protocol.
+See [section 8](#8-hosted-sessions).
 
 ## 8. Hosted sessions
 
@@ -750,7 +752,12 @@ an already-paired device.
 
 ### Hosted sessions
 
-- Claude Code only; there is no hosted Codex or hosted Antigravity.
+- Three engines: Claude Code, pi, and Codex (official `codex app-server`
+  protocol). There is no hosted Antigravity.
+- Codex sessions pin `sandbox=workspace-write` + `approvalPolicy=on-request`;
+  approvals show up in the web client as pending blocks. Model switching is not
+  exposed for Codex yet, and a session created with an existing `threadId`
+  starts with an empty Bridge transcript (history stays in the codex thread).
 - The transitive model list and permission modes depend on the installed CLI
   version.
 - A resume after the CLI drops the conversation silently starts a new

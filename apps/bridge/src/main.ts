@@ -37,16 +37,9 @@ import {
 import { DeviceSession, PairingSession, type ChannelSession } from "./sessions.js";
 import { defaultStateDir, Store } from "./store.js";
 import { UploadStore } from "./uploads.js";
+import { BRIDGE_VERSION } from "./version.js";
 
-// 版本只有一个来源：工作区根的 package.json（dist/ 三层之上）。
-// 打包进 app 时 build.sh 会写一份同布局的 bridge/package.json，两处都能解析到。
-const VERSION = (() => {
-  try {
-    return JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")).version as string;
-  } catch {
-    return "0.0.0";
-  }
-})();
+const VERSION = BRIDGE_VERSION;
 const DEVICE_TTL_OPTIONS: Record<string, number | null> = {
   manual: null,
   "1h": 3600,

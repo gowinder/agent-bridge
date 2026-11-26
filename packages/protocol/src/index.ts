@@ -695,8 +695,11 @@ export interface TodoListResult {
 /** Permission modes the CLI accepts; `default` is only a UI alias for `manual`. */
 export type HostedPermissionMode = "manual" | "acceptEdits" | "auto" | "bypassPermissions" | "dontAsk" | "plan";
 
-/** Bridge 托管会话可以由哪个 CLI 持有：Claude Code（stream-json）或 pi（rpc）。 */
-export type HostedAgent = "claude" | "pi";
+/**
+ * Bridge 托管会话由哪个引擎持有：Claude Code（stream-json）、pi（rpc）
+ * 或 codex（app-server，OpenAI 官方协议）。
+ */
+export type HostedAgent = "claude" | "pi" | "codex-appserver";
 
 /**
  * 上一次成功创建托管会话时用的选项：存在 Bridge 的 hosted.json 里，
@@ -716,6 +719,8 @@ export interface HostedCreateDefaults {
   piModel?: string;
   /** 上次 pi 会话的 `--thinking`。 */
   piThinking?: string;
+  /** 上次 codex 会话用的模型（thread/start 的 model）；缺省跟随本机 codex 配置。 */
+  codexModel?: string;
   /** 上次 pi 子代理用的模型。 */
   subagentModel?: string;
   /** 上次 pi 子代理的思考等级。 */
@@ -773,7 +778,7 @@ export interface HostedDirParams {
 export interface HostedCreateParams {
   /** Must equal one of `hosted.dirs`; absolute path or one already resolved there. */
   path: string;
-  /** 由哪个 CLI 持有进程；省略即 Claude Code。pi 没有权限模式与思考程度。 */
+  /** 由哪个引擎持有进程；省略即 Claude Code。pi 与 codex 没有权限模式与思考程度。 */
   agent?: HostedAgent;
   permissionMode?: HostedPermissionMode;
   /** Claude Code `--model` value; omitted uses the CLI default. */
@@ -792,6 +797,11 @@ export interface HostedCreateParams {
    */
   args?: string[];
   title?: string;
+  /**
+   * codex-appserver only：接管一条已有的 codex 线程（例如 Codex 桌面 app 建的），
+   * 直接 thread/resume 续聊而不是新建线程。线程必须在本机 ~/.codex/sessions 里。
+   */
+  threadId?: string;
 }
 
 /** 新建托管会话时可选的模型与思考程度，取自本机 CLI。 */
