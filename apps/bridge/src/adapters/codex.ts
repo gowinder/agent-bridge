@@ -44,6 +44,12 @@ const DISCOVERY_WAIT_MS = 15_000;
 const SEND_TIMEOUT_MS = 180_000;
 const COMPACT_TIMEOUT_MS = 120_000;
 const UNSET_CLIENT_ID = "00000000-0000-0000-0000-000000000000";
+/**
+ * 桌面刚启动（或重启）时 `ipc.sock` 还是上一次留下的旧文件：connect 会先吃 ECONNREFUSED，
+ * 等它把 server 重新绑上才好。这几毫秒到几秒的窗口重试几次就能盖住。
+ */
+const IPC_CONNECT_WAIT_MS = 3_000;
+const IPC_CONNECT_RETRY_MS = 250;
 
 /** Wire versions expected by Codex desktop IPC handlers (from ChatGPT app bundle). */
 const IPC_METHOD_VERSIONS: Record<string, number> = {
@@ -489,10 +495,50 @@ export class CodexAdapter implements SessionAdapter {
   private busyTail = new Map<string, BusyTail>();
   /** 已确认提交、但客户端还没回复的压缩请求；跟随 message.list 一起上报。 */
   private compactStates = new Map<string, { pending: boolean; error?: string }>();
+  /**
+   * 最近一次「连不上 IPC」的时间。socket 文件可能是上一条命留下的死文件（ChatGPT 桌面
+   * 更新后甚至整条通道都没了），只看 existsSync 会一直告诉用户「可以发」，点下去才报错。
+   */
+  private ipcFailedAt = 0;
+  private static readonly IPC_BACKOFF_MS = 30_000;
+
+  private ipcProbedAt = 0;
+
+  private ipcUsable(): boolean {
+    this.probeIpc();
+    return existsSync(IPC_SOCKET) && Date.now() - this.ipcFailedAt > CodexAdapter.IPC_BACKOFF_MS;
+  }
+
+  /**
+   * 只靠 `ipcFailedAt` 的话，用户要先把消息发失败一次才看到「不可发送」。这里在列会话时
+   * 顺手探一下（一分钟最多一次），死 socket 也能在列表上直接标出来。
+   */
+  private probeIpc(): void {
+    if (Date.now() - this.ipcProbedAt < 60_000) return;
+    this.ipcProbedAt = Date.now();
+    if (!existsSync(IPC_SOCKET)) {
+      this.ipcFailedAt = Date.now();
+      return;
+    }
+    void IpcClient.connect().then(
+      (client) => {
+        this.ipcFailedAt = 0;
+        client.close();
+      },
+      () => {
+        this.ipcFailedAt = Date.now();
+      },
+    );
+  }
+
+  private ipcBlockedReason(): string {
+    if (!existsSync(IPC_SOCKET)) return "Codex 桌面未运行（未找到本地 IPC 通道）";
+    return "连不上 Codex 桌面的线程 IPC（可能只剩旧 socket 文件，或这个版本的桌面已移除该通道）；重启桌面再试";
+  }
 
   app(): AppInfo {
     const dbPath = this.catalog() ? CATALOG_PATH : this.stateDb();
-    const ipc = existsSync(IPC_SOCKET);
+    const ipc = this.ipcUsable();
     return {
       appId: this.key,
       provider: "openai",
@@ -533,7 +579,7 @@ export class CodexAdapter implements SessionAdapter {
   }
 
   sessions(): SessionSummary[] {
-    const ipc = existsSync(IPC_SOCKET);
+    const ipc = this.ipcUsable();
     const now = Date.now();
     return this.threads().map((thread) => {
       // Only threads touched recently can be mid-turn; older rollouts are not worth the read.
@@ -550,7 +596,7 @@ export class CodexAdapter implements SessionAdapter {
         live: false,
         ...(recent && this.threadBusy(thread) ? { busy: true } : {}),
         canSend: ipc,
-        sendBlockedReason: ipc ? undefined : "Codex 桌面未运行（未找到本地 IPC 通道）",
+        sendBlockedReason: ipc ? undefined : this.ipcBlockedReason(),
         canCompact: ipc,
       };
     });
@@ -860,6 +906,7 @@ export class CodexAdapter implements SessionAdapter {
           detail: "已提交到 Codex 桌面，仍在执行；稍后刷新查看回复",
         };
       }
+      this.ipcFailedAt = 0;
       if (early["resultType"] !== "success") {
         throw new RpcError(
           "adapter_unavailable",
@@ -951,15 +998,28 @@ export class CodexAdapter implements SessionAdapter {
   }
 
   private async desktopClient(): Promise<IpcClient> {
-    if (!existsSync(IPC_SOCKET)) {
-      throw new RpcError("adapter_unavailable", "Codex 桌面未运行（未找到本地 IPC 通道）");
+    const deadline = Date.now() + IPC_CONNECT_WAIT_MS;
+    let refused = false;
+    for (;;) {
+      if (existsSync(IPC_SOCKET)) {
+        try {
+          return await IpcClient.connect();
+        } catch (error) {
+          // 只有「连不上」值得等（桌面正在启动）；其它错误（超时、协议）原样往上抛。
+          const code = (error as NodeJS.ErrnoException | null)?.code;
+          if (code !== "ECONNREFUSED" && code !== "ENOENT") throw error;
+          refused = refused || code === "ECONNREFUSED";
+        }
+      }
+      if (Date.now() >= deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, IPC_CONNECT_RETRY_MS));
     }
-    return IpcClient.connect().catch(() => {
-      throw new RpcError(
-        "adapter_unavailable",
-        "无法连接 Codex 本地 IPC 通道（Codex 桌面可能未在运行）",
-      );
-    });
+    // 文件还在但没人接：这是上一次运行留下的 socket，桌面没重新绑定（或根本不是它写的）。
+    this.ipcFailedAt = Date.now();
+    const reason = refused
+      ? "只剩上次留下的 socket 文件，桌面没重新连上；重启 ChatGPT 桌面后再试"
+      : "Codex 桌面可能未在运行；先启动 ChatGPT 桌面，再发一次";
+    throw new RpcError("adapter_unavailable", `连不上 Codex 本地 IPC 通道（${reason}）`);
   }
 
   /** 找到承接线程的桌面客户端；找不到时给出让用户下一步怎么做的提示。 */
