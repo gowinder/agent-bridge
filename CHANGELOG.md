@@ -9,6 +9,23 @@
 - 先开 Bridge、后开 ChatGPT 桌面时给 Codex 线程发消息会报「连不上 IPC 通道」：桌面刚启动时
   `ipc.sock` 还是上一轮的旧文件，连接先被拒绝。现在会重试约 3 秒把启动窗口盖住，失败时也会
   说清楚是「只剩旧 socket 文件」还是「桌面没在运行」。
+- 这个版本的 ChatGPT 桌面已移除 `ipc.sock` 线程通道：列会话时会探一次真实连接，探不通就把
+  Codex 线程标成不可发送并写明原因，不再点下去才在发送状态里报错。
+
+## [0.11.11-rc.1] - 2026-11-26
+
+### Added
+
+- 新增第三个托管引擎「Codex · App Server」：走 OpenAI 官方 `codex app-server` 协议
+  （stdio 上的 JSON-RPC），Bridge 自己起进程、新建 Codex 线程，流式回复、工具活动与
+  协议内审批都接进网页；桌面 app 不用开着。每会话一条线程，线程记在 `~/.codex/sessions`，
+  桌面 app 里可搜索、可续；Bridge 重启或空闲停进程后按 `thread/resume` 续同一条线程。
+  新建时可以填一个已有的 `threadId` 接管（例如桌面 app 建的线程）。默认沙箱
+  `workspace-write`、审批 `on-request`，需要升级权限时在网页里批/拒；停止回合走
+  `turn/interrupt`，不硬杀进程。
+- README 安装一节末尾加了 Windows / Linux 需求投票入口：桌面 app 目前只支持 macOS，
+  想要其他平台可以去 issue #253 投票。
+
 
 ## [0.11.10-rc.1] - 2026-11-23
 

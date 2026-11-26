@@ -842,6 +842,7 @@ export class DeviceSession implements ChannelSession {
         }
         const title = stringParam(params, "title");
         const agent = stringParam(params, "agent");
+        const threadId = stringParam(params, "threadId");
         const model = stringParam(params, "model");
         const effort = stringParam(params, "effort");
         const subagentModel = stringParam(params, "subagentModel");
@@ -853,7 +854,13 @@ export class DeviceSession implements ChannelSession {
           : [];
         return this.options.adapters.hostedCreate({
           path,
-          ...(agent === "pi" ? { agent: "pi" as const } : {}),
+          ...(agent === "pi"
+            ? { agent: "pi" as const }
+            : agent === "codex-appserver"
+              ? { agent: "codex-appserver" as const }
+              : {}),
+          // 接管已有 codex 线程：只对 codex 引擎有效，其它引擎忽略这一项。
+          ...(agent === "codex-appserver" && threadId ? { threadId } : {}),
           ...(permissionMode ? { permissionMode: permissionMode as HostedPermissionMode } : {}),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
