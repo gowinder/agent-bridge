@@ -5492,6 +5492,72 @@ interface ChatState {
 }
 
 /**
+ * 接管前的确认页：讲清楚「谁在持有这条线程」和「桌面那边会看到什么」，
+ * 再给一条官方文档。用户反馈接管后桌面显示「对话已被接管」，得先说明白。
+ */
+function takeoverSheet(session: SessionSummary, onConfirm: () => void): void {
+  const mask = el("div", { className: "sheet-mask", attrs: { role: "presentation" } });
+  const finish = (): void => {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      finish();
+    }
+  };
+  const cancel = button(tr("取消"), finish, "btn ghost");
+  const confirm = button(
+    tr("确认接管"),
+    () => {
+      finish();
+      onConfirm();
+    },
+    "btn primary",
+  );
+  mask.append(
+    el(
+      "aside",
+      {
+        className: "sheet",
+        attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("用 App Server 接管这条线程") },
+      },
+      [
+        el("header", { className: "sheet-head" }, [
+          el("h2", { className: "sheet-title", text: tr("用 App Server 接管这条线程") }),
+        ]),
+        el("p", {
+          className: "sheet-note",
+          text: tr("接管后由这台 Mac 上的 Bridge 起一个 codex app-server 进程，接着这条线程跑：网页里能发消息、看回复，历史从 codex 自己的记录里读出来。"),
+        }),
+        el("p", {
+          className: "sheet-note",
+          text: tr("同一条线程同一时刻只能有一个进程持有：接管之后 ChatGPT 桌面会显示「对话已被接管」，要回桌面接着用，先在网页里停掉这个会话；反过来，桌面正在跑这条线程时，这边也发不进去。"),
+        }),
+        el("p", {
+          className: "sheet-note",
+          text: tr("接管不改桌面里的线程本身，历史、标题都还在，只是换一个客户端来驱动它。"),
+        }),
+        el("p", { className: "sheet-note" }, [
+          el("a", {
+            attrs: { href: "https://developers.openai.com/codex/app-server", target: "_blank", rel: "noopener noreferrer" },
+            text: tr("官方说明：Codex App Server"),
+          }),
+        ]),
+        el("footer", { className: "sheet-foot" }, [el("div", { className: "actions" }, [cancel, confirm])]),
+      ],
+    ),
+  );
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask) finish();
+  });
+  document.body.append(mask);
+  confirm.focus();
+}
+
+/**
  * Codex 桌面线程发不出去（这个版本的 ChatGPT 桌面已经移除本地 IPC）时，用官方 app-server
  * 接管同一条线程：带上 threadId 去工程页预填新建表单，建完由 Bridge 自己驱动这一条线程。
  */
@@ -5974,7 +6040,7 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
           }),
           (() => {
             const node = button(tr("用 App Server 接管这个线程"), () => {}, "btn small");
-            node.addEventListener("click", () => void takeoverCodexThread(summary, node));
+            node.addEventListener("click", () => takeoverSheet(summary, () => void takeoverCodexThread(summary, node)));
             return node;
           })(),
         ]);

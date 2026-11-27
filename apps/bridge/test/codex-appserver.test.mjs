@@ -390,10 +390,89 @@ test("adopt resumes a thread given at creation, and rejects one outside the allo
   const resume = await waitWrite(child, "thread/resume");
   assert.equal(resume.params.threadId, THREAD);
   child.emitJson({ id: resume.id, result: { thread: { id: THREAD, cwd: realpathSync(h.repo) } } });
+  await reply(child, "thread/turns/list", { data: [], nextCursor: null });
   // 线程 id 不合法直接拒绝，别把任意字符串送进 thread/resume。
   assert.throws(
     () => h.manager.create({ path: h.repo, agent: "codex-appserver", threadId: "../../etc/passwd" }),
     /线程 id 不合法/,
   );
   assert.equal(h.manager.session(session.sessionId).hostedAgent, "codex-appserver");
+});
+
+test("taking over a thread imports codex's own history into the transcript", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "codex-appserver", threadId: THREAD });
+  const child = h.spawns[0].child;
+  const init = await waitWrite(child, "initialize");
+  child.emitJson({ id: init.id, result: {} });
+  await waitWrite(child, "initialized");
+  const resume = await waitWrite(child, "thread/resume");
+  child.emitJson({ id: resume.id, result: { thread: { id: THREAD, cwd: realpathSync(h.repo) } } });
+  const listed = await waitWrite(child, "thread/turns/list");
+  assert.equal(listed.params.itemsView, "full");
+  assert.equal(listed.params.sortDirection, "asc");
+  child.emitJson({
+    id: listed.id,
+    result: {
+      data: [
+        {
+          id: "turn-1",
+          status: "completed",
+          items: [
+            { type: "userMessage", id: "u1", content: [{ type: "text", text: "接管前的提问" }], startedAtMs: 1_700_000_000_000 },
+            { type: "reasoning", id: "r1", summary: ["想一想"], content: [] },
+            { type: "agentMessage", id: "a1", text: "接管前的回答", startedAtMs: 1_700_000_001_000 },
+            { type: "commandExecution", id: "c1", command: "ls -la", exitCode: 0, startedAtMs: 1_700_000_002_000 },
+          ],
+        },
+      ],
+      nextCursor: null,
+    },
+  });
+  const messages = await waitFor(
+    () => {
+      const list = h.manager.messagesFor(session.sessionId, { limit: 50 }).messages;
+      return list.length >= 3 ? list : null;
+    },
+    "导入历史",
+  );
+  assert.deepEqual(
+    messages.map((item) => [item.role, item.blocks.map((block) => block.type)]),
+    [
+      ["user", ["text"]],
+      ["assistant", ["text"]],
+      ["assistant", ["tool"]],
+    ],
+  );
+  assert.equal(messages[0].blocks[0].text, "接管前的提问");
+  assert.equal(messages[1].blocks[0].text, "接管前的回答");
+  assert.match(messages[2].blocks[0].text, /^Bash ls -la/);
+});
+
+test("context usage uses the last turn snapshot, not the cumulative total", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "codex-appserver" });
+  const child = h.spawns[0].child;
+  await handshake(child);
+  child.emitJson({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId: THREAD,
+      turnId: TURN,
+      tokenUsage: {
+        total: { totalTokens: 28_000_000, inputTokens: 27_500_000, cachedInputTokens: 27_000_000, cacheWriteInputTokens: 0, outputTokens: 500_000, reasoningOutputTokens: 0 },
+        last: { totalTokens: 13_500, inputTokens: 12_000, cachedInputTokens: 10_000, cacheWriteInputTokens: 0, outputTokens: 1_500, reasoningOutputTokens: 0 },
+        modelContextWindow: 475_000,
+      },
+    },
+  });
+  const context = await waitFor(
+    () => h.manager.messagesFor(session.sessionId, { limit: 10 }).context,
+    "上下文用量",
+  );
+  assert.equal(context.usedTokens, 12_000);
+  assert.equal(context.windowTokens, 475_000);
+  assert.equal(context.windowEstimated, undefined);
 });
