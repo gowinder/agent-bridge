@@ -1,6 +1,6 @@
 {
   "name": "agent-bridge",
-  "version": "0.11.11-rc.1",
+  "version": "0.11.12-rc.1",
   "private": true,
   "type": "module",
   "workspaces": [
