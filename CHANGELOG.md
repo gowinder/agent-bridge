@@ -6,6 +6,13 @@
 
 ### Fixed
 
+- Codex 托管会话（含 App Server 接管的线程）生成的图片打不开：`imageGeneration` / `imageView`
+  这些 item 之前直接丢掉，网页上点路径又因为图片在 `~/.codex/generated_images` 里被判成越界
+  （「没有这个文件」）。现在这些 item 按 markdown 图片进转录，网页里显示缩略图、点开能看大图、
+  下载原文件；`fs.read` 单独放行这一个目录下的图片文件，别的路径照旧拒绝。
+
+### Fixed
+
 - 用 App Server 接管 Codex 桌面线程后会看不到历史：现在接管时从 `thread/turns/list` 把 codex
   自己记的回合读回来写进 Bridge 转录，用户提问、助手回复、工具活动都在，翻页加载历史也正常。
 - Codex 托管会话的上下文用量显示成 100%（例如 28.0M / 475k）：之前拿整条线程的累计用量

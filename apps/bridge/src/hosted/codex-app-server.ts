@@ -358,6 +358,8 @@ export class CodexAppServer {
       if (text) this.handlers.assistant([{ type: "text", text }]);
       return;
     }
+    const image = imageMarkdownOf(item);
+    if (image) this.handlers.assistant([{ type: "text", text: image }]);
     const block = toolBlockOf(item);
     if (block) this.handlers.assistant([block]);
   }
@@ -550,10 +552,37 @@ function historyOfTurn(turn: unknown): CodexHistoryMessage[] {
       if (text) out.push({ role: "assistant", blocks: [{ type: "text", text }], createdAt: at });
       continue;
     }
+    const image = imageMarkdownOf(item);
+    if (image) out.push({ role: "assistant", blocks: [{ type: "text", text: image }], createdAt: at });
     const block = toolBlockOf(item);
     if (block) out.push({ role: "assistant", blocks: [block], createdAt: at });
   }
   return out;
+}
+
+/**
+ * codex 生成的图片：`imageGeneration` 带 `savedPath`（图片落在 ~/.codex/generated_images），
+ * `imageView` 带 `path`。网页按 markdown 图片渲染（缩略图 + 点开预览 + 下载原文件）。
+ */
+function imageMarkdownOf(item: Record<string, unknown>): string {
+  const type = textOf(item["type"]);
+  if (type !== "imageGeneration" && type !== "imageView") return "";
+  const raw = textOf(item["savedPath"]) || textOf(item["result"]) || textOf(item["path"]);
+  if (!raw) return "";
+  let path = raw;
+  if (/^file:\/\//i.test(path)) {
+    try {
+      path = decodeURIComponent(new URL(path).pathname);
+    } catch {
+      return "";
+    }
+  }
+  if (!/^\/(?:[^\0]+)\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(path)) return "";
+  const label = path.split("/").pop() ?? "image";
+  void label;
+  // 路径里有空格或括号时用尖括号包起来，markdown 才不会截断。
+  const target = /[\s()<>]/.test(path) ? `<${path}>` : path;
+  return `![](${target})`;
 }
 
 /** 用户输入的 content 数组里只取文本；图片、音频这类历史里不展开。 */
