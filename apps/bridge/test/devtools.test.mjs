@@ -103,3 +103,30 @@ test("binary download still needs the files capability", async (t) => {
     (error) => error.code === "unsupported",
   );
 });
+
+test("codex generated images are readable even though they live outside the project", async (t) => {
+  const h = harness();
+  t.after(() => rmSync(h.dir, { recursive: true, force: true }));
+  const codexHome = join(h.dir, "codex-home");
+  const images = join(codexHome, "generated_images", "thread-1");
+  mkdirSync(images, { recursive: true });
+  const png = Buffer.from("89504e470d0a1a0a0000000d49484452", "hex");
+  writeFileSync(join(images, "shot.png"), png);
+  writeFileSync(join(images, "notes.txt"), "not an image");
+  const previous = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous;
+  });
+  const file = await h.devtools.readFile("s1", h.link, join(images, "shot.png"));
+  assert.equal(file.mime, "image/png");
+  assert.equal(Buffer.from(file.dataBase64, "base64").toString("hex"), png.toString("hex"));
+  // 只放行图片：同一个目录下的文本、以及 generated_images 之外的路径照旧拦住。
+  await assert.rejects(() => h.devtools.readFile("s1", h.link, join(images, "notes.txt")));
+  writeFileSync(join(codexHome, "auth.json"), "{}");
+  await assert.rejects(
+    () => h.devtools.readFile("s1", h.link, join(codexHome, "auth.json")),
+    (error) => error.code === "unauthorized",
+  );
+});

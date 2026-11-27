@@ -476,3 +476,33 @@ test("context usage uses the last turn snapshot, not the cumulative total", asyn
   assert.equal(context.windowTokens, 475_000);
   assert.equal(context.windowEstimated, undefined);
 });
+
+test("generated images render as markdown so the web can preview and download them", async (t) => {
+  const h = harness();
+  t.after(() => h.manager.dispose());
+  const session = h.manager.create({ path: h.repo, agent: "codex-appserver" });
+  const child = h.spawns[0].child;
+  await handshake(child);
+  const sending = h.manager.send(session.sessionId, "画一张图");
+  await reply(child, "turn/start", { turn: { id: TURN } });
+  await sending;
+  const image = "/Users/example/.codex/generated_images/t1/exec-abc.png";
+  child.emitJson({
+    method: "item/completed",
+    params: { threadId: THREAD, item: { type: "imageGeneration", id: "img1", status: "completed", savedPath: image } },
+  });
+  child.emitJson({
+    method: "item/completed",
+    params: { threadId: THREAD, item: { type: "imageView", id: "img2", path: `file://${image}` } },
+  });
+  const messages = await waitFor(
+    () => {
+      const list = h.manager.messagesFor(session.sessionId, { limit: 50 }).messages;
+      const images = list.filter((item) => item.blocks.some((block) => block.text?.startsWith("![](")));
+      return images.length >= 2 ? images : null;
+    },
+    "图片消息",
+  );
+  assert.equal(messages[0].blocks[0].text, `![](${image})`);
+  child.emitJson({ method: "turn/completed", params: { threadId: THREAD, turn: { id: TURN, status: "completed" } } });
+});
