@@ -16,7 +16,8 @@
  *      identity.json 同时承载设备密钥与重连令牌（spike 拆成 device + identity 两个文件）。
  */
 
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
@@ -43,6 +44,8 @@ export function statePaths() {
     dir,
     identity: join(dir, "identity.json"),
     registry: join(dir, "registry.json"),
+    // 登记册的跨进程锁（lib/lock.mjs）：与 registry.json 同目录。
+    registryLock: join(dir, "registry.json.lock"),
     profile: join(dir, "profile.json"),
     confirm: join(dir, "confirm"),
   };
@@ -65,6 +68,15 @@ export async function writeSecretJson(path, value) {
 /** registry/profile 不含凭据，但同处 0700 目录；同样按 0600 写，少一条要判断的规则。 */
 export async function writeStateJson(path, value) {
   await writeSecretJson(path, value);
+}
+
+/** 原子写：先写同目录临时文件（0600），再 rename 覆盖。读方永远看不到半截 JSON。 */
+export async function writeStateJsonAtomic(path, value) {
+  const tmp = `${path}.tmp-${process.pid}-${randomUUID().slice(0, 8)}`;
+  await writeSecretJson(tmp, value);
+  await rename(tmp, path);
+  // rename 保留了临时文件的 0600，但显式再收紧一次，避免将来改动 writeSecretJson 时漏掉。
+  await chmod(path, 0o600);
 }
 
 export async function readJson(path) {

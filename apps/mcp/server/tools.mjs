@@ -22,15 +22,15 @@ import {
   describeEntry,
   findByKey,
   findBySessionId,
-  loadRegistry,
   findAcceptedSend,
   messageDigest,
   normalizePurpose,
-  saveRegistry,
+  readRegistry,
   sessionKey,
   setArchived,
   setInFlight,
   touchSession,
+  updateRegistry,
   upsertSession,
 } from "./lib/registry.mjs";
 import {
@@ -297,6 +297,13 @@ export const TOOL_NAMES = TOOL_DEFINITIONS.map((tool) => tool.name);
 
 // ---------------------------------------------------------------- 工具实现
 
+/**
+ * 登记册并发约定（lost-update 修复，见 lib/registry.mjs 顶部注释）：
+ *   - 只读快照用 readRegistry()（锁内 load，不写）；
+ *   - 登记册变更用 updateRegistry()（锁内 load 最新 → 纯变更 → save）；
+ *   - bridge 网络调用一律在锁外，网络之后必须重新 load，绝不保存网络之前的快照。
+ */
+
 async function bridgeStatus() {
   const identity = await loadIdentity();
   const { profile } = await loadProfile();
@@ -319,7 +326,7 @@ async function bridgeStatus() {
   }));
   const self = devices.find((device) => device.self) ?? null;
 
-  const { registry } = await loadRegistry();
+  const { registry } = await readRegistry();
   const active = registry.sessions.filter((entry) => !entry.archived);
 
   return {
@@ -352,8 +359,9 @@ async function sessionList(args) {
   await ensurePaired();
   const includeArchived = args?.includeArchived === true;
   const link = await getLink();
-  const { registry } = await loadRegistry();
   const list = await link.call("session.list", { includeArchived: true }, { timeoutMs: 60_000 });
+  // 只读快照在锁内取、取完即放；网络调用不持锁。
+  const { registry } = await readRegistry();
   const byId = new Map((list?.sessions ?? []).map((session) => [session.sessionId, session]));
   const entries = registry.sessions
     .filter((entry) => includeArchived || !entry.archived)
@@ -411,18 +419,18 @@ async function sessionOpen(args) {
   }
 
   const key = sessionKey({ engine, cwd, purpose });
-  const { registry } = await loadRegistry();
   const warnings = [];
   const link = await getLink();
 
-  const existing = findByKey(registry, key);
+  // (a) 锁内只读一次快照做「命中」判断；不持锁做任何 bridge 调用。
+  const { registry: snapshot } = await readRegistry();
+  const existing = findByKey(snapshot, key);
   if (existing) {
     const session = await findSession(link, existing.sessionId).catch((error) => {
       warnings.push(`校验既有会话失败：${error.message}`);
       return null;
     });
     if (session && session.archived !== true) {
-      touchSession(registry, existing.sessionId);
       let tag = null;
       try {
         tag = await ensureTag(link, MCP_TAG_NAME, MCP_TAG_COLOR);
@@ -430,13 +438,31 @@ async function sessionOpen(args) {
       } catch (error) {
         warnings.push(`补打 MCP 标签失败（会话可继续使用）：${error.message}`);
       }
-      await saveRegistry(registry);
+      // (c) 网络调用结束后重新 load 最新登记册，只把 lastUsedAt 这一个变更应用到最新状态上。
+      const { result: entry } = await updateRegistry((registry) => {
+        const target = findByKey(registry, key) ?? findBySessionId(registry, existing.sessionId);
+        if (target) {
+          touchSession(registry, target.sessionId);
+          return describeEntry(findBySessionId(registry, target.sessionId) ?? target);
+        }
+        // 极端情况：期间登记册被改掉了；会话还活着就重新登记，不静默丢线。
+        return describeEntry(
+          upsertSession(registry, {
+            key,
+            engine,
+            cwd,
+            purpose,
+            sessionId: session.sessionId,
+            title: session.title ?? existing.title,
+          }),
+        );
+      });
       return {
         ok: true,
         reused: true,
         reason: "registry_hit",
         session: summarize(session),
-        registry: describeEntry(findBySessionId(registry, existing.sessionId) ?? existing),
+        registry: entry,
         tag: tag?.tag.name ?? null,
         warnings,
       };
@@ -493,29 +519,32 @@ async function sessionOpen(args) {
     warnings.push(`MCP 标签没打上（会话已创建，可重试 session_open 补齐）：${error.message}`);
   }
 
-  const entry = upsertSession(registry, {
-    key,
-    engine,
-    cwd,
-    purpose,
-    sessionId: session.sessionId,
-    title: session.title ?? title,
+  // (c) 登记新会话：锁内重新 load 最新登记册后整体应用（不用网络调用前的快照）。
+  const { result: entry } = await updateRegistry((registry) => {
+    const saved = upsertSession(registry, {
+      key,
+      engine,
+      cwd,
+      purpose,
+      sessionId: session.sessionId,
+      title: session.title ?? title,
+    });
+    appendAudit(registry, {
+      action: "session_open",
+      sessionId: session.sessionId,
+      engine,
+      cwd,
+      purpose: normalizePurpose(purpose),
+    });
+    return describeEntry(saved);
   });
-  appendAudit(registry, {
-    action: "session_open",
-    sessionId: session.sessionId,
-    engine,
-    cwd,
-    purpose: normalizePurpose(purpose),
-  });
-  await saveRegistry(registry);
 
   return {
     ok: true,
     reused: false,
     reason: existing ? "replaced_missing_or_archived" : "created",
     session: summarize(session),
-    registry: describeEntry(entry),
+    registry: entry,
     tag: tag.tag.name,
     tags: tagged?.map((item) => item.name) ?? null,
     createParams,
@@ -532,7 +561,7 @@ async function sessionRead(args) {
     throw new ToolError("invalid_params", "before 必须是字符串游标。");
   }
   const { profile } = await loadProfile();
-  const { registry } = await loadRegistry();
+  const { registry } = await readRegistry();
   const entry = requireRegistryEntry(registry, sessionId);
   const link = await getLink();
 
@@ -541,18 +570,23 @@ async function sessionRead(args) {
   const summary = await findSession(link, sessionId).catch(() => null);
   const busy = page?.busy === true || summary?.busy === true;
 
-  touchSession(registry, sessionId);
-  if (!busy) setInFlight(registry, sessionId, null);
-  await saveRegistry(registry);
-
   const messages = await messageViews(link, sessionId, page?.messages ?? []);
   // pi 的结构化提问（ask/next-step pending）在 bridge 侧会一直算 busy，所以
   // needsDecision 为 true 时也要标 needsUser；busy 时不跑问号启发式，避免半截输出误报。
   const detection = detectNeedsUser(page?.messages ?? [], summary, { allowTextHeuristic: !busy });
+
+  // (c) 网络 I/O 全部结束后，锁内重新 load 最新登记册再落账（不保存前面的快照）。
+  const { result: registryEntry } = await updateRegistry((registry) => {
+    if (!findBySessionId(registry, sessionId)) return null;
+    touchSession(registry, sessionId);
+    if (!busy) setInFlight(registry, sessionId, null);
+    return describeEntry(findBySessionId(registry, sessionId));
+  });
+
   return {
     ok: true,
     sessionId,
-    title: summary?.title ?? entry.title,
+    title: summary?.title ?? registryEntry?.title ?? entry.title,
     busy,
     needsDecision: summary?.needsDecision === true,
     messages,
@@ -574,7 +608,7 @@ async function sessionWait(args) {
   const timeoutMs = optionalInt(args, "timeoutMs", { min: 1000, max: MAX_WAIT_MS, fallback: DEFAULT_WAIT_MS });
   const limit = optionalInt(args, "limit", { min: 1, max: MAX_READ_LIMIT, fallback: 50 });
   const { profile } = await loadProfile();
-  const { registry } = await loadRegistry();
+  const { registry } = await readRegistry();
   requireRegistryEntry(registry, sessionId);
   const link = await getLink();
 
@@ -609,9 +643,13 @@ async function sessionWait(args) {
   const messages = await messageViews(link, sessionId, fresh);
   const detection = detectNeedsUser(page?.messages ?? [], summary, { allowTextHeuristic: !busy });
 
-  touchSession(registry, sessionId);
-  if (!busy) setInFlight(registry, sessionId, null);
-  await saveRegistry(registry);
+  // (c) 轮询可能跑了几分钟：这里必须重新 load，不能用轮询开始前的快照去盖写。
+  await updateRegistry((registry) => {
+    if (!findBySessionId(registry, sessionId)) return null;
+    touchSession(registry, sessionId);
+    if (!busy) setInFlight(registry, sessionId, null);
+    return null;
+  });
 
   return {
     ok: true,
@@ -654,7 +692,7 @@ async function sessionSend(args) {
   }
   const useSubagent = args.useSubagent !== false;
   const { profile } = await loadProfile();
-  const { registry } = await loadRegistry();
+  const { registry } = await readRegistry();
   const entry = requireRegistryEntry(registry, sessionId);
   const operationId = args?.operationId?.trim() || randomUUID();
 
@@ -689,7 +727,8 @@ async function sessionSend(args) {
       },
     );
   }
-  if (entry.inFlight) setInFlight(registry, sessionId, null);
+  // 陈旧的 inFlight 不在这里单独写：下面 (c) 会用本回合的 operationId 直接盖掉，
+  // 这样网络调用失败时也不会凭空改登记册。
 
   const suffix = useSubagent ? String(profile.promptSuffix ?? "").trim() : "";
   const body = text.replace(/\s+$/, "");
@@ -700,20 +739,25 @@ async function sessionSend(args) {
     operationId,
   });
 
-  setInFlight(registry, sessionId, { operationId, at: new Date().toISOString() });
-  appendAudit(registry, {
-    action: "session_send",
-    sessionId,
-    operationId,
-    messageSha256: messageDigest(finalText),
-    chars: finalText.length,
-    promptSuffixApplied: Boolean(suffix) && finalText !== body,
-    useSubagent,
-    accepted: ack?.accepted === true,
-    delivered: ack?.delivered === true,
+  const digest = messageDigest(finalText);
+  // (c) 发送已在锁外完成；重新 load 最新登记册，在其上置 inFlight + 追加审计。
+  await updateRegistry((registry) => {
+    if (!findBySessionId(registry, sessionId)) return null;
+    setInFlight(registry, sessionId, { operationId, at: new Date().toISOString() });
+    appendAudit(registry, {
+      action: "session_send",
+      sessionId,
+      operationId,
+      messageSha256: digest,
+      chars: finalText.length,
+      promptSuffixApplied: Boolean(suffix) && finalText !== body,
+      useSubagent,
+      accepted: ack?.accepted === true,
+      delivered: ack?.delivered === true,
+    });
+    touchSession(registry, sessionId);
+    return null;
   });
-  touchSession(registry, sessionId);
-  await saveRegistry(registry);
 
   return {
     ok: true,
@@ -725,7 +769,7 @@ async function sessionSend(args) {
     promptSuffixApplied: Boolean(suffix) && finalText !== body,
     textSent: finalText,
     audit: {
-      messageSha256: messageDigest(finalText),
+      messageSha256: digest,
       chars: finalText.length,
       note: "登记册只存消息哈希与元数据，不存全文。",
     },
@@ -736,7 +780,7 @@ async function sessionStop(args) {
   rejectUnknown(args, ["sessionId"]);
   await ensurePaired();
   const sessionId = requireString(args, "sessionId", { max: 200 });
-  const { registry } = await loadRegistry();
+  const { registry } = await readRegistry();
   requireRegistryEntry(registry, sessionId);
   const link = await getLink();
 
@@ -744,10 +788,14 @@ async function sessionStop(args) {
     timeoutMs: 60_000,
     operationId: randomUUID(),
   });
-  setInFlight(registry, sessionId, null);
-  touchSession(registry, sessionId);
-  appendAudit(registry, { action: "session_stop", sessionId, stopped: result?.stopped === true });
-  await saveRegistry(registry);
+  // (c) 停进程成功后再落账（锁内重新 load）。
+  await updateRegistry((registry) => {
+    if (!findBySessionId(registry, sessionId)) return null;
+    setInFlight(registry, sessionId, null);
+    touchSession(registry, sessionId);
+    appendAudit(registry, { action: "session_stop", sessionId, stopped: result?.stopped === true });
+    return null;
+  });
 
   return {
     ok: true,
@@ -763,7 +811,7 @@ async function sessionArchive(args) {
   await ensurePaired();
   const sessionId = requireString(args, "sessionId", { max: 200 });
   const archived = args?.archived !== false;
-  const { registry } = await loadRegistry();
+  const { registry } = await readRegistry();
   requireRegistryEntry(registry, sessionId);
   const link = await getLink();
 
@@ -771,16 +819,20 @@ async function sessionArchive(args) {
     timeoutMs: 60_000,
     operationId: randomUUID(),
   });
-  setArchived(registry, sessionId, archived);
-  appendAudit(registry, { action: "session_archive", sessionId, archived });
-  await saveRegistry(registry);
+  // (c) 归档已生效，锁内重新 load 最新登记册再标 archived + 审计。
+  const { result: entry } = await updateRegistry((registry) => {
+    if (!findBySessionId(registry, sessionId)) return null;
+    setArchived(registry, sessionId, archived);
+    appendAudit(registry, { action: "session_archive", sessionId, archived });
+    return describeEntry(findBySessionId(registry, sessionId));
+  });
 
   return {
     ok: true,
     sessionId,
     archived,
     session: summarize(result?.session ?? null),
-    registry: describeEntry(findBySessionId(registry, sessionId)),
+    registry: entry,
   };
 }
 
@@ -790,7 +842,6 @@ async function sessionAdopt(args) {
   const sessionId = requireString(args, "sessionId", { max: 200 });
   const purpose = requireString(args, "purpose", { max: 200 });
   const link = await getLink();
-  const { registry } = await loadRegistry();
   const warnings = [];
 
   const session = await findSession(link, sessionId);
@@ -818,23 +869,25 @@ async function sessionAdopt(args) {
     warnings.push(`MCP 标签没打上（仍会登记）：${error.message}`);
   }
 
-  const entry = upsertSession(registry, {
-    key: sessionKey({ engine, cwd, purpose }),
-    engine,
-    cwd,
-    purpose,
-    sessionId,
-    title: session.title,
-    createdAt: new Date(session.createdAt ?? Date.now()).toISOString(),
+  const { result: entry } = await updateRegistry((registry) => {
+    const saved = upsertSession(registry, {
+      key: sessionKey({ engine, cwd, purpose }),
+      engine,
+      cwd,
+      purpose,
+      sessionId,
+      title: session.title,
+      createdAt: new Date(session.createdAt ?? Date.now()).toISOString(),
+    });
+    appendAudit(registry, { action: "session_adopt", sessionId, purpose: normalizePurpose(purpose), engine, cwd });
+    return describeEntry(saved);
   });
-  appendAudit(registry, { action: "session_adopt", sessionId, purpose: normalizePurpose(purpose), engine, cwd });
-  await saveRegistry(registry);
 
   return {
     ok: true,
     adopted: true,
     session: summarize(session),
-    registry: describeEntry(entry),
+    registry: entry,
     tag: tag.tag.name,
     tags: tags?.map((item) => item.name) ?? null,
     warnings,

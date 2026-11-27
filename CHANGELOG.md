@@ -27,6 +27,36 @@
   工具）/ 未配对 `bridge_status`（结构化 `unpaired`、无崩溃）全通过，`npm publish --dry-run`
   显示新 scoped 名与 public 访问。`npm login` / `npm publish` 属于账号持有人操作，不在本次改动内。
 
+## [Unreleased]
+
+### Added
+
+- MCP server 的会话登记册加了**跳进程文件锁与事务 API**（`apps/mcp/server/lib/lock.mjs` 的
+  `acquireFileLock`、`registry.mjs` 的 `readRegistry` / `updateRegistry`、`state.mjs` 的
+  `writeStateJsonAtomic`）：每次工具调用都是短命新进程，原来「全量读 → 内存改 → 整文件写回」
+  在并发调用下会互相盖掉新条目与发送审计（registry lost-update）。现在所有 read-modify-write
+  都在 `registry.json.lock` 里做，桥调用/轮询等网络 I/O 一律放锁外，写完网络结果前在锁内**重新
+  读取最新登记册**再落账；登记册本身改为 tmp + rename 原子写。陈旧锁回收分三条通道：同机死 pid
+  立即回收、活 pid 需锁龄 >120s 且 300ms 二次确认无活动、不可解析锁走 250ms/2s 短通道，回收前
+  都比对 inode/dev，释放时只删自己 token 的锁。
+- `packages/crypto` 在 Node 侧加载 `wasm/noise.wasm` 时做 **SHA-256 完整性断言**
+  （`loadNoiseNode` 在 instantiate 之前比对钉死的哈希与字节数，不一致抛结构化
+  `WasmIntegrityError`，`code=wasm_integrity_failed`），MCP server 对这类失败给出专门提示。
+
+### Changed
+
+- MCP server 的 `profile.relayUrl` 改为严格校验：`wss://`/`https://` 任意主机，`ws://`/`http://`
+  只接受回环（localhost / 127.0.0.1 / ::1）；非法值不再入 profile，回落到默认中继并留下
+  「relayUrl 已拒绝」warning（与 `lib/pairing.mjs` 的邀请解析口径一致）。
+- `apps/mcp` 升到 **0.1.1**（`Dockerfile` 的 npm 安装版本同步），自测从 178 项扩到 239 项
+  （并发 / 锁陈旧策略 / C-1 / P-1 / 副本兼容性）。
+
+### Notes
+
+- 当前发布的 `@craftstead/crypto@0.1.1` 不含这次的加载期断言；npm 消费者要拿到 C-1 需要
+  crypto 后续发版并抬 `apps/mcp` 的依赖范围。本地重建 wasm 若与钉死的构建不同，会 fail closed，
+  改 wasm 必须同一次提交里更新常量。
+
 ## [0.11.10] - 2026-11-23
 
 ### Added
