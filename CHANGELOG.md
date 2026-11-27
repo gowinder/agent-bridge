@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.11.13-rc.1] - 2026-11-27
+
 ### Fixed
 
 - 用 App Server 接管 Codex 桌面线程后会看不到历史：现在接管时从 `thread/turns/list` 把 codex
