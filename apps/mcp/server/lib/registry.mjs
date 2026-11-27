@@ -18,7 +18,8 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { ensureStateDir, readJson, statePaths, writeStateJson } from "./state.mjs";
+import { acquireFileLock } from "./lock.mjs";
+import { ensureStateDir, readJson, statePaths, writeStateJsonAtomic } from "./state.mjs";
 
 export const REGISTRY_VERSION = 1;
 const AUDIT_LIMIT = 500;
@@ -76,8 +77,48 @@ export async function saveRegistry(registry) {
   };
   const { registry: path } = statePaths();
   await ensureStateDir();
-  await writeStateJson(path, next);
+  // 原子写：rename 前读方只会看到旧版本或新版本，不会看到半截 JSON。
+  await writeStateJsonAtomic(path, next);
   return next;
+}
+
+/*
+ * ---------------------------------------------------------------- 登记册事务
+ *
+ * 规矩（lost-update 修复，见 CHANGELOG「MCP server 的会话登记册加了跨进程文件锁与事务 API」）：
+ *   - 任何 read-modify-write 都必须在 state/registry.json.lock 这把跨进程锁里做；
+ *   - 锁内只允许纯登记册操作；网络 I/O（bridge 调用、轮询）一律放在锁外；
+ *   - 「先网络、后落账」的调用点必须分两段锁：第一段只读置判断，第二段**重新 load 最新**
+ *     再应用结果——绝不保存网络调用之前加载的快照。
+ */
+
+/** 读一致快照（锁内 load，不写回）。只读工具（bridge_status / session_list / 各类闸门）用。 */
+export async function readRegistry(options) {
+  const { registryLock } = statePaths();
+  const release = await acquireFileLock(registryLock, options);
+  try {
+    return await loadRegistry();
+  } finally {
+    await release();
+  }
+}
+
+/**
+ * 单段临界区：锁内 load 最新 → mutator(registry) 做纯变更 → save → 解锁。
+ * mutator 抛错则不保存（事务不生效），锁照样释放。
+ * 返回 { registry: 落盘后的登记册, result: mutator 的返回值, warnings }。
+ */
+export async function updateRegistry(mutator, options) {
+  const { registryLock } = statePaths();
+  const release = await acquireFileLock(registryLock, options);
+  try {
+    const { registry, warnings } = await loadRegistry();
+    const result = await mutator(registry);
+    const saved = await saveRegistry(registry);
+    return { registry: saved, result, warnings };
+  } finally {
+    await release();
+  }
 }
 
 export function findByKey(registry, key) {

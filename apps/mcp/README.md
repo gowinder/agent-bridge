@@ -107,6 +107,13 @@ npm run build                              # tsc -b across all workspaces
 rustup target add wasm32-unknown-unknown
 ```
 
+⚠️ `@craftstead/crypto` pins the SHA-256 (and byte length) of the wasm it loads at
+startup (`packages/crypto/src/node.ts`), so a locally rebuilt wasm that differs
+from the pinned build fails closed with `wasm_integrity_failed` — that is by
+design (SECURITY-AUDIT-FULL C-1), not a bug. Either use the exact build the pin
+was taken from, or update `NOISE_WASM_SHA256` / `NOISE_WASM_BYTES` together with
+the wasm in the same commit (`sha256sum packages/crypto/wasm/noise.wasm`).
+
 `packages/crypto/wasm/*.wasm` is gitignored, so a fresh clone has no
 `noise.wasm` and the MCP server fails with `wasm_unavailable`. If you cannot
 build it, take the identical file from an installed Agent Bridge release and
@@ -245,6 +252,10 @@ single-use and must not be pasted into a chat.
 The directory is created `0700` and every file in it is written `0600`:
 `identity.json` (device key + reconnect token), `registry.json` (which sessions
 this device owns), `profile.json` (launch preferences), `confirm` (transient).
+`registry.json` is written atomically (temp file + rename) and every
+read-modify-write holds `registry.json.lock` (a cross-process lock, so concurrent
+tool calls cannot lose entries or audit records); the lock file is transient and
+is removed when the transaction ends.
 
 **Re-pairing** is refused while `identity.json` exists. Delete the state
 directory first, then mint a fresh invite:
@@ -562,6 +573,13 @@ hosted sessions are turned off entirely on the Mac.
 `packages/crypto/wasm/noise.wasm` is missing. Run
 `npm run build:wasm -w @craftstead/crypto`, or copy the file out of an installed
 Agent Bridge bundle (see [Install](#install)).
+
+**`wasm_integrity_failed`.**
+The wasm is present but its SHA-256 does not match the value pinned in
+`packages/crypto/src/node.ts`, so the server refuses to load it (fail closed).
+Usually a locally rebuilt or swapped wasm: use the pinned build, or update the
+constant and the wasm together in one commit. The error's `details` carry the
+expected/actual hashes.
 
 **Node is too old.**
 The relay connection needs the built-in `WebSocket`: Node 22+ has it by default,

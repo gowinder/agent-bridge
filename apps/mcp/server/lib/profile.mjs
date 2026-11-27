@@ -31,14 +31,36 @@ const REQUIRED_STRING_FIELDS = ["relayUrl"];
 
 const STRING_FIELDS = [...OPTIONAL_STRING_FIELDS, ...REQUIRED_STRING_FIELDS];
 
+/**
+ * 中继地址只允许 TLS（wss/https，任意主机）或回环明文（ws/http 到 127.0.0.1 / ::1 / localhost）。
+ * 口径与 `lib/pairing.mjs` 的邀请解析（严格版）一致：非回环明文一律拒绝，防止凭据明文出网
+ * （SECURITY-AUDIT-FULL P-1）。
+ */
+export const LOOPBACK_HOSTNAMES = Object.freeze(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+export function isLoopbackHost(hostname) {
+  return LOOPBACK_HOSTNAMES.includes(String(hostname).toLowerCase());
+}
+
 /** wss:// ↔ https:// 互转：relay.mjs 的 relaySocketUrl 按 https/http 判定，喂 wss 会被降级成 ws。 */
 export function normalizeRelayUrl(value) {
-  const url = new URL(value);
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error(`中继地址不是合法 URL：${value}`);
+  }
+  const loopback = isLoopbackHost(url.hostname);
+  const tls = url.protocol === "wss:" || url.protocol === "https:";
+  const plaintext = url.protocol === "ws:" || url.protocol === "http:";
+  if (!tls && !(plaintext && loopback)) {
+    throw new Error(
+      `中继地址只允许 wss://（任意主机）或回环 ws://（${LOOPBACK_HOSTNAMES.join(" / ")}），` +
+        `已拒绝明文/非回环地址：${value}`,
+    );
+  }
   if (url.protocol === "wss:") url.protocol = "https:";
   if (url.protocol === "ws:") url.protocol = "http:";
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error(`中继地址必须是 https/wss（或回环 http/ws）：${value}`);
-  }
   return url.origin;
 }
 
@@ -78,7 +100,8 @@ export function mergeProfile(base, raw) {
       try {
         profile.relayUrl = normalizeRelayUrl(value);
       } catch (error) {
-        warnings.push(`profile.relayUrl 非法（${error.message}），已忽略`);
+        // 非法的落盘值不会被拿去连接：relayUrl 保持 base 的已知良好值（默认 wss）。
+        warnings.push(`profile.relayUrl 已拒绝（${error.message}），改用默认中继 ${profile.relayUrl}`);
       }
       continue;
     }

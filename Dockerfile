@@ -4,6 +4,6 @@
 # unpaired, it answers with a structured "unpaired" error.
 # This file is not used by the Agent Bridge app build.
 FROM node:22-alpine
-RUN npm install -g @craftstead/agent-bridge-mcp@0.1.0
+RUN npm install -g @craftstead/agent-bridge-mcp@0.1.1
 USER node
 CMD ["agent-bridge-mcp"]

@@ -109,6 +109,17 @@ export class BridgeLink {
     try {
       noise = await loadNoiseNode();
     } catch (error) {
+      if (error?.code === "wasm_integrity_failed") {
+        throw new ToolError("wasm_integrity_failed", `Noise wasm 完整性校验失败，已拒绝连接：${error.message}`, {
+          hint:
+            "packages/crypto/wasm/noise.wasm 与 @craftstead/crypto 里钉死的 sha256 不一致（被替换或损坏）。核对来源后重装该文件，或按当前源码重跑 npm run build:wasm -w @craftstead/crypto 并同步钉死值；不要绕过校验。",
+          details: {
+            expectedSha256: error.expectedSha256,
+            actualSha256: error.actualSha256,
+            actualBytes: error.actualBytes,
+          },
+        });
+      }
       throw new ToolError("wasm_unavailable", `Noise wasm 加载失败：${error.message}`, {
         hint: "Noise wasm 由 @craftstead/crypto 提供（packages/crypto/wasm/noise.wasm，不在 git 里）：先跑 npm install，再跑 npm run build:wasm -w @craftstead/crypto（需要 rustup 与 wasm32-unknown-unknown），最后跑仓库根 npm run build。",
       });
