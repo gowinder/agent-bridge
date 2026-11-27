@@ -4041,6 +4041,25 @@ body.has-file-preview {
   box-shadow: var(--shadow);
 }
 
+/* 桌面线程发不出去时的提示条：一句原因 + 一个「接管」按钮。 */
+.composer-blocked {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.composer-blocked-text {
+  flex: 1;
+  min-width: 0;
+}
+
 .composer-row {
   display: flex;
   flex-wrap: wrap;

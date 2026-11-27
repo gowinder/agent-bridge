@@ -5491,6 +5491,41 @@ interface ChatState {
   rail?: RailState;
 }
 
+/**
+ * Codex 桌面线程发不出去（这个版本的 ChatGPT 桌面已经移除本地 IPC）时，用官方 app-server
+ * 接管同一条线程：带上 threadId 去工程页预填新建表单，建完由 Bridge 自己驱动这一条线程。
+ */
+async function takeoverCodexThread(session: SessionSummary, trigger?: HTMLButtonElement): Promise<void> {
+  const cwd = snapshot?.projects.find((item) => item.projectId === session.projectId)?.cwd;
+  if (!cwd) {
+    flashNotice(tr("找不到这条线程的工程目录，无法接管"));
+    return;
+  }
+  const threadId = session.sessionId.slice(session.sessionId.indexOf(":") + 1);
+  if (trigger) trigger.disabled = true;
+  try {
+    const result = await call<SessionGetResult>(
+      "hosted.create",
+      { path: cwd, agent: "codex-appserver", threadId, title: session.title },
+      30_000,
+    );
+    // 聊天页读缓存快照，新会话得先进快照，否则跳过去会报「找不到这个会话」。
+    if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
+      snapshot = { ...snapshot, sessions: [result.session, ...snapshot.sessions] };
+    }
+    navigate({
+      level: "chat",
+      appId: "hosted",
+      projectId: result.session.projectId,
+      sessionId: result.session.sessionId,
+    });
+  } catch (error) {
+    flashNotice(tr(`接管失败：{0}`, messageOf(error)));
+  } finally {
+    if (trigger) trigger.disabled = false;
+  }
+}
+
 async function renderChat(route: Route & { level: "chat" }, token: number): Promise<void> {
   const data = snapshot!;
   const summary = data.sessions.find((item) => item.sessionId === route.sessionId);
@@ -5928,10 +5963,27 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const restore = button("", () => setCollapsed(false, true), "composer-restore");
   restore.append(icon("pencil"), el("span", { text: tr("写消息…") }));
 
+  // Codex 桌面线程现在只能用 app-server 接管着发：把入口放在输入框上面，别只留一句报错。
+  const composerNotice =
+    canSend || summary.kind !== "codex-thread"
+      ? null
+      : el("div", { className: "composer-blocked" }, [
+          el("span", {
+            className: "composer-blocked-text",
+            text: tr("这个版本的 ChatGPT 桌面没有可用的发送通道。"),
+          }),
+          (() => {
+            const node = button(tr("用 App Server 接管这个线程"), () => {}, "btn small");
+            node.addEventListener("click", () => void takeoverCodexThread(summary, node));
+            return node;
+          })(),
+        ]);
+
   const composer = el("form", { className: "composer" }, [
     attachList,
     fileInput,
     slashMenu,
+    ...(composerNotice ? [composerNotice] : []),
     el("div", { className: "composer-row" }, [
       attachButton,
       quickButton,

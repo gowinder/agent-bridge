@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Codex 桌面线程发不出去时（这个版本的 ChatGPT 桌面已经移除本地 IPC），输入框上方出现
+  「用 App Server 接管这个线程」：点一下带着这条线程的 threadId 去新建托管会话，建完由
+  Bridge 用官方 app-server 驱动同一条线程。
+
 ### Fixed
 
 - 先开 Bridge、后开 ChatGPT 桌面时给 Codex 线程发消息会报「连不上 IPC 通道」：桌面刚启动时
