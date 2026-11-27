@@ -5,6 +5,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, readSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import {
   DEVTOOLS_CAPABILITIES,
@@ -149,6 +150,16 @@ interface ExpiryState {
 }
 
 /** 纯字符串判断 `path` 是否落在 `root` 里（两者都是已归一化的绝对路径）。 */
+/**
+ * codex 生成的图片落在 `~/.codex/generated_images/<threadId>/…`，不在工程目录里。
+ * 会话里要能直接看、能下载，所以单独认这一个目录（只认图片扩展名），别的路径照旧拒绝。
+ * 测试与自定义 `CODEX_HOME` 走同一处判定。
+ */
+function codexImagesDir(): string {
+  const home = process.env["CODEX_HOME"]?.trim() || join(homedir(), ".codex");
+  return join(home, "generated_images");
+}
+
 function isUnder(path: string, root: string): boolean {
   const base = root.replace(/\/+$/, "");
   return path === base || path.startsWith(`${base}${sep}`);
@@ -428,6 +439,56 @@ export class Devtools {
   }
 
   /**
+   * codex 生成的图片：只认 `~/.codex/generated_images` 下的图片文件，
+   * 读完还要再 realpath 一次确认没被符号链接带出去。
+   */
+  private readCodexImage(target: string, binary: boolean): FsReadResult {
+    const dir = codexImagesDir();
+    const ext = extname(target).toLowerCase();
+    const imageMime = IMAGE_MIME[ext];
+    if (!imageMime) throw new RpcError("invalid_params", "只能预览 codex 生成的图片");
+    let real: string;
+    let stats;
+    let dirReal: string;
+    try {
+      // macOS 的临时目录在 /var → /private/var 链接下面：两边都 realpath 之后再比。
+      dirReal = this.fs.realpath(dir, "files.read", { extraRoots: [dir] });
+      real = this.fs.realpath(target, "files.read", { extraRoots: [dir] });
+      stats = this.fs.stat(real, "files.read", { extraRoots: [dir] });
+    } catch {
+      throw new RpcError("not_found", "路径不存在");
+    }
+    if (!isUnder(real, dirReal)) throw new RpcError("unauthorized", "路径不在该项目目录内");
+    if (!stats.isFile()) throw new RpcError("invalid_params", "不是文件");
+    const limit = binary ? MAX_BINARY_BYTES : MAX_IMAGE_BYTES;
+    if (stats.size > limit) {
+      const mb = Math.floor(limit / (1024 * 1024));
+      throw new RpcError("invalid_params", `这张图太大，浏览器里打开不了（上限 ${mb} MB）：${target}`);
+    }
+    let fd: number;
+    try {
+      fd = this.fs.open(real, "files.read", { flags: "r", extraRoots: [dir] });
+    } catch (error) {
+      throw permissionError(error) ?? new RpcError("not_found", "路径不存在");
+    }
+    const buffer = Buffer.alloc(stats.size);
+    try {
+      readSync(fd, buffer, 0, stats.size, 0);
+    } finally {
+      closeSync(fd);
+    }
+    return {
+      path: real,
+      name: basename(real),
+      mime: imageMime,
+      size: stats.size,
+      mtime: stats.mtimeMs,
+      truncated: false,
+      dataBase64: buffer.toString("base64"),
+    };
+  }
+
+  /**
    * 索引里的 root 只做了纯字符串归一（那份索引每几秒重建一次，不能 realpath 受保护目录）；
    * 工程目录本身带符号链接时（macOS 的 `/tmp` → `/private/tmp` 最常见），realpath 后的
    * 子路径不会以原字符串开头，整棵树都会被误判成越界。真正读文件时才解析一次并缓存。
@@ -540,8 +601,11 @@ export class Devtools {
     // 自己发的附件落在 state/uploads 下：不开「文件浏览」也该能点开预览，否则只能拿到一句
     // 「文件浏览未开启」。只免这一个目录的开关，其它路径照旧先要开关，
     // 免得未开启的设备拿 fs.read 探测项目里有什么。
-    const attachment = this.looksLikeUpload(resolve(root, path));
-    if (!attachment) this.requireCapability("files");
+    const target = resolve(root, path);
+    const attachment = this.looksLikeUpload(target);
+    const codexImage = isUnder(target, codexImagesDir());
+    if (!attachment && !codexImage) this.requireCapability("files");
+    if (codexImage) return this.readCodexImage(target, binary);
     const scoped = await this.scope(sessionId, root);
     const real = this.resolveInside(scoped, path, true);
     // Root lookup can wait on the adapter index; the switch may have gone off meanwhile.

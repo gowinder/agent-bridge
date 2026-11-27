@@ -2,7 +2,7 @@
 
 Agent Bridge is an open-source, self-hosted bridge that lets you read and reply to the coding-agent sessions running on your Mac from a phone or any browser, and start new ones in its hosted entry. It is for people who already drive Claude Code, Codex, pi, Antigravity or DeepSeek Harness on a Mac and want that same work reachable from another device without opening a port.
 
-Answers below are for the current release, **0.11.10** (2026-11-23), with the pre-release **0.11.11-rc.1** (2026-11-26) called out where it changes something. Facts and mechanisms: [README.md](README.md). Protocol-level detail: [docs/GUIDE.md](docs/GUIDE.md).
+Answers below are for the current release, **0.11.10** (2026-11-23), with the pre-release **0.11.14-rc.1** (2026-11-27) called out where it changes something. Facts and mechanisms: [README.md](README.md). Protocol-level detail: [docs/GUIDE.md](docs/GUIDE.md).
 
 ## Contents
 
@@ -45,7 +45,7 @@ The behavioural difference that matters: input sent into an already-existing des
 
 For the `codex` adapter: yes. It needs the ChatGPT app running (`~/.codex/ipc/ipc.sock`) and can only drive the thread that is currently open in the Codex panel. Native ChatGPT Chat and Work threads are not part of that channel.
 
-For the **Codex · App Server** hosted engine: no. Bridge spawns `codex app-server --listen stdio://` itself and speaks the official Codex JSON-RPC protocol over stdio. It writes one thread per session into `~/.codex/sessions`, resumes it with `thread/resume` after a restart, and defaults to sandbox `workspace-write` with approval `on-request`. This engine exists only in the pre-release **0.11.11-rc.1**; the 0.11.10 release hosts Claude Code and pi.
+For the **Codex · App Server** hosted engine: no. Bridge spawns `codex app-server --listen stdio://` itself and speaks the official Codex JSON-RPC protocol over stdio. It writes one thread per session into `~/.codex/sessions`, resumes it with `thread/resume` after a restart, and defaults to sandbox `workspace-write` with approval `on-request`. This engine exists only in the pre-release line (**0.11.11-rc.1** onwards); the 0.11.10 release hosts Claude Code and pi.
 
 ## Which agents and clients are supported? Can another AI connect over MCP?
 

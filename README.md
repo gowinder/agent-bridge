@@ -7,12 +7,12 @@ The Mac dials out to a relay. **Nothing listens on an inbound port**, no tunnel 
 | Fact | Value |
 | --- | --- |
 | Latest release | **0.11.10** (2026-11-23) |
-| Pre-release | **0.11.11-rc.1** (2026-11-26) — adds the Codex · App Server hosted engine |
+| Pre-release | **0.11.14-rc.1** (2026-11-27) — Codex · App Server hosted engine, desktop-thread takeover |
 | Host platform | macOS 13 or newer, Apple Silicon and Intel in one universal build |
 | Download | [AgentBridge.dmg](https://github.com/gowinder/agent-bridge/releases/latest/download/AgentBridge.dmg), ≈ 89 MB |
 | Interface languages | 8 — 中文 (source), English, 日本語, 한국어, Español, Français, Deutsch, Português |
 | Agent entries | 9 — 8 adapters that mirror sessions already on the Mac, plus 1 hosted entry that starts the agent itself |
-| Hosted engines | 3 — Claude Code, pi, Codex · App Server (the last one only in 0.11.11-rc.1) |
+| Hosted engines | 3 — Claude Code, pi, Codex · App Server (the last one is pre-release only) |
 | MCP server | 9 tools over stdio, Node 22 or newer |
 | License | MIT |
 
@@ -104,7 +104,7 @@ The `hosted` entry starts one process per session and keeps its stdin, which is 
 | --- | --- | --- | --- |
 | Claude Code | all 0.11.x releases | `claude -p --input-format stream-json --output-format stream-json --permission-prompts host` | Default engine |
 | pi | 0.8.0 or later | `pi --mode rpc --session-id <id> --approve` | Resumes by session file after a `/new` |
-| Codex · App Server | **0.11.11-rc.1 (pre-release)** | `codex app-server --listen stdio://` | Official Codex protocol over stdio JSON-RPC; the desktop app does not need to run; sandbox `workspace-write`, approval `on-request`; one thread per session in `~/.codex/sessions`, resumed with `thread/resume` |
+| Codex · App Server | **0.11.11-rc.1 onwards (pre-release)** | `codex app-server --listen stdio://` | Official Codex protocol over stdio JSON-RPC; the desktop app does not need to run; sandbox `workspace-write`, approval `on-request`; one thread per session in `~/.codex/sessions`, resumed with `thread/resume` |
 
 ## Install
 
@@ -193,7 +193,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
        --permission-prompt-tool stdio [--session-id|--resume] [--model]
 ```
 
-pi runs `pi --mode rpc --session-id <id> --approve` and asks its questions over the RPC channel. Codex · App Server (0.11.11-rc.1) runs `codex app-server --listen stdio://`, streams turns, tool activity and protocol-level approvals into the web client, and resumes the same thread with `thread/resume` after a restart. All three write their own transcripts; the bridge keeps its records alongside them.
+pi runs `pi --mode rpc --session-id <id> --approve` and asks its questions over the RPC channel. Codex · App Server (0.11.11-rc.1 onwards) runs `codex app-server --listen stdio://`, streams turns, tool activity and protocol-level approvals into the web client, and resumes the same thread with `thread/resume` after a restart. All three write their own transcripts; the bridge keeps its records alongside them.
 
 Create the allowlist first (`~/Library/Application Support/AgentBridge/hosted.json`, or `$AGENT_BRIDGE_HOME/hosted.json`):
 
@@ -342,7 +342,7 @@ Everything else — relay metadata, approvals, MCP, languages, licensing — is 
 These are properties of the design, not bugs to work around:
 
 - **Remote approval of a desktop or CLI session is unreliable by nature.** Messages injected into a Claude Desktop, Claude Code CLI or Codex desktop session arrive as peer / cross-session input, so the agent may refuse to treat your "approve" as the user's own decision. Use a hosted session when the workflow needs real approvals from the phone, or do the final step on the Mac. See `REMOTE_APPROVAL.zh-CN.md`.
-- **Browser-created sessions cover the hosted entry and DeepSeek Harness only.** Every other adapter attaches to sessions that already exist on the Mac. Within the hosted entry, only Claude Code and pi ship in the 0.11.x releases; **Codex · App Server is pre-release only (0.11.11-rc.1)**.
+- **Browser-created sessions cover the hosted entry and DeepSeek Harness only.** Every other adapter attaches to sessions that already exist on the Mac. Within the hosted entry, only Claude Code and pi ship in the 0.11.x releases; **Codex · App Server is pre-release only (from 0.11.11-rc.1)**.
 - **`codex-cli` and `pi` non-interactive resumes inherit their own config.** Anything that needs an interactive approval in that mode is refused.
 - **Antigravity Desktop is read-only.**
 - **`session.subscribe`, `session.unsubscribe`, `sync.resume`, `operation.get`, `turn.cancel` and `approval.respond` are declared in the protocol but not dispatched** by the bridge yet. The UI polls instead of subscribing to server-pushed events; only `shell.output` is emitted as a real event, and approval buttons are sent as ordinary messages.

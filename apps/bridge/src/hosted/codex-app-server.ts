@@ -7,6 +7,16 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** turn/interrupt 的回执上限：停止流程不能在这里挂住。 */
 const INTERRUPT_TIMEOUT_MS = 5_000;
 const MAX_TOOL_CHARS = 300;
+/** 接管线程时读历史的分页口径：每页回合数、最多翻几页（防止超长线程把启动卡住）。 */
+const HISTORY_PAGE_SIZE = 50;
+const MAX_HISTORY_PAGES = 4;
+
+/** 从 codex 读回来的一条历史消息（messageId / sessionId 由 manager 补）。 */
+export interface CodexHistoryMessage {
+  role: "user" | "assistant";
+  blocks: MessageBlock[];
+  createdAt: number;
+}
 
 /** 会话能用的 sandbox 档位；v1 固定 workspace-write，和现有引擎的默认口径一致。 */
 export type CodexSandbox = "read-only" | "workspace-write" | "danger-full-access";
@@ -124,6 +134,38 @@ export class CodexAppServer {
       ...(input.developerInstructions ? { developerInstructions: input.developerInstructions } : {}),
       ...(input.model ? { model: input.model } : {}),
     });
+  }
+
+  /**
+   * 接管来的线程：把 codex 自己记的历史读回来，否则网页上只有接管之后的消息。
+   * 走 `thread/turns/list`（asc 分页，itemsView=full），最多翻 MAX_HISTORY_PAGES 页。
+   */
+  async history(
+    threadId: string,
+    limit = HISTORY_PAGE_SIZE,
+  ): Promise<CodexHistoryMessage[]> {
+    const messages: CodexHistoryMessage[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+      const record = await this.call("thread/turns/list", {
+        threadId,
+        limit,
+        sortDirection: "asc",
+        itemsView: "full",
+        ...(cursor ? { cursor } : {}),
+      });
+      if (record["error"] !== undefined) {
+        this.handlers.log(`codex: 读历史失败：${reasonOf(record)}`);
+        break;
+      }
+      const result = resultOf(record);
+      const turns = Array.isArray(result["data"]) ? result["data"] : [];
+      for (const turn of turns) messages.push(...historyOfTurn(turn));
+      const next = typeof result["nextCursor"] === "string" ? result["nextCursor"] : "";
+      if (!next || turns.length === 0) break;
+      cursor = next;
+    }
+    return messages;
   }
 
   /** 发一轮用户消息。已经在跑的时候 codex 会拒绝，由调用方决定排队还是报错。 */
@@ -316,6 +358,8 @@ export class CodexAppServer {
       if (text) this.handlers.assistant([{ type: "text", text }]);
       return;
     }
+    const image = imageMarkdownOf(item);
+    if (image) this.handlers.assistant([{ type: "text", text: image }]);
     const block = toolBlockOf(item);
     if (block) this.handlers.assistant([block]);
   }
@@ -456,17 +500,24 @@ function approvalResult(pending: CodexApproval, accept: boolean): Record<string,
   return { decision: accept ? "accept" : "decline" };
 }
 
+/**
+ * 上下文用量只认 `last`（本回合快照）：`total` 是整条线程所有回合的累加，
+ * 拿它除以上下文窗口会直接顶到 100%（接管一条长线程时就是 28M / 475k）。
+ * 另外 `inputTokens` 本身已经包含缓存命中，再加 `cachedInputTokens` 是重复计数。
+ */
 function contextOf(usage: Record<string, unknown>): ContextUsage | undefined {
+  const snapshot = isRecord(usage["last"]) ? usage["last"] : {};
   const total = isRecord(usage["total"]) ? usage["total"] : {};
-  const count = (key: string): number => {
-    const value = total[key];
+  const pick = (source: Record<string, unknown>, key: string): number => {
+    const value = source[key];
     return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.round(value) : 0;
   };
-  const input = count("inputTokens");
-  const cacheRead = count("cachedInputTokens");
-  const cacheWrite = count("cacheWriteInputTokens");
-  const output = count("outputTokens");
-  const used = input + cacheRead + cacheWrite;
+  const last = Object.keys(snapshot).length > 0 ? snapshot : total;
+  const input = pick(last, "inputTokens");
+  const cacheRead = pick(last, "cachedInputTokens");
+  const cacheWrite = pick(last, "cacheWriteInputTokens");
+  const output = pick(last, "outputTokens");
+  const used = input > 0 ? input : cacheRead + cacheWrite;
   if (used <= 0) return undefined;
   const window = typeof usage["modelContextWindow"] === "number" ? Math.round(usage["modelContextWindow"]) : 0;
   return {
@@ -474,12 +525,74 @@ function contextOf(usage: Record<string, unknown>): ContextUsage | undefined {
     windowTokens: window > 0 ? window : 200_000,
     ...(window > 0 ? {} : { windowEstimated: true }),
     details: [
-      { label: "输入", value: input.toLocaleString("en-US") },
+      { label: "输入（含缓存）", value: used.toLocaleString("en-US") },
       { label: "缓存读", value: cacheRead.toLocaleString("en-US") },
       { label: "缓存写", value: cacheWrite.toLocaleString("en-US") },
       { label: "输出", value: output.toLocaleString("en-US") },
     ],
   };
+}
+
+/** 一条历史回合 → 网页上的消息：用户输入一条，助手文本与工具活动各一条。 */
+function historyOfTurn(turn: unknown): CodexHistoryMessage[] {
+  const record = isRecord(turn) ? turn : {};
+  const items = Array.isArray(record["items"]) ? record["items"] : [];
+  const out: CodexHistoryMessage[] = [];
+  for (const entry of items) {
+    const item = isRecord(entry) ? entry : {};
+    const at = typeof item["startedAtMs"] === "number" ? item["startedAtMs"] : Date.now();
+    const type = textOf(item["type"]);
+    if (type === "userMessage") {
+      const text = userTextOf(item["content"]);
+      if (text) out.push({ role: "user", blocks: [{ type: "text", text }], createdAt: at });
+      continue;
+    }
+    if (type === "agentMessage") {
+      const text = textOf(item["text"]).trim();
+      if (text) out.push({ role: "assistant", blocks: [{ type: "text", text }], createdAt: at });
+      continue;
+    }
+    const image = imageMarkdownOf(item);
+    if (image) out.push({ role: "assistant", blocks: [{ type: "text", text: image }], createdAt: at });
+    const block = toolBlockOf(item);
+    if (block) out.push({ role: "assistant", blocks: [block], createdAt: at });
+  }
+  return out;
+}
+
+/**
+ * codex 生成的图片：`imageGeneration` 带 `savedPath`（图片落在 ~/.codex/generated_images），
+ * `imageView` 带 `path`。网页按 markdown 图片渲染（缩略图 + 点开预览 + 下载原文件）。
+ */
+function imageMarkdownOf(item: Record<string, unknown>): string {
+  const type = textOf(item["type"]);
+  if (type !== "imageGeneration" && type !== "imageView") return "";
+  const raw = textOf(item["savedPath"]) || textOf(item["result"]) || textOf(item["path"]);
+  if (!raw) return "";
+  let path = raw;
+  if (/^file:\/\//i.test(path)) {
+    try {
+      path = decodeURIComponent(new URL(path).pathname);
+    } catch {
+      return "";
+    }
+  }
+  if (!/^\/(?:[^\0]+)\.(png|jpe?g|gif|webp|avif|bmp)$/i.test(path)) return "";
+  const label = path.split("/").pop() ?? "image";
+  void label;
+  // 路径里有空格或括号时用尖括号包起来，markdown 才不会截断。
+  const target = /[\s()<>]/.test(path) ? `<${path}>` : path;
+  return `![](${target})`;
+}
+
+/** 用户输入的 content 数组里只取文本；图片、音频这类历史里不展开。 */
+function userTextOf(content: unknown): string {
+  const list = Array.isArray(content) ? content : [];
+  return list
+    .map((entry) => (isRecord(entry) && entry["type"] === "text" ? textOf(entry["text"]) : ""))
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
 }
 
 /** 会当工具活动呈现的 item 类型；其余（userMessage、reasoning、plan…）不该画成工具。 */

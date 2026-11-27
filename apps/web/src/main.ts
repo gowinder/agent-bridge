@@ -5491,6 +5491,107 @@ interface ChatState {
   rail?: RailState;
 }
 
+/**
+ * 接管前的确认页：讲清楚「谁在持有这条线程」和「桌面那边会看到什么」，
+ * 再给一条官方文档。用户反馈接管后桌面显示「对话已被接管」，得先说明白。
+ */
+function takeoverSheet(session: SessionSummary, onConfirm: () => void): void {
+  const mask = el("div", { className: "sheet-mask", attrs: { role: "presentation" } });
+  const finish = (): void => {
+    document.removeEventListener("keydown", onKey);
+    mask.remove();
+  };
+  const onKey = (event: KeyboardEvent): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      finish();
+    }
+  };
+  const cancel = button(tr("取消"), finish, "btn ghost");
+  const confirm = button(
+    tr("确认接管"),
+    () => {
+      finish();
+      onConfirm();
+    },
+    "btn primary",
+  );
+  mask.append(
+    el(
+      "aside",
+      {
+        className: "sheet",
+        attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("用 App Server 接管这条线程") },
+      },
+      [
+        el("header", { className: "sheet-head" }, [
+          el("h2", { className: "sheet-title", text: tr("用 App Server 接管这条线程") }),
+        ]),
+        el("p", {
+          className: "sheet-note",
+          text: tr("接管后由这台 Mac 上的 Bridge 起一个 codex app-server 进程，接着这条线程跑：网页里能发消息、看回复，历史从 codex 自己的记录里读出来。"),
+        }),
+        el("p", {
+          className: "sheet-note",
+          text: tr("同一条线程同一时刻只能有一个进程持有：接管之后 ChatGPT 桌面会显示「对话已被接管」，要回桌面接着用，先在网页里停掉这个会话；反过来，桌面正在跑这条线程时，这边也发不进去。"),
+        }),
+        el("p", {
+          className: "sheet-note",
+          text: tr("接管不改桌面里的线程本身，历史、标题都还在，只是换一个客户端来驱动它。"),
+        }),
+        el("p", { className: "sheet-note" }, [
+          el("a", {
+            attrs: { href: "https://developers.openai.com/codex/app-server", target: "_blank", rel: "noopener noreferrer" },
+            text: tr("官方说明：Codex App Server"),
+          }),
+        ]),
+        el("footer", { className: "sheet-foot" }, [el("div", { className: "actions" }, [cancel, confirm])]),
+      ],
+    ),
+  );
+  document.addEventListener("keydown", onKey);
+  mask.addEventListener("click", (event) => {
+    if (event.target === mask) finish();
+  });
+  document.body.append(mask);
+  confirm.focus();
+}
+
+/**
+ * Codex 桌面线程发不出去（这个版本的 ChatGPT 桌面已经移除本地 IPC）时，用官方 app-server
+ * 接管同一条线程：带上 threadId 去工程页预填新建表单，建完由 Bridge 自己驱动这一条线程。
+ */
+async function takeoverCodexThread(session: SessionSummary, trigger?: HTMLButtonElement): Promise<void> {
+  const cwd = snapshot?.projects.find((item) => item.projectId === session.projectId)?.cwd;
+  if (!cwd) {
+    flashNotice(tr("找不到这条线程的工程目录，无法接管"));
+    return;
+  }
+  const threadId = session.sessionId.slice(session.sessionId.indexOf(":") + 1);
+  if (trigger) trigger.disabled = true;
+  try {
+    const result = await call<SessionGetResult>(
+      "hosted.create",
+      { path: cwd, agent: "codex-appserver", threadId, title: session.title },
+      30_000,
+    );
+    // 聊天页读缓存快照，新会话得先进快照，否则跳过去会报「找不到这个会话」。
+    if (snapshot && !snapshot.sessions.some((item) => item.sessionId === result.session.sessionId)) {
+      snapshot = { ...snapshot, sessions: [result.session, ...snapshot.sessions] };
+    }
+    navigate({
+      level: "chat",
+      appId: "hosted",
+      projectId: result.session.projectId,
+      sessionId: result.session.sessionId,
+    });
+  } catch (error) {
+    flashNotice(tr(`接管失败：{0}`, messageOf(error)));
+  } finally {
+    if (trigger) trigger.disabled = false;
+  }
+}
+
 async function renderChat(route: Route & { level: "chat" }, token: number): Promise<void> {
   const data = snapshot!;
   const summary = data.sessions.find((item) => item.sessionId === route.sessionId);
@@ -5928,10 +6029,27 @@ async function renderChat(route: Route & { level: "chat" }, token: number): Prom
   const restore = button("", () => setCollapsed(false, true), "composer-restore");
   restore.append(icon("pencil"), el("span", { text: tr("写消息…") }));
 
+  // Codex 桌面线程现在只能用 app-server 接管着发：把入口放在输入框上面，别只留一句报错。
+  const composerNotice =
+    canSend || summary.kind !== "codex-thread"
+      ? null
+      : el("div", { className: "composer-blocked" }, [
+          el("span", {
+            className: "composer-blocked-text",
+            text: tr("这个版本的 ChatGPT 桌面没有可用的发送通道。"),
+          }),
+          (() => {
+            const node = button(tr("用 App Server 接管这个线程"), () => {}, "btn small");
+            node.addEventListener("click", () => takeoverSheet(summary, () => void takeoverCodexThread(summary, node)));
+            return node;
+          })(),
+        ]);
+
   const composer = el("form", { className: "composer" }, [
     attachList,
     fileInput,
     slashMenu,
+    ...(composerNotice ? [composerNotice] : []),
     el("div", { className: "composer-row" }, [
       attachButton,
       quickButton,
