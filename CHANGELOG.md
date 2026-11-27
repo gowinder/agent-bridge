@@ -4,6 +4,20 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- 用 App Server 接管 Codex 桌面线程后会看不到历史：现在接管时从 `thread/turns/list` 把 codex
+  自己记的回合读回来写进 Bridge 转录，用户提问、助手回复、工具活动都在，翻页加载历史也正常。
+- Codex 托管会话的上下文用量显示成 100%（例如 28.0M / 475k）：之前拿整条线程的累计用量
+  除上下文窗口，还把已经包含在输入里的缓存读又加了一遍。现在只认本回合快照 `last`，
+  用量按 `inputTokens` 算。
+
+### Changed
+
+- 「用 App Server 接管这个线程」先弹确认页：说明接管后由 Bridge 独占这条线程、ChatGPT 桌面
+  会显示「对话已被接管」、要回桌面得先在网页里停掉这个会话，并给出官方文档链接
+  （developers.openai.com/codex/app-server）。
+
 ## [0.11.12-rc.1] - 2026-11-26
 
 ### Added

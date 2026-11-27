@@ -66,6 +66,7 @@ import {
   CodexAppServer,
   type CodexApproval,
   type CodexApprovalPolicy,
+  type CodexHistoryMessage,
   type CodexSandbox,
 } from "./codex-app-server.js";
 import { MAX_PI_TASKS, piSubagentRunning, piSubagentRunnerPids, piSubagentTasks } from "./pi-subagents.js";
@@ -2262,8 +2263,36 @@ export class HostedSessionManager {
       void this.teardown(record.id);
       return;
     }
+    // 接管来的线程：Bridge 这边还没有转录，把 codex 自己记的历史折进来，否则网页只有之后的消息。
+    if (target) await this.importCodexHistory(record, codex, target);
     // 新建的线程按会话标题命名；续上的线程保留它自己（可能被桌面 app 改过）的名字。
     if (!target && record.title !== "托管会话") void this.syncCodexTitle(record, live);
+  }
+
+  /**
+   * 接管一条已经有历史的线程时，把 codex 自己的回合读回来写进 Bridge 转录。
+   * 只在转录为空时补：Bridge 自己跑过的会话重连时已经有转录，再补就重复了。
+   */
+  private async importCodexHistory(record: HostedRecord, codex: CodexAppServer, threadId: string): Promise<void> {
+    if (this.messagesOf(record.id).length > 0) return;
+    let history: CodexHistoryMessage[] = [];
+    try {
+      history = await codex.history(threadId);
+    } catch (error) {
+      this.log(`hosted ${record.id} codex 历史读取失败：${String(error)}`);
+      return;
+    }
+    if (history.length === 0) return;
+    for (const entry of history) {
+      this.appendRecord(record, {
+        messageId: randomUUID(),
+        sessionId: record.id,
+        role: entry.role,
+        createdAt: entry.createdAt,
+        blocks: entry.blocks,
+      });
+    }
+    this.log(`hosted ${record.id} codex 历史已导入 ${history.length} 条`);
   }
 
   /** 把会话标题同步给 codex，桌面 app 的会话列表里也能按这个名字找到。 */
