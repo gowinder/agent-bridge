@@ -1625,6 +1625,102 @@ async function setSessionArchived(session: SessionSummary, archived: boolean): P
   }
 }
 
+/** 批量归档的时间档位：选中后归档「最后更新早于」该时间点的托管会话。 */
+const BATCH_ARCHIVE_AGES: Array<{ hours: number; label: string }> = [
+  { hours: 24, label: "24 小时前" },
+  { hours: 24 * 3, label: "3 天前" },
+  { hours: 24 * 7, label: "1 周前" },
+  { hours: 24 * 14, label: "2 周前" },
+  { hours: 24 * 30, label: "1 个月前" },
+];
+
+/** 批量归档前的清单确认：逐条列出要归档的会话，点「确认归档」才动手。 */
+function confirmBatchArchive(sessions: SessionSummary[], label: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (confirmed: boolean): void => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("keydown", onKey);
+      mask.remove();
+      resolve(confirmed);
+    };
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      finish(false);
+    };
+    const list = el("ul", { className: "batch-archive-list" });
+    for (const session of sessions) {
+      list.append(
+        el("li", { className: "batch-archive-item" }, [
+          el("span", { className: "batch-archive-title", text: session.title }),
+          el("span", { className: "batch-archive-meta", text: timeLabel(session.updatedAt) }),
+        ]),
+      );
+    }
+    const mask = el("div", { className: "modal-mask", attrs: { role: "presentation" } }, [
+      el(
+        "div",
+        {
+          className: "modal batch-archive-modal",
+          attrs: { role: "dialog", "aria-modal": "true", "aria-label": tr("批量归档会话") },
+        },
+        [
+          el("h2", { className: "modal-title", text: tr("批量归档会话") }),
+          el("p", {
+            className: "batch-archive-lead",
+            text: tr(`将归档 {0} 个托管会话（最后更新早于{1}）：`, sessions.length, tr(label)),
+          }),
+          list,
+          el("p", { className: "batch-archive-hint", text: tr("归档后默认从列表里隐藏，可在「显示已归档」里找回。") }),
+          el("footer", { className: "modal-foot" }, [
+            button(tr("取消"), () => finish(false), "btn ghost small"),
+            button(tr("确认归档"), () => finish(true), "btn small danger"),
+          ]),
+        ],
+      ),
+    ]);
+    document.addEventListener("keydown", onKey);
+    mask.addEventListener("click", (event) => {
+      if (event.target === mask) finish(false);
+    });
+    document.body.append(mask);
+  });
+}
+
+/** 批量归档：只动 Bridge 托管的会话，桌面会话仍要在原应用里归档。 */
+async function archiveSessionsBefore(sessions: SessionSummary[], age: { hours: number; label: string }): Promise<void> {
+  const cutoff = Date.now() - age.hours * 3_600_000;
+  const targets = sortSessions(
+    sessions.filter(
+      (session) => session.hosted === true && !session.archived && session.updatedAt > 0 && session.updatedAt < cutoff,
+    ),
+  );
+  if (targets.length === 0) {
+    flashNotice(tr(`没有最后更新早于{0}的托管会话可归档`, tr(age.label)));
+    return;
+  }
+  if (!(await confirmBatchArchive(targets, age.label))) return;
+  let archived = 0;
+  const failed: string[] = [];
+  for (const session of targets) {
+    try {
+      const result = await call<SessionGetResult>("hosted.archive", { sessionId: session.sessionId, archived: true });
+      patchSession(result.session);
+      archived += 1;
+    } catch (error) {
+      failed.push(`${session.title}：${messageOf(error)}`);
+    }
+  }
+  await renderRoute();
+  if (failed.length === 0) {
+    flashNotice(tr(`已归档 {0} 个会话`, archived));
+    return;
+  }
+  flashNotice(tr(`已归档 {0} 个，{1} 个失败：{2}`, archived, failed.length, failed.join("；")));
+}
+
 async function deleteHostedSession(session: SessionSummary): Promise<void> {
   if (!window.confirm(tr(`删除「{0}」？进程会停掉，Bridge 这边的聊天记录也会删掉，无法恢复。`, session.title))) return;
   try {
@@ -4442,6 +4538,60 @@ function renderSessions(route: Route & { level: "sessions" }): void {
   const archivedCount = projectSessions.filter((session) => session.archived).length;
   const sessions = visibleSessions(projectSessions, showArchived);
   const createDetail = appInfo && !appInfo.capabilities.create ? appInfo.capabilities.createDetail : undefined;
+  // 批量归档只覆盖 Bridge 托管的会话：桌面会话的归档状态由原应用自己管。
+  const batchArchivable = projectSessions.filter((session) => session.hosted === true && !session.archived).length;
+  const batchArchiveButton = (): HTMLElement => {
+    const trigger = el("button", {
+      className: "btn ghost small batch-archive-btn",
+      attrs: {
+        type: "button",
+        "aria-haspopup": "menu",
+        "aria-expanded": "false",
+        "aria-label": tr("批量归档"),
+      },
+    });
+    trigger.append(icon("archive"), el("span", { text: tr("批量归档") }));
+    const menu = el("div", { className: "batch-menu", attrs: { role: "menu" } });
+    menu.hidden = true;
+    menu.append(el("p", { className: "batch-menu-title", text: tr("归档更早的会话") }));
+    for (const age of BATCH_ARCHIVE_AGES) {
+      const item = el("button", {
+        className: "batch-menu-item",
+        attrs: { type: "button", role: "menuitem" },
+        text: tr(age.label),
+      });
+      item.addEventListener("click", () => {
+        close();
+        void archiveSessionsBefore(projectSessions, age);
+      });
+      menu.append(item);
+    }
+    const wrap = el("div", { className: "batch-archive-wrap" }, [trigger, menu]);
+    function close(): void {
+      if (menu.hidden) return;
+      menu.hidden = true;
+      trigger.setAttribute("aria-expanded", "false");
+      document.removeEventListener("click", onOutside);
+    }
+    function onOutside(event: MouseEvent): void {
+      if (!wrap.isConnected) {
+        document.removeEventListener("click", onOutside);
+        return;
+      }
+      if (event.target instanceof Node && wrap.contains(event.target)) return;
+      close();
+    }
+    trigger.addEventListener("click", () => {
+      if (!menu.hidden) {
+        close();
+        return;
+      }
+      menu.hidden = false;
+      trigger.setAttribute("aria-expanded", "true");
+      document.addEventListener("click", onOutside);
+    });
+    return wrap;
+  };
   const isHosted = appInfo?.appId === "hosted";
   const canCreateHosted = isHosted && appInfo?.capabilities.create === true && Boolean(project?.cwd);
   // 桌面客户端（例如 dsh）也能从网页新建：Bridge 代它起一次无界面运行，第一条消息随创建发出。
@@ -4601,6 +4751,7 @@ function renderSessions(route: Route & { level: "sessions" }): void {
               : tr(`{0} 个会话 · 置顶在前，其余按最近更新{1}`, sessions.length, createDetail ? tr(" · 无法新建对话") : ""),
           }),
         ]),
+        ...(batchArchivable > 0 ? [batchArchiveButton()] : []),
         ...(archivedCount > 0
           ? [
               button(
